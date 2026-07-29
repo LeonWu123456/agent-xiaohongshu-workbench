@@ -23,7 +23,9 @@
     "setup": "node scripts/verify-runtime.mjs",
     "verify:runtime": "node scripts/verify-runtime.mjs",
     "make:desktop-icon": "node scripts/make-desktop-icon.mjs",
-    "package:win": "npm run build && npm run make:desktop-icon && electron-builder --win nsis --publish never"
+    "make:mac-icon": "node scripts/make-mac-icon.mjs",
+    "package:win": "npm run build && npm run make:desktop-icon && electron-builder --win nsis --publish never",
+    "package:mac:arm64": "npm run build && npm run make:mac-icon && electron-builder --mac dmg zip --arm64 --publish never"
   },
   "dependencies": {
     "@jackwener/opencli": "1.8.6",
@@ -76,6 +78,26 @@
       ],
       "icon": "build/icon.ico",
       "artifactName": "Agent-XHS-Workbench-Setup-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "identity": null,
+      "category": "public.app-category.productivity",
+      "artifactName": "Agent-XHS-Workbench-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
