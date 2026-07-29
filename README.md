@@ -99,6 +99,21 @@ Windows x64 用户可从 [GitHub Releases](https://github.com/EthanYoQ/agent-xia
 
 安装包不包含 Codex CLI、Chrome、Browser Bridge 或小红书登录态；首次运行前仍须完成下方的前置条件。需要从源码自行构建时，运行 `npm run package:win`。
 
+### macOS Apple Silicon 适配验证包
+
+仓库提供仅手动触发的 GitHub Actions 工作流 [Build macOS Apple Silicon qualification package](../../actions/workflows/build-macos-arm64.yml)，在 GitHub 官方 `macos-14` ARM64 runner 上构建 M 系列芯片可用的 `.dmg` 与 `.zip`。构建完成后，从对应 Actions run 的 `macos-arm64-unsigned-qualification` artifact 下载。
+
+这是**未签名、未公证的兼容性验证包**，不是 GitHub Release，也不承诺可公开分发、自动更新或绕过 Gatekeeper。首次打开时 macOS 可能提示来源不明；仅应由测试者在理解该限制后使用。正式面向用户分发前，需要单独配置 Apple Developer ID 签名和 notarization。
+
+在自己的 Mac 上可运行：
+
+```bash
+npm ci
+npm run package:mac:arm64
+```
+
+该命令必须在 macOS 中执行，因为 `.icns` 图标由 macOS 的 `iconutil` 生成；Windows 开发机无需、也不应尝试本地交叉打包。
+
 ### 1. 准备前置条件
 
 - Node.js `>= 22.13`
@@ -203,6 +218,7 @@ npm test
 npm run build
 npm run build:share
 npm run package:win
+npm run package:mac:arm64 # 仅 macOS；GitHub Actions 会在 macos-14 ARM64 runner 上执行
 ```
 
 ## 开源许可
