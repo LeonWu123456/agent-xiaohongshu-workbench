@@ -378,12 +378,18 @@ app.put("/api/direct-ai/config", async (request, response) => {
 
 app.post("/api/direct-ai/test-image", async (request, response) => {
   try { response.status(201).json(await directAi.testImage(request.body?.prompt)); }
-  catch (error) { response.status(error.code === "AI_KEY_MISSING" ? 409 : 502).json({ error: error.message || "测试生图失败", code: error.code || "IMAGE_TEST_FAILED" }); }
+  catch (error) {
+    const status = error.code === "AI_KEY_MISSING" ? 409 : Number(error.status) >= 400 && Number(error.status) < 600 ? Number(error.status) : 502;
+    response.status(status).json({ error: error.message || "测试生图失败", code: error.code || "IMAGE_TEST_FAILED" });
+  }
 });
 
 app.post("/api/direct-ai/quick-create", async (request, response) => {
   try { response.status(201).json(await directAi.quickCreate({ topic: request.body?.topic, imageCount: request.body?.imageCount })); }
-  catch (error) { response.status(error.code === "AI_KEY_MISSING" ? 409 : 502).json({ error: error.message || "直接创作失败", code: error.code || "DIRECT_CREATE_FAILED" }); }
+  catch (error) {
+    const status = error.code === "AI_KEY_MISSING" ? 409 : Number(error.status) >= 400 && Number(error.status) < 600 ? Number(error.status) : 502;
+    response.status(status).json({ error: error.message || "直接创作失败", code: error.code || "DIRECT_CREATE_FAILED" });
+  }
 });
 
 app.get("/api/jobs/:id", async (request, response) => {
