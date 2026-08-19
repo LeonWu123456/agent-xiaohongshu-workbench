@@ -19,6 +19,9 @@ import { createDirectArk } from "./direct-ark.mjs";
 const execAsync = promisify(exec);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeRoot = process.env.AGENT_XHS_RUNTIME_DIR ? path.resolve(process.env.AGENT_XHS_RUNTIME_DIR) : root;
+const canonicalStudioDist = process.env.XIAOSHIMEI_CANONICAL_DIST
+  ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_DIST)
+  : "/Users/a1-6/MeSy-Workspace/.mesy/runtime/xiaoshimei-studio/dist";
 const dataDir = path.join(runtimeRoot, ".data");
 const statePath = path.join(dataDir, "workspace.json");
 const generatedDir = path.join(runtimeRoot, "public", "generated");
@@ -716,8 +719,9 @@ app.use((error, _request, response, next) => {
 });
 
 if (isProduction) {
-  app.use(express.static(path.join(root, "dist")));
-  app.get("/{*splat}", (_request, response) => response.sendFile(path.join(root, "dist", "index.html")));
+  const uiRoot = canonicalStudioDist;
+  app.use(express.static(uiRoot));
+  app.get("/{*splat}", (_request, response) => response.sendFile(path.join(uiRoot, "index.html")));
 } else {
   const vite = await createViteServer({ root, server: { middlewareMode: true }, appType: "spa" });
   app.use(vite.middlewares);
