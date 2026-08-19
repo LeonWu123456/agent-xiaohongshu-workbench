@@ -14,6 +14,7 @@ import { CARD_RENDERER_VERSION } from "./render-cards.mjs";
 import { applyDraftEdit, archiveManuallyPublishedStoryline, editTopic, emptyCopyVersions, emptyStoryline, resetProductionAfterBrandChange, resetProductionAfterTopic, resolveTopicChange, selectTopic, setGenerationImageCount, storylineContext } from "./workspace-editor.mjs";
 import { isVerifiedViralSignal } from "./viral-filter.mjs";
 import { readImageDrafts } from "./xhs-draft-verifier.mjs";
+import { createDirectAi } from "./direct-ai.mjs";
 
 const execAsync = promisify(exec);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -186,6 +187,7 @@ const stateStore = {
 };
 
 const runner = new AgentRunner({ root, runtimeRoot, stateStore });
+const directAi = createDirectAi({ runtimeRoot });
 await runner.initialize();
 await stateStore.read();
 await runner.ensureCurrentRenderer();
@@ -349,6 +351,39 @@ app.get("/api/status", async (_request, response) => {
     toolProbe("opencli --version"),
   ]);
   response.json({ codex, opencli, activeJobId: runner.activeJobId });
+});
+
+app.get("/api/direct-ai/status", async (_request, response) => {
+  try { response.json(await directAi.status()); }
+  catch (error) { response.status(500).json({ error: error.message || "AI 状态读取失败" }); }
+});
+
+app.put("/api/direct-ai/key", async (request, response) => {
+  try {
+    await directAi.storeOpenAiKey(request.body?.apiKey);
+    response.json(await directAi.status());
+  } catch (error) {
+    response.status(400).json({ error: error.message || "API Key 保存失败", code: error.code || null });
+  }
+});
+
+app.put("/api/direct-ai/config", async (request, response) => {
+  try {
+    await directAi.writeConfig(request.body || {});
+    response.json(await directAi.status());
+  } catch (error) {
+    response.status(400).json({ error: error.message || "AI 配置保存失败" });
+  }
+});
+
+app.post("/api/direct-ai/test-image", async (request, response) => {
+  try { response.status(201).json(await directAi.testImage(request.body?.prompt)); }
+  catch (error) { response.status(error.code === "AI_KEY_MISSING" ? 409 : 502).json({ error: error.message || "测试生图失败", code: error.code || "IMAGE_TEST_FAILED" }); }
+});
+
+app.post("/api/direct-ai/quick-create", async (request, response) => {
+  try { response.status(201).json(await directAi.quickCreate({ topic: request.body?.topic, imageCount: request.body?.imageCount })); }
+  catch (error) { response.status(error.code === "AI_KEY_MISSING" ? 409 : 502).json({ error: error.message || "直接创作失败", code: error.code || "DIRECT_CREATE_FAILED" }); }
 });
 
 app.get("/api/jobs/:id", async (request, response) => {

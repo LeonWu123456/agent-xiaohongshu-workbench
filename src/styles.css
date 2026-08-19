@@ -479,3 +479,59 @@ h3 { margin-bottom: 0; font-size: 16px; line-height: 1.4; }
   .publish-button { width: 100%; }
   .asset-grid { grid-template-columns: repeat(3, minmax(92px, 1fr)); overflow-x: auto; }
 }
+
+/* Xiaoshimei direct-create layer: ChatGPT-like warm shell */
+.direct-create-shell { max-width: 1500px; margin: 18px auto 0; padding: 24px; border: 1px solid rgba(51,51,51,.10); border-radius: 18px; background: #F5EDE4; color: #333333; box-shadow: 0 12px 34px rgba(51,51,51,.045); }
+.direct-create-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; }
+.direct-create-head > div:first-child { max-width: 760px; }
+.direct-create-head span, .direct-result-copy > span, .direct-settings > div > span { color: #CC8800; font-size: 9px; font-weight: 800; letter-spacing: .14em; }
+.direct-create-head h1 { margin: 6px 0 7px; font-size: 25px; letter-spacing: -.025em; }
+.direct-create-head p, .direct-settings > div > p { margin: 0; color: rgba(51,51,51,.62); font-size: 11px; line-height: 1.6; }
+.direct-ai-state { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 4px 5px 4px 10px; border: 1px solid rgba(51,51,51,.12); border-radius: 999px; background: rgba(255,255,255,.54); }
+.direct-ai-state i { width: 8px; height: 8px; border-radius: 50%; background: #aaa; }
+.direct-ai-state i.is-live { background: #3f8f68; box-shadow: 0 0 0 4px rgba(63,143,104,.10); }
+.direct-ai-state strong { font-size: 10px; white-space: nowrap; }
+.direct-ai-state button { min-height: 29px; padding: 0 11px; border: 0; border-radius: 999px; background: #fff; cursor: pointer; font-size: 9px; font-weight: 800; }
+.direct-create-controls { display: grid; grid-template-columns: minmax(0,1fr) 210px; gap: 14px; margin-top: 20px; }
+.direct-create-controls label, .direct-settings label { display: grid; gap: 6px; }
+.direct-create-controls label > span, .direct-settings label > span { color: rgba(51,51,51,.72); font-size: 10px; font-weight: 750; }
+.direct-topic textarea { width: 100%; min-height: 118px; padding: 14px 15px; resize: vertical; border: 1px solid rgba(51,51,51,.13); border-radius: 13px; background: rgba(255,255,255,.72); color: #333; font-size: 13px; line-height: 1.65; outline: none; }
+.direct-topic textarea:focus, .direct-side-controls select:focus, .direct-settings input:focus, .direct-settings select:focus { border-color: rgba(204,136,0,.58); box-shadow: 0 0 0 3px rgba(204,136,0,.09); }
+.direct-side-controls { display: grid; gap: 8px; align-content: end; }
+.direct-side-controls select, .direct-settings input, .direct-settings select { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid rgba(51,51,51,.13); border-radius: 9px; background: #fff; color: #333; }
+.direct-probe-button, .direct-create-button { min-height: 40px; border: 0; border-radius: 10px; cursor: pointer; font-size: 10px; font-weight: 800; }
+.direct-probe-button { background: rgba(255,255,255,.78); color: #333; border: 1px solid rgba(51,51,51,.12); }
+.direct-create-button { background: #CC8800; color: #fff; }
+.direct-create-button:hover:not(:disabled) { filter: brightness(.94); }
+.direct-message { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.54); color: rgba(51,51,51,.78); font-size: 10px; line-height: 1.5; }
+.direct-probe-result { margin-top: 14px; display: grid; grid-template-columns: 180px minmax(0,1fr); gap: 14px; align-items: start; }
+.direct-probe-result > div { display: grid; gap: 4px; }
+.direct-probe-result strong { font-size: 11px; }
+.direct-probe-result span { overflow: hidden; color: rgba(51,51,51,.5); font-size: 8px; text-overflow: ellipsis; }
+.direct-probe-result img { width: min(100%, 360px); aspect-ratio: 3/4; object-fit: cover; border-radius: 14px; background: #eee; }
+.direct-result { margin-top: 20px; padding-top: 18px; border-top: 1px solid rgba(51,51,51,.10); }
+.direct-result-copy h2 { margin: 6px 0 8px; font-size: 20px; }
+.direct-result-copy p { max-width: 900px; margin: 0; color: rgba(51,51,51,.7); white-space: pre-line; font-size: 11px; line-height: 1.7; }
+.direct-result-copy > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.direct-result-copy em { padding: 4px 7px; border-radius: 999px; background: rgba(255,255,255,.62); color: rgba(51,51,51,.65); font-size: 9px; font-style: normal; }
+.direct-result-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); gap: 10px; margin-top: 16px; }
+.direct-result-grid figure { min-width: 0; margin: 0; overflow: hidden; border-radius: 14px; background: rgba(255,255,255,.65); }
+.direct-result-grid a { display: block; }
+.direct-result-grid img { display: block; width: 100%; aspect-ratio: 3/4; object-fit: cover; }
+.direct-result-grid figcaption { min-height: 46px; padding: 8px 9px; display: grid; grid-template-columns: auto minmax(0,1fr); align-items: baseline; gap: 7px; }
+.direct-result-grid figcaption strong { color: #CC8800; font-size: 9px; }
+.direct-result-grid figcaption span { overflow: hidden; color: #333; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.direct-settings-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(20,20,20,.42); backdrop-filter: blur(10px); }
+.direct-settings { width: min(520px,100%); padding: 24px; border-radius: 20px; background: #F5EDE4; box-shadow: 0 30px 90px rgba(0,0,0,.22); display: grid; gap: 14px; }
+.direct-settings h2 { margin: 5px 0 5px; font-size: 22px; }
+.direct-settings-actions { display: grid; grid-template-columns: .7fr 1.3fr; gap: 8px; margin-top: 4px; }
+.direct-settings-actions > button:first-child { min-height: 40px; border: 1px solid rgba(51,51,51,.12); border-radius: 10px; background: #fff; cursor: pointer; }
+
+@media (max-width: 720px) {
+  .direct-create-shell { margin: 12px; padding: 16px; }
+  .direct-create-head { display: grid; }
+  .direct-ai-state { justify-self: start; }
+  .direct-create-controls { grid-template-columns: 1fr; }
+  .direct-probe-result { grid-template-columns: 1fr; }
+  .direct-result-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}
