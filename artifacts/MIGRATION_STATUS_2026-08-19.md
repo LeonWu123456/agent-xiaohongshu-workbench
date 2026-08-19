@@ -1,3 +1,5 @@
+> **历史快照，已被 `MIGRATION_STATUS_2026-08-20.md` 取代。** 本文件中的 OpenAI 直连配置不再代表当前 4184 运行真相。
+
 # 小师妹 Studio v2 迁移状态
 
 - 新工作目录：`/Users/a1-6/MeSy-Workspace/Projects/Active/Xiaoshimei-Studio-v2`

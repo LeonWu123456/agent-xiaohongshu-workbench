@@ -8,6 +8,9 @@
 <h2 align="center">如果有帮到你，麻烦动动小手点亮STAR ✨✨</h2>
 </p>
 
+> [!IMPORTANT]
+> **MeSy 当前运行真相（2026-08-20）**：4184 现在服务的是 `../Xiaoshimei-Studio` 构建到 `~/.mesy/runtime/xiaoshimei-studio/dist` 的 canonical UI；本仓库当前主要承担 4184 server/API 壳、GitHub 基座与迁移证据。真实生成主路为本机 4175 `volcengine-ark` Provider。下面的 Codex-only/GitHub-base 说明保留为上游基座文档，不得覆盖当前运行真相。完整不缩水合同见 `../Xiaoshimei-Studio/PRODUCT_CONTRACT.md`。
+
 > 一个依托 **Codex CLI** 运行的本地小红书图文内容工作台：从热点研究、笔记拆解、原创文稿和去 AI 味，到品牌配图、完整预览与人工确认发布。
 
 Agent 小红书工作台面向需要持续运营多个图文内容账号的创作者。每个内容账号拥有独立的定位、品牌角色、视觉语言、热点缓存、稿件和故事线；它们共用一个仅用于浏览器研究的执行会话。它不接入第三方模型 API，也不托管账号数据；Codex Agent 在你的本地环境中完成推理和浏览器操作。
