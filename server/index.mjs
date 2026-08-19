@@ -14,7 +14,7 @@ import { CARD_RENDERER_VERSION } from "./render-cards.mjs";
 import { applyDraftEdit, archiveManuallyPublishedStoryline, editTopic, emptyCopyVersions, emptyStoryline, resetProductionAfterBrandChange, resetProductionAfterTopic, resolveTopicChange, selectTopic, setGenerationImageCount, storylineContext } from "./workspace-editor.mjs";
 import { isVerifiedViralSignal } from "./viral-filter.mjs";
 import { readImageDrafts } from "./xhs-draft-verifier.mjs";
-import { createDirectAi } from "./direct-ai.mjs";
+import { createDirectArk } from "./direct-ark.mjs";
 
 const execAsync = promisify(exec);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -187,7 +187,7 @@ const stateStore = {
 };
 
 const runner = new AgentRunner({ root, runtimeRoot, stateStore });
-const directAi = createDirectAi({ runtimeRoot });
+const directAi = createDirectArk({ runtimeRoot });
 await runner.initialize();
 await stateStore.read();
 await runner.ensureCurrentRenderer();
@@ -358,22 +358,12 @@ app.get("/api/direct-ai/status", async (_request, response) => {
   catch (error) { response.status(500).json({ error: error.message || "AI 状态读取失败" }); }
 });
 
-app.put("/api/direct-ai/key", async (request, response) => {
-  try {
-    await directAi.storeOpenAiKey(request.body?.apiKey);
-    response.json(await directAi.status());
-  } catch (error) {
-    response.status(400).json({ error: error.message || "API Key 保存失败", code: error.code || null });
-  }
+app.put("/api/direct-ai/key", async (_request, response) => {
+  response.status(410).json({ error: "小师妹已切回火山方舟，API Key 由现有本机 Provider 安全管理。", code: "OPENAI_DISABLED" });
 });
 
-app.put("/api/direct-ai/config", async (request, response) => {
-  try {
-    await directAi.writeConfig(request.body || {});
-    response.json(await directAi.status());
-  } catch (error) {
-    response.status(400).json({ error: error.message || "AI 配置保存失败" });
-  }
+app.put("/api/direct-ai/config", async (_request, response) => {
+  response.status(410).json({ error: "小师妹已切回火山方舟，模型配置跟随本机 Provider。", code: "OPENAI_DISABLED" });
 });
 
 app.post("/api/direct-ai/test-image", async (request, response) => {

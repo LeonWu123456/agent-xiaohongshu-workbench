@@ -50,7 +50,7 @@ export function DirectCreatePanel() {
     try {
       const next = await request("/api/direct-ai/test-image", { method: "POST", body: JSON.stringify({ prompt: topic.trim() }) });
       setProbe(next);
-      setMessage("真实生图成功。下面这张图来自当前 API，不是演示图。 ");
+      setMessage("真实生图成功。下面这张图来自火山方舟，不是演示图。 ");
     } catch (error) {
       if (error.code === "AI_KEY_MISSING") setSettingsOpen(true);
       setMessage(error.message);
@@ -72,8 +72,8 @@ export function DirectCreatePanel() {
 
   return <section className="direct-create-shell" aria-label="小师妹直接创作">
     <div className="direct-create-head">
-      <div><span>QUICK CREATE</span><h1>输入素材，直接生成小红书图文</h1><p>直连 API，不经过 Codex。先生成文案与逐页画面，再用原生文字层合成 1080×1440 卡片。</p></div>
-      <div className="direct-ai-state"><i className={status?.configured ? "is-live" : ""} /><strong>{status?.configured ? "AI 已配置" : "AI 未配置"}</strong><button type="button" onClick={() => setSettingsOpen(true)}>AI 设置</button></div>
+      <div><span>QUICK CREATE</span><h1>输入素材，直接生成小红书图文</h1><p>直连火山方舟，不经过 Codex。先生成文案与逐页画面，再用原生文字层合成 1080×1440 卡片。</p></div>
+      <div className="direct-ai-state"><i className={status?.configured ? "is-live" : ""} /><strong>{status?.configured ? "方舟已连接" : "方舟未连接"}</strong><button type="button" onClick={() => setSettingsOpen(true)}>方舟状态</button></div>
     </div>
 
     <div className="direct-create-controls">
@@ -94,13 +94,12 @@ export function DirectCreatePanel() {
     </div>}
 
     {settingsOpen && <div className="direct-settings-backdrop" onMouseDown={() => !busy && setSettingsOpen(false)}>
-      <div className="direct-settings" role="dialog" aria-modal="true" aria-label="AI 设置" onMouseDown={(event) => event.stopPropagation()}>
-        <div><span>AI SETTINGS</span><h2>直连 OpenAI</h2><p>API Key 只交给本机后端，并写入 macOS Keychain。前端不会回读明文 Key。</p></div>
-        <label><span>OpenAI API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={status?.configured ? "已保存，留空表示不更换" : "sk-…"} autoComplete="off" /></label>
-        <label><span>文字模型</span><input value={config.textModel} onChange={(event) => setConfig((current) => ({ ...current, textModel: event.target.value }))} /></label>
-        <label><span>图片模型</span><input value={config.imageModel} onChange={(event) => setConfig((current) => ({ ...current, imageModel: event.target.value }))} /></label>
-        <label><span>图片质量</span><select value={config.imageQuality} onChange={(event) => setConfig((current) => ({ ...current, imageQuality: event.target.value }))}><option value="low">低成本测试</option><option value="medium">中等</option><option value="high">高</option><option value="auto">自动</option></select></label>
-        <div className="direct-settings-actions"><button type="button" onClick={() => setSettingsOpen(false)} disabled={Boolean(busy)}>取消</button><button type="button" className="direct-create-button" onClick={saveSettings} disabled={busy === "settings"}>{busy === "settings" ? "保存中…" : "保存并启用"}</button></div>
+      <div className="direct-settings" role="dialog" aria-modal="true" aria-label="火山方舟状态" onMouseDown={(event) => event.stopPropagation()}>
+        <div><span>ARK STATUS</span><h2>火山方舟</h2><p>小师妹已切回国内火山方舟链路，不依赖 OpenAI，也不需要 VPN。</p></div>
+        <div className="direct-message">连接状态：{status?.configured ? "已连接" : "未连接"}</div>
+        <div className="direct-message">文字模型：{status?.textModel || "未读取"}</div>
+        <div className="direct-message">图片模型：{status?.imageModel || "未读取"}</div>
+        <div className="direct-settings-actions"><button type="button" className="direct-create-button" onClick={() => setSettingsOpen(false)}>关闭</button></div>
       </div>
     </div>}
   </section>;
