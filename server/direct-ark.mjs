@@ -192,11 +192,21 @@ export function createDirectArk({ runtimeRoot }) {
   }
 
   async function testImage(prompt = "") {
-    const result = await quickCreate({
-      topic: clean(prompt) || "清晨的东方生活场景，小师妹放下手机，给自己十分钟安静整理状态。写成一张可收藏的小红书图文。",
-      imageCount: 1,
-    });
-    return { id: result.id, url: result.assets[0].url, absolutePath: result.assets[0].absolutePath, provider: "volcengine-ark" };
+    try {
+      const probe = await providerPost("/image-probe", { prompt: clean(prompt) });
+      const id = `ark-probe-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`;
+      const dir = path.join(generatedRoot, id);
+      const target = path.join(dir, "scene.png");
+      await fs.mkdir(dir, { recursive: true });
+      await sharp(resolveLegacyScene(probe.src)).png().toFile(target);
+      await fs.writeFile(path.join(dir, "receipt.json"), JSON.stringify({
+        schema: "xiaoshimei.direct-image-probe.v1", id, createdAt: new Date().toISOString(), provider: "volcengine-ark", upstream: probe,
+      }, null, 2), "utf8");
+      return { id, url: `/generated/${id}/scene.png`, absolutePath: target, provider: "volcengine-ark", upstreamRunId: probe.run_id };
+    } catch (error) {
+      const mapped = mapArkError(error);
+      throw Object.assign(new Error(mapped.message), { code: mapped.code, cause: error });
+    }
   }
 
   return { status, testImage, quickCreate };
