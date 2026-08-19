@@ -21,7 +21,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeRoot = process.env.AGENT_XHS_RUNTIME_DIR ? path.resolve(process.env.AGENT_XHS_RUNTIME_DIR) : root;
 const canonicalStudioDist = process.env.XIAOSHIMEI_CANONICAL_DIST
   ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_DIST)
-  : "/Users/a1-6/MeSy-Workspace/.mesy/runtime/xiaoshimei-studio/dist";
+  : "/Users/a1-6/.mesy/runtime/xiaoshimei-studio/dist";
 const dataDir = path.join(runtimeRoot, ".data");
 const statePath = path.join(dataDir, "workspace.json");
 const generatedDir = path.join(runtimeRoot, "public", "generated");
