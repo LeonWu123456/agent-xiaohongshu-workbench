@@ -30,7 +30,10 @@ export function DirectCreatePanel() {
     return next;
   }
 
-  useEffect(() => { refreshStatus().catch((error) => setMessage(error.message)); }, []);
+  useEffect(() => {
+    refreshStatus().catch((error) => setMessage(error.message));
+    request("/api/direct-ai/latest").then((data) => { if (data?.result) setResult(data.result); }).catch(() => {});
+  }, []);
 
   async function saveSettings() {
     setBusy("settings"); setMessage("");

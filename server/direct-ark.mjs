@@ -116,6 +116,19 @@ function mapArkError(error) {
 export function createDirectArk({ runtimeRoot }) {
   const generatedRoot = path.join(runtimeRoot, "public", "generated");
 
+  async function latest() {
+    try {
+      const names = (await fs.readdir(generatedRoot)).filter((name) => name.startsWith("ark-direct-")).sort().reverse();
+      for (const name of names) {
+        try {
+          const value = JSON.parse(await fs.readFile(path.join(generatedRoot, name, "receipt.json"), "utf8"));
+          if (value?.schema === "xiaoshimei.direct-create.v2" && value?.plan && Array.isArray(value?.assets)) return value;
+        } catch {}
+      }
+    } catch {}
+    return null;
+  }
+
   async function status() {
     try {
       const health = await providerHealth();
@@ -209,5 +222,5 @@ export function createDirectArk({ runtimeRoot }) {
     }
   }
 
-  return { status, testImage, quickCreate };
+  return { status, latest, testImage, quickCreate };
 }

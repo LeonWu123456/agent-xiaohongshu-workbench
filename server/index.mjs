@@ -358,6 +358,11 @@ app.get("/api/direct-ai/status", async (_request, response) => {
   catch (error) { response.status(500).json({ error: error.message || "AI 状态读取失败" }); }
 });
 
+app.get("/api/direct-ai/latest", async (_request, response) => {
+  try { response.json({ result: await directAi.latest() }); }
+  catch (error) { response.status(500).json({ error: error.message || "最近生成结果读取失败" }); }
+});
+
 app.put("/api/direct-ai/key", async (_request, response) => {
   response.status(410).json({ error: "小师妹已切回火山方舟，API Key 由现有本机 Provider 安全管理。", code: "OPENAI_DISABLED" });
 });
