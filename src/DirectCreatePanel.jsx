@@ -50,7 +50,7 @@ export function DirectCreatePanel() {
     try {
       const next = await request("/api/direct-ai/test-image", { method: "POST", body: JSON.stringify({ prompt: topic.trim() }) });
       setProbe(next);
-      setMessage("真实生图成功。下面这张图来自火山方舟，不是演示图。 ");
+      setMessage("主题图测试成功。这里只测试图片是否能按上方主题生成，不生成文章；要看文章请点“直接生成”。");
     } catch (error) {
       if (error.code === "AI_KEY_MISSING") setSettingsOpen(true);
       setMessage(error.message);
@@ -63,11 +63,22 @@ export function DirectCreatePanel() {
     try {
       const next = await request("/api/direct-ai/quick-create", { method: "POST", body: JSON.stringify({ topic, imageCount: count }) });
       setResult(next);
-      setMessage(`已真实生成 ${next.assets.length} 张 1080×1440 小红书卡片。`);
+      setMessage(`文章与 ${next.assets.length} 张 1080×1440 小红书卡片都已生成，正文就在下方“发布文章”区。`);
     } catch (error) {
       if (error.code === "AI_KEY_MISSING") setSettingsOpen(true);
       setMessage(error.message);
     } finally { setBusy(""); }
+  }
+
+  async function copyArticle() {
+    if (!result?.plan) return;
+    const text = `${result.plan.title}\n\n${result.plan.body}\n\n${(result.plan.tags || []).map((tag) => `#${tag}`).join(" ")}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage("发布文章已复制。 ");
+    } catch {
+      setMessage("复制失败，请手动选择正文复制。 ");
+    }
   }
 
   return <section className="direct-create-shell" aria-label="小师妹直接创作">
@@ -80,16 +91,17 @@ export function DirectCreatePanel() {
       <label className="direct-topic"><span>原文 / 选题 / 想法</span><textarea value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="例如：为什么真正会休息的人，工作反而更快？写成一篇有方法、有画面的小红书图文。" /></label>
       <div className="direct-side-controls">
         <label><span>配图数量</span><select value={count} onChange={(event) => setCount(Number(event.target.value))}>{[1,2,3,4,5,6].map((value) => <option value={value} key={value}>{value} 张</option>)}</select></label>
-        <button type="button" className="direct-probe-button" onClick={testImage} disabled={Boolean(busy)}>{busy === "probe" ? "正在真实生图…" : "先测 1 张真实图"}</button>
-        <button type="button" className="direct-create-button" onClick={quickCreate} disabled={Boolean(busy)}>{busy === "create" ? `正在生成 ${count} 张…` : `直接生成 ${count} 张`}</button>
+        <button type="button" className="direct-probe-button" onClick={testImage} disabled={Boolean(busy)}>{busy === "probe" ? "正在生成主题图…" : "测试 1 张主题图"}</button>
+        <button type="button" className="direct-create-button" onClick={quickCreate} disabled={Boolean(busy)}>{busy === "create" ? `正在生成文章 + ${count} 张图…` : `生成文章 + ${count} 张图`}</button>
+        <small className="direct-action-note">“测试主题图”只生成一张与选题相关的图片；“生成文章 + 配图”才会生成完整正文、标签和卡片。</small>
       </div>
     </div>
 
     {message && <div className="direct-message" role="status">{message}</div>}
-    {probe && <div className="direct-probe-result"><div><strong>真实生图探针</strong><span>{probe.id}</span></div><img src={probe.url} alt="真实 AI 生图测试结果" /></div>}
+    {probe && <div className="direct-probe-result"><div><strong>主题图测试</strong><span>只验证火山生图与选题相关性，不包含文章 · {probe.id}</span></div><img src={probe.url} alt="火山方舟主题图测试结果" /></div>}
 
     {result && <div className="direct-result">
-      <div className="direct-result-copy"><span>本轮完成</span><h2>{result.plan.title}</h2><p>{result.plan.body}</p><div>{result.plan.tags.map((tag) => <em key={tag}>#{tag}</em>)}</div></div>
+      <div className="direct-result-copy"><div className="direct-result-copy-head"><span>发布文章</span><button type="button" onClick={copyArticle}>复制全文</button></div><h2>{result.plan.title}</h2><p>{result.plan.body}</p><div>{result.plan.tags.map((tag) => <em key={tag}>#{tag}</em>)}</div></div>
       <div className="direct-result-grid">{result.assets.map((asset, index) => <figure key={asset.id}><a href={asset.url} target="_blank" rel="noreferrer"><img src={asset.url} alt={`第 ${index + 1} 张生成卡片`} /></a><figcaption><strong>{String(index + 1).padStart(2, "0")}</strong><span>{result.plan.cards[index].headline}</span></figcaption></figure>)}</div>
     </div>}
 
