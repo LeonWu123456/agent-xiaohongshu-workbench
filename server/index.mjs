@@ -22,6 +22,10 @@ const runtimeRoot = process.env.AGENT_XHS_RUNTIME_DIR ? path.resolve(process.env
 const canonicalStudioDist = process.env.XIAOSHIMEI_CANONICAL_DIST
   ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_DIST)
   : "/Users/a1-6/.mesy/runtime/xiaoshimei-studio/dist";
+const canonicalStudioPublic = process.env.XIAOSHIMEI_CANONICAL_PUBLIC
+  ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_PUBLIC)
+  : path.resolve(root, "../Xiaoshimei-Studio/public");
+const canonicalGeneratedDir = path.join(canonicalStudioPublic, "generated");
 const dataDir = path.join(runtimeRoot, ".data");
 const statePath = path.join(dataDir, "workspace.json");
 const generatedDir = path.join(runtimeRoot, "public", "generated");
@@ -235,7 +239,8 @@ async function toolProbe(command) {
 
 const app = express();
 app.use(express.json({ limit: "200kb" }));
-app.use("/generated", express.static(generatedDir, { fallthrough: false }));
+app.use("/generated", express.static(canonicalGeneratedDir, { fallthrough: true, etag: false, maxAge: 0 }));
+app.use("/generated", express.static(generatedDir, { fallthrough: false, etag: false, maxAge: 0 }));
 app.use("/brand", express.static(brandDir, { fallthrough: false }));
 
 app.get("/api/workspace", async (_request, response) => {
