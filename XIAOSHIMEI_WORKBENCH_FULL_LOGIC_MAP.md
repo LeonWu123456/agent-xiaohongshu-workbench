@@ -204,19 +204,19 @@ flowchart TB
       D14["D14 旧 html/editor state 可保留旧版式，代码改了旧稿未迁移｜挂点 A6｜修复 P1/P5"]:::debt
       D15["D15 CSS 多层覆写、重复选择器、固定行高导致漂移｜挂点 A6｜修复 P4"]:::debt
       D16["D16 contentEditable 曾观察 React 崩溃风险，当前需回归复验｜挂点 A6｜修复 P5/P7"]:::debt
-      D17["D17 RESOLVED_PREVIEW v15｜结构性 containment、长标题换行与五页导出已在最终 Preview 回读｜挂点 A5/A6"]:::gate
+      D17["D17 RESOLVED_PRODUCTION v15｜结构性 containment、长标题换行与五页导出已在最终 Preview 回读，正式域名命中同一 CSS｜挂点 A5/A6"]:::gate
       D18["D18 没有明确先定槽位再裁剪，裁剪被用来补救坏比例｜挂点 A5/A7｜修复 P1/P3"]:::debt
       D19["D19 生成提示词没有输出可裁剪余量与结构化 bbox｜挂点 A3/A4｜修复 P2/P3"]:::debt
       D20["D20 Reality feedback 已有但未进入 layout/crop fitness｜挂点 A8｜修复 P8"]:::debt
       D21["D21 字号 Gate 只检查正文，漏掉眉题、提示、品牌与页码｜挂点 A5/A8｜修复 P4/P7"]:::debt
       D22["D22 旧 figure 样式残留非对称 radius/shadow，覆盖角色化媒体策略｜挂点 A6/A7｜修复 P3/P4"]:::debt
       D23["D23 母版按前 N 个几何格顺序绑定，空白格会被当成页面插图并使后续图错位｜挂点 A4｜修复 P2/P7"]:::debt
-      D24["D24 RESOLVED_PREVIEW｜先生成校验、再由可见链接保存；Chrome Desktop ZIP 实物、CRC 与 PNG 尺寸已回读｜挂点 A8"]:::gate
+      D24["D24 RESOLVED_PRODUCTION｜先生成校验、再由可见链接保存；Chrome Desktop ZIP 实物、CRC、PNG 尺寸及正式同一 JS 已回读｜挂点 A8"]:::gate
       D25["D25 对象点击事件冒泡会清空选中态，使移动/缩放控件看似存在却不可用｜挂点 A6｜修复 P5/P7"]:::debt
       D26["D26 编辑视口未暴露封面文字与图片间距问题，真实导出 PNG 才看到贴撞｜挂点 A6/A8｜修复 P4/P7"]:::debt
       D27["D27 母版固定 3:4 与内页近方形槽位冲突，再叠加全局 116% overscan，白边与主体过大只能二选一｜挂点 A4/A5/A7｜修复 P1-P4"]:::debt
       D28["D28 取景能力藏在通用编辑手势里且缩放无产品上限，用户无法发现也无法稳定控制｜挂点 A6/A7｜修复 P3/P5/P7"]:::debt
-      D29["D29 RESOLVED_PREVIEW｜切片自适应预算 + 4 MB 总闸；真实 BYOK 母版已返回浏览器并组装 3 页/3 图｜挂点 A4/A8"]:::gate
+      D29["D29 RESOLVED_PRODUCTION｜切片自适应预算 + 4 MB 总闸；真实 BYOK 母版返回浏览器并组装 3 页/3 图，生成链同构制品已提升正式｜挂点 A4/A8"]:::gate
     end
 
     ICROP["问题簇 CROP<br/>U02 U05 U10 U18<br/>D02 D06-D10 D18 D19"]:::issue
@@ -397,6 +397,7 @@ flowchart TB
     EV27["R27 生产事故纠偏 PASS_LOCAL｜线上日志证实 generate-images 函数 200、浏览器 Failed to fetch；切片响应加入自适应字节预算与 4 MB 总闸；公网下载移除 local-only 探测；v11 迁移清掉旧标题/面板位移，v14 绑定左右列与 3:4 明确宽高。264/264 tests + build；五页窄屏无告警；新 ZIP CRC PASS、5×1080×1440 逐页目检，Hash=1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31。尚未部署、未重跑公网付费生图。"]:::gate
     EV28["R28 D29 PASS_PREVIEW｜dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE 用 BYOK 完成真实付费母版；缺失 page-4-hero 在同请求有界补绘，3 页/3 图回到浏览器并可编辑"]:::evidence
     EV29["R29 D17/D24/A14/A15 PASS_PREVIEW｜最终 dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4：268/268 + build；长标题无 overflow；undo→redo 恢复原编辑；保存刷新保留；Chrome 下载 ZIP 实物 1,560,041 bytes，CRC PASS，5×1080×1440，sha256=da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::evidence
+    EV30["R30 production_applied PASS｜Git main=e1e775f；promote 最终候选后 Production=dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名 HTML 200、health 200、无 Key 401；线上 CSS/JS 与本地已验收构建 SHA-256 完全一致；rollback=dpl_Afw8Q5Vai578FVs11waZvd24CYBp"]:::evidence
     EV01 --> P5
     EV02 --> P4
     EV03 --> U20
@@ -455,6 +456,8 @@ flowchart TB
     EV29 --> A14
     EV29 --> A15
     EV29 --> P7
+    EV30 --> CT03
+    EV30 --> CT04
     EV24 --> A12
     EV24 --> A13
     EV24 --> A14
@@ -575,9 +578,9 @@ flowchart TB
       direction LR
       CT01["mechanism_ready<br/>PASS：9:8 KV/3:4 插图角色化切片、智能布局、自由编辑与像素导出 Gate 已实现"]:::target
       CT02["package_verified<br/>PASS_PREVIEW：268/268 tests、Vite build、Desktop ZIP 8 文件 CRC、5 张 1080×1440 PNG 逐图与像素边距回读<br/>ZIP sha256 da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::target
-      CT03["production_applied<br/>PENDING_PROMOTE：最终 Preview dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4 已验收；稳定域名仍指向事故版本 dpl_Afw8Q5Vai578FVs11waZvd24CYBp"]:::gate
-      CT04["runtime_operational<br/>PASS_PREVIEW：真实 BYOK 生成返回浏览器；编辑、undo/redo、保存刷新与 Chrome ZIP 落盘现场回读"]:::target
-      CT05["reality_validated<br/>PASS_PREVIEW_DOGFOOD：公网 Preview 关键旅程与发布包可用；Production 稳定域名及外部平台 24h/72h/7d 效果待回读"]:::gate
+      CT03["production_applied<br/>PASS：dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名绑定；线上 CSS/JS Hash 与已验收构建一致"]:::target
+      CT04["runtime_operational<br/>PASS_PRODUCTION_ARTIFACT：真实 BYOK 生成链、编辑、undo/redo、保存刷新与 Chrome ZIP 落盘已现场回读"]:::target
+      CT05["reality_validated<br/>PASS_WORKBENCH_REALITY：稳定域名、资源、接口与关键 Preview 旅程通过；外部平台 24h/72h/7d 作品效果 NOT RUN"]:::gate
       CT01 --> CT02 --> CT03 --> CT04 --> CT05
     end
 

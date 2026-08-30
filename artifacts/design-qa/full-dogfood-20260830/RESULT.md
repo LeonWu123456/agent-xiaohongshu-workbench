@@ -8,7 +8,7 @@
 
 发布 Human Gate 已获批准，修复分支随后完成公网 Reality 回读：Preview `dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE` 用 BYOK 走通真实付费母版生成、缺格自动补绘、3 页/3 图回到浏览器并可编辑；最终 Preview `dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4` 追加 v15 标题换行、可见下载链接和 redo 保护。268/268 tests、生产构建、长标题、改字/撤销/重做、保存刷新、无 Key 401、ZIP 实际落盘、CRC、5 张 1080×1440 PNG 和逐页像素边距均通过。
 
-这仍不等于公网正式版已经更新：当前 Vercel Production 仍是事故版本。Preview 与真实付费生成 Gate 已通过，下一步只能把同一最终候选提升到 Production，再回读稳定域名；外部小红书发布和读者效果仍未执行。
+最终候选已提升为 Production `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj`。稳定域名回读 HTML 200，并命中 `index-BHKoq_Od.css` / `index-CzpwE6Sa.js`；线上资源与本地已验收构建 SHA-256 完全一致。外部小红书发布和 24h/72h/7d 读者效果仍未执行，不能冒充作品效果验证。
 
 ## TaskSpec 主流程对照
 
@@ -46,9 +46,9 @@
 |---|---|
 | mechanism_ready | PASS_PREVIEW：动态母版分隔线、缺格有界补绘、传输预算、语义标题换行、redo 保护与两段式下载均已实现并进入 Preview |
 | package_verified | PASS_PREVIEW_ZIP：268/268 tests，Vite build，ZIP CRC，5 张 1080×1440 PNG 逐页目检与像素边距回读 |
-| production_applied | FAIL_CURRENT：Vercel Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp` 未包含本轮传输、下载和 v14 排版修复 |
-| runtime_operational | PASS_PREVIEW：真实 BYOK 付费生图返回浏览器；编辑、undo/redo、保存刷新和 Chrome ZIP 落盘通过 |
-| reality_validated | PASS_PREVIEW_DOGFOOD：公网 Preview 关键旅程可用；Production 稳定域名和外部平台效果待验证 |
+| production_applied | PASS：Production `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj` Ready；稳定域名已绑定；线上 CSS/JS 与已验收构建 Hash 一致 |
+| runtime_operational | PASS_PRODUCTION_ARTIFACT：真实 BYOK 付费生图在同生成链 Preview 返回浏览器；最终同构制品的编辑、undo/redo、保存刷新和 Chrome ZIP 落盘通过 |
+| reality_validated | PASS_WORKBENCH_REALITY：稳定域名、资源、健康接口、BYOK fail-closed 与关键 Preview 旅程均回读；外部平台作品效果 NOT RUN |
 
 ## 本轮发现并上移的根因
 
@@ -80,8 +80,11 @@
 - QA 夹具 ZIP SHA-256：`1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`
 - 最终 Preview：`dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4`，URL `https://xiaoshimei-full-workbench-7lnsp2620-892350620-5733s-projects.vercel.app/`
 - 公网真实生成 Preview：`dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE`
+- Production：`dpl_Cj8uAE9utVX3oyLf6auJHMi824kj`，稳定域名 `https://xiaoshimei-full-workbench.vercel.app/`
+- Production 资源 Hash：CSS `c50209b7dfc35784cc8b83c0b4677c86ef8c04dad859bdb91673097190514f37`；JS `fc13f671e0ee8a8a3c908628c612187982aeb64df1e5a0731c38bff953b881d6`
+- Production 回滚点：`dpl_Afw8Q5Vai578FVs11waZvd24CYBp`
 - 最终 Preview 下载实物：`~/Desktop/小师妹-发布包-最终预览QA-20260830.zip`，SHA-256 `da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438`
 
 ## 唯一剩余现实条件
 
-如要把“正式版也已修复”写成 PASS，唯一剩余条件是：合并当前已验收提交到 fork `main` → 提升最终 Preview `dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4` 到 Production → 回读稳定域名的 deployment、HTML/JS/CSS、无 Key 401、编辑保存和下载入口。未完成前，正式版仍保持“事故版本，不能交给小师妹使用”。
+工作台本身已经达到可交给小师妹本人使用的 Production 层。下一条现实链不再是修工作台，而是由人登录自己的 BYOK、生成一篇真实稿、人工发布到小红书，再按 24h/72h/7d 回填读者结果；这些外部平台动作没有在本轮代做。

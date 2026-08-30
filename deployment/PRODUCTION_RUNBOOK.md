@@ -80,5 +80,18 @@
 | final Preview | `dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4` · `https://xiaoshimei-full-workbench-7lnsp2620-892350620-5733s-projects.vercel.app/` |
 | Preview QA | Ready；HTML 200；health 200 `AWAITING_BYOK`；无 Key 401 `ARK_API_KEY_REQUIRED`；长标题无 overflow；undo/redo；保存刷新；5 页发布包实际下载到 Desktop |
 | package evidence | `~/Desktop/小师妹-发布包-最终预览QA-20260830.zip`；1,560,041 bytes；CRC PASS；5 PNG 均 1080×1440；SHA-256 `da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438` |
-| current Production | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`，仍是事故版本，尚未替换 |
+| pre-promotion Production | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`，事故版本；提升前现场状态 |
 | rollback after promotion | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；历史安全点另保留 `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |
+
+### 事故修复 Production 应用
+
+| 字段 | 值 |
+|---|---|
+| GitHub main | merge `e1e775f`；Vercel 项目 `link=null`，Git push 不触发平行自动部署 |
+| promoted source | 已验收 Preview `dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4` |
+| Production deployment | `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj` · Ready |
+| stable-domain readback | `https://xiaoshimei-full-workbench.vercel.app/` → `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj`；HTML 200；health 200 `AWAITING_BYOK`；无 Key 401 `ARK_API_KEY_REQUIRED` |
+| asset identity | `index-BHKoq_Od.css` SHA-256 `c50209b7dfc35784cc8b83c0b4677c86ef8c04dad859bdb91673097190514f37`；`index-CzpwE6Sa.js` SHA-256 `fc13f671e0ee8a8a3c908628c612187982aeb64df1e5a0731c38bff953b881d6`；线上/本地逐字节一致 |
+| rollback deployment | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；更早安全点 `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |
+
+当前边界：工作台 Production 已可用；BYOK 仍由使用者当前标签页提供，不持久化。外部小红书发布、账号操作和 24h/72h/7d 读者效果未执行。
