@@ -193,6 +193,7 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
   const units = job?.units;
   if (!Array.isArray(units) || units.length < 1 || units.length > 9) throw new TypeError("MOTHER_SHEET_UNITS_INVALID");
   const maxBytes = Math.max(32_000, Number(options.maxBytes) || 160_000);
+  const allowMissing = options.allowMissing === true;
   const metadata = await sharp(bytes).metadata();
   const width = Number(metadata.width || 0);
   const height = Number(metadata.height || 0);
@@ -205,7 +206,18 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
     const preferredAspect = regionRole === "kv-top-3x2-9:8" ? "9:8" : "3:4";
     const baseTile = await sharp(bytes).extract(cropRegion).png().toBuffer();
     const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
-    if (!quality.hasVisibleSubject) throw new Error(`MOTHER_SHEET_UNIT_MISSING:${unit.unit_id}`);
+    if (!quality.hasVisibleSubject) {
+      if (!allowMissing) throw new Error(`MOTHER_SHEET_UNIT_MISSING:${unit.unit_id}`);
+      return {
+        unit_id: unit.unit_id,
+        page_index: unit.page_index,
+        panel_index: unit.panel_index,
+        missing: true,
+        mother_sheet_slot: slotIndex + 1,
+        mother_sheet_region_role: regionRole,
+        presence_gate: quality,
+      };
+    }
     const tile = await encodeTileForPublicTransport(baseTile, preferredAspect, maxBytes);
     const tileBytes = tile.bytes;
     return {
@@ -227,6 +239,35 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
       presence_gate: quality,
     };
   }));
+}
+
+export function buildMissingUnitRepairJobs(units, startIndex = 0) {
+  if (!Array.isArray(units) || units.length < 1) return [];
+  const jobs = [];
+  const kvUnits = units.filter((unit) => unit?.page_index === 0 && unit?.panel_index == null && unit?.preferred_aspect === "9:8");
+  const regularUnits = units.filter((unit) => !kvUnits.includes(unit));
+  kvUnits.forEach((unit) => jobs.push({
+    sheet_index: startIndex + jobs.length,
+    sheet_id: `mother-sheet-repair-${startIndex + jobs.length + 1}`,
+    template: "kv-top-3x2",
+    kv_unit_index: 0,
+    unit_labels: ["KV"],
+    units: [structuredClone(unit)],
+    repair: true,
+  }));
+  for (let index = 0; index < regularUnits.length; index += 3) {
+    const batch = regularUnits.slice(index, index + 3);
+    jobs.push({
+      sheet_index: startIndex + jobs.length,
+      sheet_id: `mother-sheet-repair-${startIndex + jobs.length + 1}`,
+      template: "grid-3x3",
+      kv_unit_index: null,
+      unit_labels: batch.map((_unit, offset) => `补${offset + 1}`),
+      units: structuredClone(batch),
+      repair: true,
+    });
+  }
+  return jobs;
 }
 
 async function generateImages(input, settings, request) {
@@ -258,13 +299,23 @@ async function generateImages(input, settings, request) {
     const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
     const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_${job.sheet_index + 1}_CALL_FAILED`);
     const sheet = { job, ...(await imagePayload(payload)) };
+    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget, allowMissing: true });
+    sheets.push(sheet);
+  }
+
+  const missingUnitIds = new Set(sheets.flatMap((sheet) => sheet.tiles.filter((tile) => tile.missing).map((tile) => tile.unit_id)));
+  const repairJobs = buildMissingUnitRepairJobs(units.filter((unit) => missingUnitIds.has(unit.unit_id)), sheets.length);
+  for (const job of repairJobs) {
+    const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
+    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_REPAIR_${job.sheet_index + 1}_CALL_FAILED`);
+    const sheet = { job, ...(await imagePayload(payload)) };
     sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget });
     sheets.push(sheet);
   }
 
   const assetByUnit = new Map();
   for (const sheet of sheets) {
-    sheet.tiles.forEach((tile) => assetByUnit.set(tile.unit_id, {
+    sheet.tiles.filter((tile) => !tile.missing).forEach((tile) => assetByUnit.set(tile.unit_id, {
       src: tile.src,
       sha256: tile.sha256,
       size_bytes: tile.size_bytes,
@@ -302,8 +353,10 @@ async function generateImages(input, settings, request) {
       estimated_image_cost_cny: Number((sheets.length * IMAGE_PRICE_CNY).toFixed(2)),
       page_plan_attempts: planAttempts,
       mother_sheet_sha256: sheets.map((sheet) => sheet.sha256),
-      tile_sha256: sheets.flatMap((sheet) => sheet.tiles.map((tile) => tile.sha256)),
+      tile_sha256: sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)),
       tile_transport_budget_bytes: tileBudget,
+      repaired_missing_unit_count: missingUnitIds.size,
+      repair_mother_sheet_count: repairJobs.length,
     },
   };
   const responseSizeBytes = assertPublicGenerationResponseBudget(content);
