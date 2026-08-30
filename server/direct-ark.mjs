@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import sharp from "sharp";
 
 const PROVIDER = "http://127.0.0.1:4175";
-const LEGACY_ROOT = "/Users/a1-6/MeSy-Workspace/Projects/Active/Xiaoshimei-Studio";
-const PROFILE_PATH = path.join(LEGACY_ROOT, "artifacts", "keep-import-closure", "generation-contract-v2.json");
+const STUDIO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DEFAULT_PROFILE_PATH = path.join(STUDIO_ROOT, "config", "generation-contract-v2.example.json");
 
 function clean(value, max = 6000) {
   return String(value || "").replace(/\u0000/g, "").trim().slice(0, max);
@@ -34,8 +35,13 @@ async function providerHealth() {
   return data;
 }
 
-async function profileContract() {
-  return JSON.parse(await fs.readFile(PROFILE_PATH, "utf8"));
+async function profileContract(profilePath) {
+  try {
+    return JSON.parse(await fs.readFile(profilePath, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return JSON.parse(await fs.readFile(DEFAULT_PROFILE_PATH, "utf8"));
+  }
 }
 
 function textEnvelope(topic, profile) {
@@ -97,12 +103,12 @@ async function renderCard(scenePath, card, index, targetPath) {
   await sharp(bg).composite([{ input: Buffer.from(svg) }]).png({ compressionLevel: 9 }).toFile(targetPath);
 }
 
-function resolveLegacyScene(src) {
+function resolveProviderScene(src, generatedRoot) {
   const prefix = "/generated/";
   if (!String(src || "").startsWith(prefix)) throw new Error("ARK_SCENE_PATH_INVALID");
   const relative = String(src).slice(prefix.length);
-  const absolute = path.resolve(LEGACY_ROOT, "public", "generated", relative);
-  const allowed = `${path.resolve(LEGACY_ROOT, "public", "generated")}${path.sep}`;
+  const absolute = path.resolve(generatedRoot, relative);
+  const allowed = `${path.resolve(generatedRoot)}${path.sep}`;
   if (!absolute.startsWith(allowed)) throw new Error("ARK_SCENE_PATH_OUTSIDE_ROOT");
   return absolute;
 }
@@ -115,6 +121,9 @@ function mapArkError(error) {
 }
 export function createDirectArk({ runtimeRoot }) {
   const generatedRoot = path.join(runtimeRoot, "public", "generated");
+  const profilePath = process.env.XIAOSHIMEI_GENERATION_CONTRACT_PATH
+    ? path.resolve(process.env.XIAOSHIMEI_GENERATION_CONTRACT_PATH)
+    : path.join(runtimeRoot, ".data", "generation-contract-v2.json");
 
   async function latest() {
     try {
@@ -150,7 +159,7 @@ export function createDirectArk({ runtimeRoot }) {
     const count = Math.max(1, Math.min(6, Number(imageCount) || 4));
     if (clean(topic).length < 8) throw Object.assign(new TypeError("先写至少 8 个字的选题或原始素材。"), { code: "TOPIC_TOO_SHORT" });
     try {
-      const profile = await profileContract();
+      const profile = await profileContract(profilePath);
       const draft = await providerPost("/text-draft", textEnvelope(topic, profile));
       const content = await providerPost("/generate-images", imageEnvelope(draft, count));
       const id = `ark-direct-${Date.now()}-${crypto.randomUUID().slice(0, 6)}`;
@@ -166,7 +175,7 @@ export function createDirectArk({ runtimeRoot }) {
       if (cards.length !== count || cards.some((card) => !card.headline || !card.body || !card.sceneSrc)) throw new Error("ARK_CONTENT_INCOMPLETE");
 
       for (let index = 0; index < cards.length; index += 1) {
-        const legacyScene = resolveLegacyScene(cards[index].sceneSrc);
+        const legacyScene = resolveProviderScene(cards[index].sceneSrc, generatedRoot);
         const scenePath = path.join(dir, `scene-${index + 1}.png`);
         const cardPath = path.join(dir, `card-${index + 1}.png`);
         await sharp(legacyScene).png().toFile(scenePath);
@@ -211,7 +220,7 @@ export function createDirectArk({ runtimeRoot }) {
       const dir = path.join(generatedRoot, id);
       const target = path.join(dir, "scene.png");
       await fs.mkdir(dir, { recursive: true });
-      await sharp(resolveLegacyScene(probe.src)).png().toFile(target);
+      await sharp(resolveProviderScene(probe.src, generatedRoot)).png().toFile(target);
       await fs.writeFile(path.join(dir, "receipt.json"), JSON.stringify({
         schema: "xiaoshimei.direct-image-probe.v1", id, createdAt: new Date().toISOString(), provider: "volcengine-ark", upstream: probe,
       }, null, 2), "utf8");

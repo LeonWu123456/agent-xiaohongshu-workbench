@@ -1,6 +1,8 @@
 import { exec } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import express from "express";
@@ -21,10 +23,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeRoot = process.env.AGENT_XHS_RUNTIME_DIR ? path.resolve(process.env.AGENT_XHS_RUNTIME_DIR) : root;
 const canonicalStudioDist = process.env.XIAOSHIMEI_CANONICAL_DIST
   ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_DIST)
-  : "/Users/a1-6/.mesy/runtime/xiaoshimei-studio/dist";
+  : path.resolve(root, "dist");
 const canonicalStudioPublic = process.env.XIAOSHIMEI_CANONICAL_PUBLIC
   ? path.resolve(process.env.XIAOSHIMEI_CANONICAL_PUBLIC)
-  : path.resolve(root, "../Xiaoshimei-Studio/public");
+  : path.resolve(root, "public");
 const canonicalGeneratedDir = path.join(canonicalStudioPublic, "generated");
 const dataDir = path.join(runtimeRoot, ".data");
 const statePath = path.join(dataDir, "workspace.json");
@@ -238,10 +240,51 @@ async function toolProbe(command) {
 }
 
 const app = express();
+const localExports = new Map();
 app.use(express.json({ limit: "200kb" }));
 app.use("/generated", express.static(canonicalGeneratedDir, { fallthrough: true, etag: false, maxAge: 0 }));
 app.use("/generated", express.static(generatedDir, { fallthrough: false, etag: false, maxAge: 0 }));
 app.use("/brand", express.static(brandDir, { fallthrough: false }));
+
+async function saveExportToDownloads(filename, bytes) {
+  const downloadsDir = path.join(homedir(), "Downloads");
+  await fs.mkdir(downloadsDir, { recursive: true });
+  const extension = path.extname(filename);
+  const stem = path.basename(filename, extension);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const suffix = attempt === 0 ? "" : `-${new Date().toISOString().replace(/[:.]/g, "-")}-${attempt}`;
+    const target = path.join(downloadsDir, `${stem}${suffix}${extension}`);
+    try {
+      await fs.writeFile(target, bytes, { flag: "wx" });
+      return target;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("EXPORT_FILENAME_COLLISION_LIMIT");
+}
+
+app.post("/api/local-export", express.raw({ type: ["application/zip", "application/octet-stream"], limit: "120mb" }), async (request, response) => {
+  if (!Buffer.isBuffer(request.body) || request.body.length < 1) return response.status(400).json({ error: "EXPORT_BYTES_REQUIRED" });
+  const requestedName = decodeURIComponent(String(request.headers["x-export-filename"] || "download.zip"));
+  const filename = requestedName.replace(/[\\/\0\r\n]/g, "-").slice(0, 120) || "download.zip";
+  const token = randomUUID();
+  const savedPath = await saveExportToDownloads(filename, request.body);
+  localExports.set(token, { bytes: request.body, filename, createdAt: Date.now() });
+  for (const [id, value] of localExports) if (Date.now() - value.createdAt > 10 * 60_000) localExports.delete(id);
+  response.status(201).json({ download_url: `/api/local-export/${token}`, filename, size: request.body.length, saved_path: savedPath });
+});
+
+app.get("/api/local-export/:token", (request, response) => {
+  const item = localExports.get(String(request.params.token || ""));
+  if (!item) return response.status(404).json({ error: "EXPORT_NOT_FOUND_OR_EXPIRED" });
+  response.setHeader("content-type", "application/zip");
+  response.setHeader("content-length", String(item.bytes.length));
+  response.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(item.filename)}`);
+  response.setHeader("cache-control", "no-store");
+  response.on("finish", () => localExports.delete(request.params.token));
+  response.send(item.bytes);
+});
 
 app.get("/api/workspace", async (_request, response) => {
   responseWorkspace(response, await stateStore.read());

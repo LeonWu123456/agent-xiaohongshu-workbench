@@ -9,7 +9,7 @@
 </p>
 
 > [!IMPORTANT]
-> **MeSy 当前运行真相（2026-08-20）**：4184 现在服务的是 `../Xiaoshimei-Studio` 构建到 `~/.mesy/runtime/xiaoshimei-studio/dist` 的 canonical UI；本仓库当前主要承担 4184 server/API 壳、GitHub 基座与迁移证据。真实生成主路为本机 4175 `volcengine-ark` Provider。下面的 Codex-only/GitHub-base 说明保留为上游基座文档，不得覆盖当前运行真相。完整不缩水合同见 `../Xiaoshimei-Studio/PRODUCT_CONTRACT.md`。
+> **MeSy 当前运行真相（2026-08-22）**：本仓库已经是小师妹工作站唯一源码与运行原件；4184 直接服务本仓库的 `dist` 与 API，4175 是本机 `volcengine-ark` Provider。Workspace V2 的稳定原件是 `Projects/Workstreams/Xiaoshimei-Studio-v2`，状态视图为 `Projects/Views/ByStatus/ACTIVE/Xiaoshimei-Studio-v2`。旧版已经停止运行并按可恢复方式退役。完整不缩水合同见 [PRODUCT_CONTRACT.md](./PRODUCT_CONTRACT.md)。
 
 > 一个依托 **Codex CLI** 运行的本地小红书图文内容工作台：从热点研究、笔记拆解、原创文稿和去 AI 味，到品牌配图、完整预览与人工确认发布。
 
@@ -111,7 +111,7 @@ Windows x64 用户可从 [GitHub Releases](https://github.com/EthanYoQ/agent-xia
 在自己的 Mac 上可运行：
 
 ```bash
-npm ci
+npm ci --include=dev --workspaces=false
 npm run package:mac:arm64
 ```
 
@@ -135,14 +135,14 @@ codex --version
 ```powershell
 git clone https://github.com/EthanYoQ/agent-xiaohongshu-workbench.git
 cd agent-xiaohongshu-workbench
-npm install
+npm install --omit=dev --workspaces=false
 npm run setup
-npm run dev
+npm start
 ```
 
-打开终端提示的本地地址，默认是 `http://127.0.0.1:4173`。
+`npm start` 会同时启动 `http://127.0.0.1:4184` 的完整工作台和 `4175` 的本机生成服务；不能只启动网页，否则界面虽然能打开，“生成文字”仍会因为 Provider 离线而不可用。仅做无生成能力的静态/接口调试时，才使用 `npm run start:web`。
 
-`npm install` 会安装项目需要的 OpenCLI；项目所需的 Lingzao、中文去 AI 味和 OpenCLI 浏览器 Skill 已随仓库包含，无需再克隆其他 Skill 项目。
+根目录默认只安装工作台运行依赖，不自动安装体积较大的桌面打包工具。需要打桌面包时使用上面的 `--include=dev` 命令。项目所需的 Lingzao、中文去 AI 味和 OpenCLI 浏览器 Skill 已随仓库包含，无需再克隆其他 Skill 项目。
 
 `node_modules` 不会被提交到 Git。它属于标准公开依赖的本地安装结果，而不是项目交付物；Python 也不是本项目的运行前置条件。
 
@@ -206,12 +206,12 @@ npm run dev
 ├─ scripts/                        # 媒体探针、图片处理、运行时检查
 ├─ public/                         # 项目 logo；运行时生成目录被忽略
 ├─ desktop/                        # Windows 桌面启动器
-├─ packages/share-site/            # 可选的静态协作预览站点
+├─ deployment/                     # GitHub → Vercel 发布与回滚手册
+├─ logic/                          # 产品逻辑、体验标准与连续性记录
 ├─ docs/seo/                       # 仓库 SEO 元数据与基线记录
-└─ test/                           # 核心工作流单元测试
+├─ test/                           # 上游核心工作流单元测试
+└─ tests/                          # 完整工作台与布局回归测试
 ```
-
-`packages/share-site` 是不接登录态的可分享演示站点：它只在访问者浏览器本地保存演示编辑，不会代替本地工作台调用 Codex、抓取热点、生成图片或发布。
 
 ## 验证与开发
 
@@ -219,10 +219,11 @@ npm run dev
 npm run verify:runtime
 npm test
 npm run build
-npm run build:share
 npm run package:win
 npm run package:mac:arm64 # 仅 macOS；GitHub Actions 会在 macos-14 ARM64 runner 上执行
 ```
+
+正式源码以 GitHub `main` 为权威；功能分支先经过自动测试、Vercel Preview 与桌面/窄屏浏览器验收，再提升同一制品到正式域名。完整流程见 [deployment/PRODUCTION_RUNBOOK.md](./deployment/PRODUCTION_RUNBOOK.md)。
 
 ## 开源许可
 

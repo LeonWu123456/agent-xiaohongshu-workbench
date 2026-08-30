@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const serverUrl = new URL("../server/index.mjs", import.meta.url);
 
-test("4184 serves canonical Studio generated assets before v2 fallback assets", async () => {
+test("4184 serves v2 canonical generated assets before its runtime fallback", async () => {
   const source = await readFile(serverUrl, "utf8");
   assert.match(source, /canonicalGeneratedDir/);
   const canonicalMount = source.indexOf('app.use("/generated", express.static(canonicalGeneratedDir');
