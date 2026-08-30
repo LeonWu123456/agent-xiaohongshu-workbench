@@ -27,6 +27,16 @@
 
 ## 小项目现实收敛
 
+### 动作前能力激活（折叠进现有 Loop，不另建流程）
+
+- 只有需求存在多种合理解释、路线需要选型、事实会变化，或同类任务曾被 Leon 否决时，才做能力激活；明确的小修直接执行，不交“概念税”。
+- 写代码前先在当前回复内形成一屏 `Activation Brief`：`observable_effect`、`most_likely_rejection`、`key_unknown`、`selected_capabilities`（最多 5 项）、`first_reality_probe`、`reality_checks`、`stop`。它是本轮工作内存，不创建新文档、Task、Agent、Registry 或 Queue。
+- 先查本项目合同/逻辑地图/AGENTS、项目内 Skill、当前 Task Evidence、源码与 Runtime Reality；概念只用来扩大检索词，不直接当答案。内部可广召回 8–12 项，最终只加载 3–5 项，只有会改变路线的 2–3 项才深查外部来源。
+- 每个入选能力必须落到可执行对象：`Skill / Tool / Knowledge / source / method`、为什么现在需要、预期改变哪个决策、成本/风险、如何现实验收；其余候选给一句淘汰理由，防止下一轮重新研究。
+- 只在答案会改变外部/不可逆动作、验收无法观察，或缺少 Leon 专属资产/权限时，询问一个信息价值最高的问题；否则写明可回滚假设并继续。
+- 执行中按“行动 → 环境观察 → 校验”回读；Reality 推翻路线时只允许一次有界重新检索，然后修正第一步。禁止无限头脑风暴、把全量 Tools 塞进上下文，或让自我反思直接改全局记忆。
+- 如果现有 Production 与关键旅程已经通过，不得为了显得勤快继续造功能；第一探针应转向真实消费者、真实内容和结果窗口。好车已经到终点，就别继续给方向盘贴钻。
+
 - Codex 每轮先绑定一个用户可观察结果和一条最短关键旅程；本项目当前旅程是“原文 → 文字 → 配图 → 排版 → 编辑 → 保存/重载 → 下载”。测试项、提交数、文档数和部署次数都不是用户结果。
 - 证据分三层：`mechanism`（测试/构建）、`target`（同一 commit 的 Preview/API/静态资产）、`reality`（该 Preview 上的桌面与窄屏关键旅程）。三层必须分别报告，任何适用层缺失都不得说“已完成”“可用了”或请求切生产。
 - 浏览器现实验收必须使用本轮 commit 和能触发本轮缺陷的数据。视觉问题必须看当前渲染结果；不能从 CSS、DOM、HTTP 200 或旧截图推断视觉 PASS。下载必须由真实用户手势触发并核对落盘文件；保存/重载必须证明编辑仍在。
@@ -37,8 +47,10 @@
 
 ```yaml
 small_project_reality_convergence:
-  incident_ref: artifacts/design-qa/full-dogfood-20260830/RESULT.md
-  applies_only_when: 用户要求可见产品效果、修复用户旅程，或准备把 Preview 提升到生产
+  incident_ref:
+    - artifacts/design-qa/full-dogfood-20260830/RESULT.md
+    - ../../Tasks/TSK-260827-1821-Radar-Q注意力智能现实闭环/Evidence/PRE_ACTION_INTELLIGENCE_INVESTIGATION_20260830.md
+  applies_only_when: 用户要求可见产品效果、修复用户旅程、存在多种合理路线，或准备把 Preview 提升到生产
   false_positive_cost: 真实桌面/窄屏与保存下载回读会增加一次验收时间；纯后端、文档或无 UI 变更只跑受影响旅程
   review_when: 小师妹闭环后，再用一个独立小项目检验是否减少返工和“测试绿但现实坏”
   kill_if: 该合同连续两个独立项目只增加仪式时间，且未减少现实缺陷、返工轮数或用户追问
