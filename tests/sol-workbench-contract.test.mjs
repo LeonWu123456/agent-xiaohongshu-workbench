@@ -130,6 +130,7 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /XHS editorial contract v11/);
   assert.match(cssSource, /XHS editorial contract v12/);
   assert.match(cssSource, /XHS editorial contract v14/);
+  assert.match(cssSource, /XHS editorial contract v15/);
   assert.match(cssSource, /height: 33\.333%/);
   assert.match(cssSource, /height: 66\.667% !important/);
   assert.match(cssSource, /aspect-ratio: 9 \/ 8 !important/);
@@ -137,6 +138,7 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /grid-template-columns: minmax\(0, 1fr\) auto !important/);
   assert.match(cssSource, /grid-template-columns: auto minmax\(0, 1fr\) !important/);
   assert.match(cssSource, /data-title-length="long"[\s\S]*white-space: normal !important/);
+  assert.match(cssSource, /data-layout="cover-poster"[\s\S]*html-page__title-phrase[\s\S]*white-space: normal !important/);
   assert.match(cssSource, /data-panel-count="3"[\s\S]*width: 21\.75cqw !important; height: 29cqw !important/);
   assert.match(cssSource, /data-image-edge="left-first"[\s\S]*grid-template-columns: auto minmax\(0, 1fr\) !important/);
   assert.match(htmlSource, /html-page__title-phrase/);
