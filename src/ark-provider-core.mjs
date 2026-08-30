@@ -229,6 +229,14 @@ function assertImagePrompt(prompt, path, context, visualAction = "") {
   }
 }
 
+function repairEyeCareImagePrompt(prompt, visualAction, context) {
+  const evidence = `${visualAction}\n${prompt}`;
+  const isEyeCare = context?.pillar === "wellness" && /眼|护眼|视疲劳/.test(String(context.topic || ""));
+  const hasEyeEvidence = /眼|眼睑|眼球|视线|放下.{0,8}手机|手机.{0,8}(倒扣|扣|屏幕朝下)|屏幕朝下|远离.{0,8}屏幕/.test(evidence) || EYE_CARE_PREPARATION_PATTERN.test(evidence);
+  if (!context?.repairEyeCareEvidence || !isEyeCare || hasEyeEvidence) return prompt;
+  return `${prompt.replace(/[。；;\s]+$/g, "")}。小师妹在完成上述动作时身体保持远离屏幕，视线望向窗外远处并自然眨眼，眼部状态清楚可见。`;
+}
+
 function nonEmptyString(value, path) {
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${path} must be a non-empty string`);
   return value.trim();
@@ -365,7 +373,7 @@ export function extractArkTextDraft(response, context = {}) {
   return validateArkTextDraft(parseFunctionArguments(response, ARK_TEXT_DRAFT_TOOL), context);
 }
 
-export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback = "", productionMode = "smart") {
+export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback = "", productionMode = "smart", referenceNote = "") {
   if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 8) throw new TypeError("page count must be 1-8");
   const normalizedProductionMode = normalizeProductionMode(productionMode);
   const instructions = [
@@ -391,6 +399,7 @@ export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback
     `确认标签：${draft.tags.join("、")}`,
     `原始主题：${draft.source_input}`,
     `用户填写的图片上下文：\n${promptContextLines(draft.prompt_context, IMAGE_CONTEXT_FIELDS).join("\n") || "无"}`,
+    `用户补充的动作参考说明（只约束动作，不改变人物身份与发布文字）：${String(referenceNote || "").trim().slice(0, 500) || "无"}`,
     `上一次质量检查反馈（首次为空）：${String(qualityFeedback || "").trim() || "无"}`,
   ].join("\n\n");
   return { model: nonEmptyString(model, "text model"), store: false, thinking: { type: "disabled" }, max_output_tokens: 8192, input: [{ type: "message", role: "user", content: instructions }], tools: [{ type: "function", name: ARK_PAGE_PLAN_TOOL, description: `返回恰好${pageCount}页的图文分镜`, strict: true, parameters: pagePlanParameters(pageCount) }], tool_choice: { type: "function", name: ARK_PAGE_PLAN_TOOL } };
@@ -421,6 +430,7 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
         highlightPhrases: normalizeHighlightPhrases(panel?.highlight_phrases, `${panel?.title || ""}\n${panel?.body || ""}`, `pages[${index}].panels[${panelIndex}].highlight_phrases`),
       })),
     };
+    normalized.imagePrompt = repairEyeCareImagePrompt(normalized.imagePrompt, normalized.visualAction, context);
     normalized.designProgram = normalizeDesignProgram(page?.design_program, {
       page_role: normalized.pageRole,
       title: normalized.title,

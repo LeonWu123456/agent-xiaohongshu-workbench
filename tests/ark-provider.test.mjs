@@ -110,6 +110,19 @@ test("wellness page plans accept concrete natural-language hand and eye actions"
   assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages }) }] }, 2, { topic: "刷手机后眼睛发紧", pillar: "wellness", goal: "save" }).length, 2);
 });
 
+test("the final bounded page-plan repair adds visible eye state without changing reader copy", () => {
+  const pages = [
+    { page_role: "hook", eyebrow: "先暂停盯屏", title: "让视线离开电脑屏幕", body: "连续盯屏后先暂停手里的输入，把视线移到窗外远处并自然眨眼，给眼睛留出短暂的离屏时间。", visual_action: "小师妹把双手从键盘移开并望向窗外远处", image_prompt: "竖幅三比四中景，小师妹坐在木质办公桌前，把双手从键盘移开，身体保持远离屏幕，眼睛望向窗外远处并自然眨眼，桌面简洁，暖调自然窗光，上方留白，不出现文字水印或边框。" },
+    { page_role: "method", eyebrow: "起身换姿势", title: "伸展肩颈再回到座位", body: "接着缓慢起身，轻轻伸展肩颈和背部；动作保持舒适，不追求幅度，出现疼痛或视物异常就立即停止。", visual_action: "小师妹离开办公椅缓慢伸展肩颈", image_prompt: "竖幅三比四中景，小师妹站在办公椅旁缓慢伸展肩颈，双手自然垂在身体两侧，桌面和电脑留在背景，柔和自然光，人物动作完整，不出现文字水印或边框。" },
+  ];
+  const response = { output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages }) }] };
+  assert.throws(() => extractArkPagePlan(response, 2, { topic: "工作太久眼睛发紧", pillar: "wellness", goal: "save" }), /eye_care_action_not_visible/);
+  const repaired = extractArkPagePlan(response, 2, { topic: "工作太久眼睛发紧", pillar: "wellness", goal: "save", repairEyeCareEvidence: true });
+  assert.equal(repaired[1].body, pages[1].body);
+  assert.match(repaired[1].imagePrompt, /视线望向窗外远处并自然眨眼/);
+  assert.match(repaired[1].imagePrompt, /眼部状态清楚可见/);
+});
+
 test("eye-care page plans allow preparation pages without forcing an eye into every frame", () => {
   const pages = [
     { page_role: "hook", eyebrow: "先暂停刷屏", title: "先把手机放到桌面一边", body: "长时间刷手机后眼眶发紧，先停下来，把手机屏幕朝下平放在桌面上，让视线离开屏幕。", visual_action: "小师妹把手机屏幕朝下平放在木桌上", image_prompt: "竖幅三比四中景，小师妹坐在木质书桌旁，右手把手机屏幕朝下平放在桌面上，视线离开屏幕看向窗边，米杏暖光，左侧留出干净区域，不出现任何文字水印或边框。" },
@@ -139,6 +152,8 @@ test("page planning receives the selected production mode before any image call"
   assert.match(smart.input[0].content, /整组页面当成完整作品构思/);
   assert.ok(smart.tools[0].parameters.properties.pages.items.required.includes("design_program"));
   assert.deepEqual(smart.tools[0].parameters.properties.pages.items.properties.design_program.properties.composition.enum, ["cover-focus", "editorial-flow", "feature-lead", "quiet-coda"]);
+  const referenced = buildArkPagePlanRequest(draft, 3, "doubao-text", "", "smart", "人物远离屏幕并自然眨眼");
+  assert.match(referenced.input[0].content, /人物远离屏幕并自然眨眼/);
 });
 
 test("Ark image request carries identity reference and forbids baked-in text", () => {

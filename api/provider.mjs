@@ -237,9 +237,9 @@ async function generateImages(input, settings, request) {
   const planAttempts = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
-    const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode), "PAGE_PLAN_MODEL_CALL_FAILED");
+    const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
     try {
-      pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode });
+      pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: attempt === 3 });
       planAttempts.push({ attempt, status: "PASS" });
       break;
     } catch (error) {
