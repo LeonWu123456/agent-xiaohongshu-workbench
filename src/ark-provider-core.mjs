@@ -196,6 +196,28 @@ export function textQualityRetryGuidance(error) {
   return "上一版没有通过文字质量检查。只修复命中的问题，保留主题、事实边界和用户要求；不要复述错误码或被拒原句。";
 }
 
+export function pagePlanRetryGuidance(error) {
+  const code = String(error?.message || error || "");
+  const pageMatch = code.match(/(?:pages\[|FAILED:)(\d+)/);
+  const pageLabel = pageMatch ? `第${Number(pageMatch[1]) + 1}页` : "命中页面";
+  if (/PAGE_PLAN_LAYOUT_BUDGET_FAILED/.test(code)) {
+    return `${pageLabel}超出排版字数预算。下一版只压缩该页：封面页眉最多10字、标题最多16字；内页页眉最多18字、标题最多24字；正文35–160字。保留一个主要信息任务和原有事实边界，不把镜头描述塞进正文。`;
+  }
+  if (/eye_care_action_not_visible/.test(code)) {
+    return `${pageLabel}的护眼动作无法从静态画面直接看懂。下一版必须在 visual_action 和 image_prompt 中明确写出眼睛或视线状态，并让小师妹完成一个肉眼可见动作，例如望向窗外远处并自然眨眼、指腹沿眼眶边缘轻柔按揉但不压眼球、眼球按上下左右缓慢转动，或放下手机闭眼休息；不能只写放松、休息或氛围。`;
+  }
+  if (/action_not_visually_demonstrated|VISUAL_ACTION_TOO_SHORT|VISUAL_SUBJECT_MISSING/.test(code)) {
+    return `${pageLabel}的动作合同不够可见。下一版让小师妹完成一件静态图可直接验证的具体动作，写清手的位置、眼睛或视线状态、身体姿势和关键器物；不要用微笑、看镜头、感受或抽象氛围代替动作。`;
+  }
+  if (/PANEL_BUDGET|INFO_PANELS_REQUIRED|INFO_PANEL_COUNT|HERO_COUNT|SHOT_VARIETY/.test(code)) {
+    return `${pageLabel}的信息分镜结构没有通过预算。下一版知识信息页只保留2–4个panel，恰好1个hero；每个panel标题最多28字、正文12–120字、只讲一个要点，三个以上panel至少使用两种镜头角色。`;
+  }
+  if (/BODY_TOO_SHORT/.test(code)) {
+    return `${pageLabel}的读者正文不足35字。下一版补齐一个明确判断、可执行动作或避坑边界，保持短句且不要加入镜头、光线或构图说明。`;
+  }
+  return `上一版分镜没有通过质量检查。只修复${pageLabel}命中的结构或动作问题，保留已确认发布文字、事实边界、页数和整套风格；不要复述错误码。`;
+}
+
 function assertImagePrompt(prompt, path, context, visualAction = "") {
   if (compactLength(prompt) < 55) throw new TypeError(`TEXT_QUALITY_GATE_FAILED:${path}:shot_contract_too_short`);
   if ((!visualAction && !ACTION_PATTERNS.test(prompt)) || GENERIC_PORTRAIT_PATTERN.test(`${visualAction}\n${prompt}`)) {
@@ -413,7 +435,12 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     if (index > 0 && normalized.pageRole === "hook") throw new TypeError(`PAGE_PLAN_DUPLICATE_HOOK:${index}`);
     const eyebrowLimit = index === 0 ? 10 : 18;
     const titleLimit = index === 0 ? 16 : 24;
-    if (compactLength(normalized.eyebrow) > eyebrowLimit || compactLength(normalized.title) > titleLimit || compactLength(normalized.body) > 160) throw new TypeError(`PAGE_PLAN_LAYOUT_BUDGET_FAILED:${index}`);
+    const eyebrowLength = compactLength(normalized.eyebrow);
+    const titleLength = compactLength(normalized.title);
+    const bodyLength = compactLength(normalized.body);
+    if (eyebrowLength > eyebrowLimit || titleLength > titleLimit || bodyLength > 160) {
+      throw new TypeError(`PAGE_PLAN_LAYOUT_BUDGET_FAILED:${index}:eyebrow=${eyebrowLength}/${eyebrowLimit}:title=${titleLength}/${titleLimit}:body=${bodyLength}/160`);
+    }
     if (compactLength(normalized.body) < 35) throw new TypeError(`PAGE_PLAN_BODY_TOO_SHORT:${index}`);
     if (compactLength(normalized.visualAction) < 8) throw new TypeError(`PAGE_PLAN_VISUAL_ACTION_TOO_SHORT:${index}`);
     if (normalized.panels.some((panel) => compactLength(panel.title) > 28 || compactLength(panel.body) < 12 || compactLength(panel.body) > 120 || compactLength(panel.visualAction) < 8)) throw new TypeError(`PAGE_PLAN_PANEL_BUDGET_FAILED:${index}`);

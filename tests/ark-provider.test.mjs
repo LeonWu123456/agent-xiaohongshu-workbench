@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assembleArkContent, assembleArkContentFromDraft, buildArkDraftTextRequest, buildArkImageQaRequest, buildArkImageRequest, buildArkPageCandidatePrompt, buildArkPagePlanRequest, buildArkTextRequest, classifyArkImageForStudio, composeArkPageImagePrompt, decodeArkImage, deriveArkVisualActionContract, extractArkImageQa, extractArkPagePlan, extractArkPlan, extractArkTextDraft, inspectImageBytes, isThreeByFourImage, textQualityRetryGuidance } from "../src/ark-provider-core.mjs";
+import { assembleArkContent, assembleArkContentFromDraft, buildArkDraftTextRequest, buildArkImageQaRequest, buildArkImageRequest, buildArkPageCandidatePrompt, buildArkPagePlanRequest, buildArkTextRequest, classifyArkImageForStudio, composeArkPageImagePrompt, decodeArkImage, deriveArkVisualActionContract, extractArkImageQa, extractArkPagePlan, extractArkPlan, extractArkTextDraft, inspectImageBytes, isThreeByFourImage, pagePlanRetryGuidance, textQualityRetryGuidance } from "../src/ark-provider-core.mjs";
 import { buildGenerationContract, createProfileV2 } from "../src/profile-v2.mjs";
 
 function input() { return { topic: "书院筹备中的三种进入路径", pillar: "academy", goal: "save", profile_contract: buildGenerationContract(createProfileV2()) }; }
@@ -288,6 +288,17 @@ test("text retry guidance repairs the failure class without echoing the rejected
   const request = buildArkDraftTextRequest({ ...input(), pillar: "wellness", topic: "工作太久眼睛发紧，如何用3分钟离屏恢复状态", text_requirements: "" }, "doubao-text");
   assert.doesNotMatch(request.input[0].content, /不用复杂工具/);
   assert.match(request.input[0].content, /至少3个顺序动作/);
+});
+
+test("page-plan retry guidance turns production gate codes into bounded repair instructions", () => {
+  const eyeCare = pagePlanRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:pages[4].image_prompt:eye_care_action_not_visible"));
+  assert.match(eyeCare, /第5页/);
+  assert.match(eyeCare, /眼睛或视线状态/);
+  assert.doesNotMatch(eyeCare, /eye_care_action_not_visible/);
+  const layout = pagePlanRetryGuidance(new Error("PAGE_PLAN_LAYOUT_BUDGET_FAILED:0:eyebrow=8\/10:title=19\/16:body=70\/160"));
+  assert.match(layout, /第1页/);
+  assert.match(layout, /封面页眉最多10字、标题最多16字/);
+  assert.doesNotMatch(layout, /PAGE_PLAN_LAYOUT_BUDGET_FAILED/);
 });
 
 test("two-node flow generates editable text before any image plan", () => {
