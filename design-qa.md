@@ -65,7 +65,7 @@
 - v11 导出根因闭环：百分比列宽和固定行高曾同时决定插图尺寸，使 540px 编辑器正常而 1080px 导出被拉宽。现由行高单独决定尺寸，宽度按 3:4 自动反推；最新版导出状态回读为 `COMPLETE`。
 - 经验资产：`logic/XHS_GRAPHIC_PRODUCTION_STANDARD.md`，并已由 `PRODUCT_CONTRACT.md` 引用；规则绑定源像素 Gate、结构 Gate、导出 Gate 与回归测试。
 
-Scope: local production build and runtime layout matrix only. No Vercel deployment or paid image generation is claimed.
+Scope: local production build, runtime layout matrix, Vercel Preview and stable-domain artifact readback. No new paid image generation or external Xiaohongshu publishing is claimed.
 
 passed
 

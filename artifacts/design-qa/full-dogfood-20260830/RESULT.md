@@ -44,7 +44,7 @@
 |---|---|
 | mechanism_ready | PASS_LOCAL：动态母版分隔线、边带清理、付费原图断点、语义标题换行、复制失败回读均已实现 |
 | package_verified | PASS_LOCAL_ZIP：259/259 tests，Vite build，ZIP CRC，5 张 1080×1440 PNG 逐页目检 |
-| production_applied | NOT RUN：既有 Vercel 正式版不包含本轮最新修复 |
+| production_applied | PASS：Vercel Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；稳定域名 JS/CSS 与本地构建 SHA-256 一致 |
 | runtime_operational | PASS_LOCAL：真实 Provider 完成 2 次付费图片调用并保存/刷新/导出 |
 | reality_validated | PASS_LOCAL_DOGFOOD：本地真实用户旅程可用；外部平台与读者效果未验证 |
 
