@@ -8,7 +8,7 @@
 <h2 align="center">如果有帮到你，麻烦动动小手点亮STAR ✨✨</h2>
 </p>
 
-> **正式入口**：[xiaoshimei-full-workbench.vercel.app](https://xiaoshimei-full-workbench.vercel.app/)；正式源码以 GitHub `main` 为唯一权威，Vercel Preview 验收通过后才进入正式域名。完整合同见 [PRODUCT_CONTRACT.md](./PRODUCT_CONTRACT.md)。
+> **正式入口**：[xiaoshimei-full-workbench.vercel.app](https://xiaoshimei-full-workbench.vercel.app/)；正式源码以 [`LeonWu123456/agent-xiaohongshu-workbench`](https://github.com/LeonWu123456/agent-xiaohongshu-workbench) 的 `main` 为唯一可写权威，Vercel Preview 验收通过后才进入正式域名。完整合同见 [PRODUCT_CONTRACT.md](./PRODUCT_CONTRACT.md)。
 
 > 把账号定位、原创文稿、AI 配图、智能排版、自由编辑、回载和 3:4 发布包导出组织成一条可控流程。
 
@@ -140,7 +140,7 @@ codex --version
 ### 2. 安装项目依赖
 
 ```powershell
-git clone https://github.com/EthanYoQ/agent-xiaohongshu-workbench.git
+git clone https://github.com/LeonWu123456/agent-xiaohongshu-workbench.git
 cd agent-xiaohongshu-workbench
 npm install --omit=dev --workspaces=false
 npm run setup

@@ -26,4 +26,4 @@
 - `artifacts/provider-runs`：104 个文件、49,236,445 bytes，迁至 `~/.mesy/runtime/packages/xiaoshimei-studio-v2/artifacts/provider-runs/`；聚合 SHA-256 `ed20939a3adbfc28a6f7a5cad59354428446c922c52de32e144b9c241734bad4`。
 - 其余历史二进制制品：284 个文件、67,620,868 bytes，迁至 `~/archive/2608-1954-Xiaoshimei-Studio-v2-design-artifacts/`；聚合 SHA-256 `25ea3c1c632657d9454a9b4ccfc1d7159566b20fd66e7477dc26f47e5715f980`。
 - 公开仓库隐私扫描后，账号生成合同迁至外置 runtime `.data/generation-contract-v2.json`（SHA-256 `3a72bc4b790fc81b4f179f6f10320f740242edd0a055059ae3ccd8756b70d66d`）；5 个历史 authority 测试夹具与 3 个旧部署/演示脚本冷藏，不进入 GitHub。
-- 项目 `artifacts/` 只保留 4 份结果/manifest，共约 20 KiB。服务消费者回读仍待新 runtime 启动后确认。
+- 项目 `artifacts/` 只保留 4 份结果/manifest，共约 20 KiB。新 runtime 启动后，4184 首页、4175 `/health` 与迁移后的 PNG 均已现场回读成功；项目含可重建 `dist` 时总量约 19 MiB。

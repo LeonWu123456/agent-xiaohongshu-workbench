@@ -14,7 +14,8 @@
 → 正式域名回读
 ```
 
-- 源码权威：`https://github.com/EthanYoQ/agent-xiaohongshu-workbench` 的 `main`。
+- 可写源码权威：`https://github.com/LeonWu123456/agent-xiaohongshu-workbench` 的 `main`。
+- 上游同步：`https://github.com/EthanYoQ/agent-xiaohongshu-workbench/pull/13`；当前账号对上游只有 READ，不把等待上游合并当成生产阻塞。
 - 当前集成分支：`xiaoshimei-v2`。
 - 唯一正式 Vercel 项目：`xiaoshimei-full-workbench`。
 - 稳定域名：`https://xiaoshimei-full-workbench.vercel.app/`。
@@ -45,6 +46,17 @@
 3. 回读稳定域名的 HTML/JS 资源与核心路径。
 4. GitHub 用修复提交前进；禁止强推重写已经发布的 `main`。
 
-## 当前边界
+## 2026-08-30 发布记录
 
-2026-08-30 开始把此前本地大工作树收敛进 GitHub/Vercel 正式链。完成前，既有正式域名仍是旧构建；不能把本地 v13 设计程序宣称为线上已生效。
+| 字段 | 值 |
+|---|---|
+| source commit | `0df5f59a64a2533045cf6d8d2fe666bf44e8a05a`；连续性补记提交随后进入同一 PR |
+| GitHub | fork 分支 `xiaoshimei-v2`；CI run `33311107288` 全绿；上游 PR `#13` |
+| Preview deployment | `dpl_CLPNZ9vJZX5T2pdwyq8L2Mz3tPMy` |
+| Preview URL | `https://xiaoshimei-full-workbench-29ft74u88-892350620-5733s-projects.vercel.app`（Vercel Authentication 保护） |
+| Preview QA | Vercel inspect Ready；HTML/JS/CSS 200；1440px 与 360px 浏览器回读；360px 无横向溢出；编辑后刷新保持；无 Key 请求 401 `ARK_API_KEY_REQUIRED`；本地完整五页编辑/撤销/回载/导出证据见 `artifacts/design-qa/full-dogfood-20260830/RESULT.md` |
+| Production deployment | Preview 通过后填写 |
+| stable-domain readback | Production 提升后填写 |
+| rollback deployment | `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |
+
+当前边界：Preview 已验证，正式域名仍指向上一份 Production；未使用付费生成调用，未验证外部小红书发布或读者效果。

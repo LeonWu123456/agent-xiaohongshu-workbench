@@ -27,7 +27,7 @@
 
 ## 源码与发布权威
 
-- GitHub `EthanYoQ/agent-xiaohongshu-workbench` 的 `main` 是正式源码权威；本地目录是工作副本，不得长期承载未推送的唯一实现。
+- GitHub `LeonWu123456/agent-xiaohongshu-workbench` 的 `main` 是当前可写正式源码权威；上游 `EthanYoQ/agent-xiaohongshu-workbench` 仅通过 PR 同步。本地目录是工作副本，不得长期承载未推送的唯一实现。
 - `xiaoshimei-v2` 等功能分支必须先通过 `npm test`、`npm run build`、Vercel Preview 和桌面/窄屏浏览器验收，再合并 `main`。
 - 正式 Vercel 项目只维护 `xiaoshimei-full-workbench` 这一入口；不得再造 layout-preview、share-site 或第二套线上工作台。
 - 每次生产提升都要把 commit、Preview、Production deployment、正式域名回读和 rollback deployment 写入 `deployment/PRODUCTION_RUNBOOK.md`，并同步更新 `XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md` 的五层真相。
