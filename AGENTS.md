@@ -25,6 +25,26 @@
 - 热点研究只接纳有可验证点赞与收藏数据的爆款图文：点赞至少 300，或收藏至少 100，或点赞与收藏合计至少 400。评论数不得单独使笔记达标，因为其中可能包含作者自评；不达标或指标缺失的笔记不能进入 signals、选题证据或拆解。
 - 故事线仍只收录有笔记 ID 或公开 URL 的已发布内容。除发布成功即时归档外，工作台必须提供只读的创作后台历史同步，用于跨版本、清空本地数据或旧任务未归档后的恢复；不得把 failed、unknown 或 draft_saved 自动当成已发布。
 
+## 小项目现实收敛
+
+- Codex 每轮先绑定一个用户可观察结果和一条最短关键旅程；本项目当前旅程是“原文 → 文字 → 配图 → 排版 → 编辑 → 保存/重载 → 下载”。测试项、提交数、文档数和部署次数都不是用户结果。
+- 证据分三层：`mechanism`（测试/构建）、`target`（同一 commit 的 Preview/API/静态资产）、`reality`（该 Preview 上的桌面与窄屏关键旅程）。三层必须分别报告，任何适用层缺失都不得说“已完成”“可用了”或请求切生产。
+- 浏览器现实验收必须使用本轮 commit 和能触发本轮缺陷的数据。视觉问题必须看当前渲染结果；不能从 CSS、DOM、HTTP 200 或旧截图推断视觉 PASS。下载必须由真实用户手势触发并核对落盘文件；保存/重载必须证明编辑仍在。
+- 一旦现实验收发现缺陷，留在同一 Task、同一分支和同一最短旅程内修复并重跑失败切片；不得为每个缺陷重开项目、重写架构或把“下一轮继续”当交付。只有出现权限、Secret、外部依赖或不可逆风险的真实阻塞才停。
+- 并行时实行单写者：项目 Codex 修改产品代码；治理 Agent 只调整 Acceptance、Guard 和 Evidence，不同时改同一代码写集。治理发现只通过当前 Task/AGENTS 传入，不建立第二队列或控制面。
+- 对 Leon 的状态只允许“可用 / 局部可用 / 不可用”，并附当前 commit、已通过的现实旅程和唯一剩余阻塞。失败日志、测试绿和 Preview Ready 只能作证据，不能替代这个结论。
+- 生产提升只允许来自通过三层证据的 commit；提升后必须回读正式域名，并保留一个已知可用 rollback deployment。若正式回读与 Preview 不一致，立即回滚，不继续在生产试错。
+
+```yaml
+small_project_reality_convergence:
+  incident_ref: artifacts/design-qa/full-dogfood-20260830/RESULT.md
+  applies_only_when: 用户要求可见产品效果、修复用户旅程，或准备把 Preview 提升到生产
+  false_positive_cost: 真实桌面/窄屏与保存下载回读会增加一次验收时间；纯后端、文档或无 UI 变更只跑受影响旅程
+  review_when: 小师妹闭环后，再用一个独立小项目检验是否减少返工和“测试绿但现实坏”
+  kill_if: 该合同连续两个独立项目只增加仪式时间，且未减少现实缺陷、返工轮数或用户追问
+  owner: Xiaoshimei 项目 Codex Owner
+```
+
 ## 源码与发布权威
 
 - GitHub `LeonWu123456/agent-xiaohongshu-workbench` 的 `main` 是当前可写正式源码权威；上游 `EthanYoQ/agent-xiaohongshu-workbench` 仅通过 PR 同步。本地目录是工作副本，不得长期承载未推送的唯一实现。
