@@ -103,3 +103,14 @@
 - 本地根治候选已具备 mechanism + local reality evidence：自适应真实分界、失败补绘、付费前内容门、唯一 `xhs-page-contract.css`、HTML state v12、真实调用验证态、DOM 文本盒门；271/271 tests 与 Vite build PASS。476px 实机五页逐页量测均无 overflow/layout warning；封面 KV 9:8，全部内页插图 3:4；改字、模块移动和撤销成功。
 - 本地真实下载证据：`~/Downloads/小师妹-发布包-2026-08-30T15-52-46-231Z-1.zip`，8 个文件可解，5 张 PNG 均为 1080×1440；封面和三单元内页已实际打开目检。该证据验证当前候选的编辑与导出，不替代新 BYOK 母版切片验证。
 - 本轮剩余生产条件仍从零计算：Vercel Preview、真实 BYOK 新生成、Preview ZIP 实物、同一 deployment promote 与稳定域名回读。任何一项未通过，保持旧 Production 并明确其视觉不可交付，不得把旧 R30 复用为新 PASS。
+
+### 根治候选 Preview（尚未提升）
+
+| 字段 | 值 |
+|---|---|
+| source commit | `166ae87` · branch `fix/root-cure-layout-pipeline-20260830` |
+| GitHub | fork PR `#3`；quality run `33321044122` PASS |
+| Preview deployment | `dpl_A7Q7kiA5RLEQqqiiGyt1kZeTxJeP` · Ready |
+| Preview URL | `https://xiaoshimei-full-workbench-kodvqmfy3-892350620-5733s-projects.vercel.app/`（Vercel Authentication 保护） |
+| Preview readback | 登录态浏览器实际打开并显示“小师妹 Studio”；新稿、创作阶段、回载入口与 Provider “离线”状态可见；无错误覆盖层 |
+| not yet proven | 尚未向 Preview 上传本地稿；尚未输入 BYOK、产生新母版、复核真实分界、下载 Preview ZIP；不得提升 Production |
