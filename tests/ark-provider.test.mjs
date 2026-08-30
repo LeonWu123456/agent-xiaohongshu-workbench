@@ -313,7 +313,12 @@ test("page-plan retry guidance turns production gate codes into bounded repair i
   const layout = pagePlanRetryGuidance(new Error("PAGE_PLAN_LAYOUT_BUDGET_FAILED:0:eyebrow=8\/10:title=19\/16:body=70\/160"));
   assert.match(layout, /第1页/);
   assert.match(layout, /封面页眉最多10字、标题最多16字/);
+  assert.match(layout, /内页页眉最多14字、标题最多18字/);
   assert.doesNotMatch(layout, /PAGE_PLAN_LAYOUT_BUDGET_FAILED/);
+  const duplicated = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:2:XHS_HEADING_PREFIX_DUPLICATED"));
+  assert.match(duplicated, /只保留一次层级编号/);
+  const crowded = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_PANEL_COPY_BUDGET"));
+  assert.match(crowded, /3格页最多52字/);
 });
 
 test("two-node flow generates editable text before any image plan", () => {

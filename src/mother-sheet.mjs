@@ -239,7 +239,7 @@ export function cropRegionForPreferredAspect(width, height, preferredAspect = "a
 }
 
 function aspectCompositionInstruction() {
-  return "最终成品固定为完整3:4竖幅：小师妹的头顶、发髻、发带、双手、脚和关键器物必须全部落在中央安全区；主体不超过画幅约72%，四周保留纯白呼吸边，但不得出现相框式白边";
+  return "最终成品固定为完整3:4竖幅：小师妹的头顶、发髻、发带、双手、脚和关键器物必须全部落在中央安全区；人物与关键器物组合的包围盒占画幅长边约58%–72%，不能缩成小贴纸，也不能顶边裁切；四周保留纯白呼吸边，但不得出现相框式白边";
 }
 
 export function buildMotherSheetPrompt(jobOrUnits, { styleLock = null, imageContext = null } = {}) {
@@ -257,7 +257,7 @@ export function buildMotherSheetPrompt(jobOrUnits, { styleLock = null, imageCont
     const isKv = job.template === MOTHER_SHEET_KV_TEMPLATE && index === (job.kv_unit_index ?? MOTHER_SHEET_KV_UNIT_INDEX);
     const aspect = isKv ? "9:8" : "3:4";
     const composition = isKv
-      ? "最终KV直接按9:8横向完成构图：主体清楚、动作和关键器物完整，并给封面标题留出独立空间；不得拆成六张小图"
+      ? "最终KV直接按9:8横向完成构图：人物与关键器物组合占画幅主要面积，主体清楚、动作和关键器物完整，不缩成小贴纸；标题在页面上方另排，KV自身不得预留空白标题框；不得拆成六张小图"
       : aspectCompositionInstruction();
     return `第${index + 1}个有效区域｜${unit.unit_id}｜内容角色：${clean(unit.content_role, "support")}｜镜头角色：${clean(unit.shot_role, "action")}｜媒体角色：${clean(unit.media_role, "inline_sticker")}｜目标比例：${aspect}｜${composition}｜${action}｜${details}`;
   }).join("\n");

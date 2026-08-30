@@ -1,7 +1,7 @@
 import { mediaPolicyFor, panelPreferredAspect } from "./media-role.mjs";
 import { designProgramLayout, normalizeDesignProgram } from "./design-program.mjs";
 
-export const HTML_LAYOUT_STATE_VERSION = 11;
+export const HTML_LAYOUT_STATE_VERSION = 12;
 const HTML_ROLE_LAYOUT_MIGRATION_VERSION = 9;
 export const HTML_IMAGE_FOCAL_MIN = 12;
 export const HTML_IMAGE_FOCAL_MAX = 88;

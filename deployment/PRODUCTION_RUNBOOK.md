@@ -94,4 +94,12 @@
 | asset identity | `index-BHKoq_Od.css` SHA-256 `c50209b7dfc35784cc8b83c0b4677c86ef8c04dad859bdb91673097190514f37`；`index-CzpwE6Sa.js` SHA-256 `fc13f671e0ee8a8a3c908628c612187982aeb64df1e5a0731c38bff953b881d6`；线上/本地逐字节一致 |
 | rollback deployment | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；更早安全点 `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |
 
-当前边界：工作台 Production 已可用；BYOK 仍由使用者当前标签页提供，不持久化。外部小红书发布、账号操作和 24h/72h/7d 读者效果未执行。
+当前边界：旧部署的传输与下载机制曾通过，但下述新现实已撤销“工作台 Production 可交付”的总判断。
+
+## 2026-08-30 视觉质量事故重新打开
+
+- 当前 Production `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj` 的“Ready、资源同构、BYOK 曾成功、ZIP 曾落盘”事实继续有效，但用户在同一正式域名的新生成中给出封面串入 A/B/C、内页人物截头、重复步骤前缀、错字和失控排版的现场证据。因此它不再是可交付视觉基线。
+- 根因不是单页参数：首张母版固定按 2/3 切割；Page Plan 容量门未在公网付费调用前强制；页面 CSS v3–v15 叠加；配置存在被显示成连接成功；CI 没有绑定完成作品的视觉 dogfood。
+- 本地根治候选已具备 mechanism + local reality evidence：自适应真实分界、失败补绘、付费前内容门、唯一 `xhs-page-contract.css`、HTML state v12、真实调用验证态、DOM 文本盒门；271/271 tests 与 Vite build PASS。476px 实机五页逐页量测均无 overflow/layout warning；封面 KV 9:8，全部内页插图 3:4；改字、模块移动和撤销成功。
+- 本地真实下载证据：`~/Downloads/小师妹-发布包-2026-08-30T15-52-46-231Z-1.zip`，8 个文件可解，5 张 PNG 均为 1080×1440；封面和三单元内页已实际打开目检。该证据验证当前候选的编辑与导出，不替代新 BYOK 母版切片验证。
+- 本轮剩余生产条件仍从零计算：Vercel Preview、真实 BYOK 新生成、Preview ZIP 实物、同一 deployment promote 与稳定域名回读。任何一项未通过，保持旧 Production 并明确其视觉不可交付，不得把旧 R30 复用为新 PASS。

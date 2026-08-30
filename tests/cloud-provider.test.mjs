@@ -76,9 +76,25 @@ test("cloud provider turns one mother sheet into independent trimmed browser ass
     assert.ok(Math.abs(tile.width / tile.height - (index === 0 ? 1.125 : .75)) < .012);
     assert.equal(tile.presence_gate.hasVisibleSubject, true);
   }
-  assert.equal(tiles[0].mother_sheet_region_role, "kv-top-3x2-9:8");
+  assert.equal(tiles[0].mother_sheet_region_role, "kv-top-adaptive-9:8");
   assert.equal(tiles[0].preferred_aspect, "9:8");
+  assert.ok(tiles[0].adaptive_boundary.coordinate > 560 && tiles[0].adaptive_boundary.coordinate < 900);
   assert.ok(tiles[0].height < tiles[1].height);
+});
+
+test("cloud provider follows the rendered KV boundary instead of fixed thirds", async () => {
+  const width = 900; const height = 1200; const boundary = 660;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+    <rect width="900" height="660" fill="#efc18d"/><circle cx="300" cy="330" r="180" fill="#8e2f25"/>
+    <rect y="660" width="900" height="12" fill="#ffffff"/>
+    ${[0, 1, 2].map((index) => `<g transform="translate(${index * 300} 672)"><rect width="300" height="400" fill="#ffffff"/><circle cx="150" cy="130" r="85" fill="hsl(${index * 90} 65% 42%)"/><rect x="95" y="220" width="110" height="145" fill="#d9783c"/></g>`).join("")}
+  </svg>`;
+  const bytes = await sharp(Buffer.from(svg)).jpeg({ quality: 92 }).toBuffer();
+  const units = [0, 1, 2, 3].map((index) => ({ unit_id: `adaptive-${index}`, page_index: index, panel_index: null, media_role: "hero_scene", preferred_aspect: index ? "3:4" : "9:8", fit_policy: "cover" }));
+  const tiles = await splitMotherSheetForUnits(bytes, groupIllustrationUnits(units)[0]);
+  assert.ok(Math.abs(tiles[0].adaptive_boundary.coordinate - boundary) < 24);
+  assert.deepEqual(tiles.map((tile) => [tile.width, tile.height]), [[720, 640], [720, 960], [720, 960], [720, 960]]);
+  assert.ok(tiles.every((tile) => tile.pixel_gate.hasCleanEdges));
 });
 
 test("cloud mother-sheet tiles stay inside the public response transport budget", async () => {

@@ -16,6 +16,20 @@ flowchart LR
 
 本地 `~/.mesy/runtime/packages/xiaoshimei-studio-v2/` 只承载工作状态、生成图片与 Provider 回执；它不授予源码或生产权威。详细操作、发布 ID 与回滚点只记录在 `deployment/PRODUCTION_RUNBOOK.md`，避免在逻辑地图里形成第二份发布台账。
 
+## 2026-08-30 根治审计：旧 PASS 被现实重新打开
+
+当前正式域名虽然命中已记录部署，但用户在真实生成中再次给出封面串入 A/B/C、内页人物截头、重复标题层级、错字、图文比例失真、内容溢出和“已配置·未验证”状态反复等现场证据。因此 R30 只保留“部署与资源一致”的事实，不再证明作品可交付；CT03–CT05 重新进入待验证。以下根因矩阵是现有 U/D 问题的上层收敛，不建立第二份 Issue Registry。
+
+| 根因 | 累计症状与原编号 | 根治机制 | 机器止损 | 当前证据 |
+|---|---|---|---|---|
+| RC1 模型被误当几何权威 | U02/U05/U10/U18，D02/D07/D08/D19/D23/D27/D29；封面带出底行、A/B/C 被截头 | 首张母版先识别真实 KV/插画分界，再按角色切片；不再固定从 2/3 下刀 | 分界证据不足即 `MOTHER_SHEET_KV_BOUNDARY_NOT_FOUND`，整组记 missing 并进入有界补绘，坏图不得进入排版 | `detectKvTemplateRegions` + 变形分界回归夹具 |
+| RC2 内容容量没有成为生成约束 | U03/U04/U06/U11-U13/U16/U19/U20，D04/D05/D12/D15/D17/D21/D26；重复“第一养”、`养养法`、长文靠缩字硬塞 | 页眉/标题/panel 按格数设确定预算；重复层级、异常叠字和过密正文退回 Page Plan 重写 | `assertXhsPublishQuality` 在任何图片付费调用前执行；DOM 文本盒溢出继续阻断导出 | 新增质量门与重试提示回归 |
+| RC3 多代 CSS 同时拥有几何 | U01/U08/U21/U22，D03/D06/D11/D14/D15/D18/D22/D28；3:4 口头成立但实际盒子被宽高竞争拉伸 | 从正式样式删除全部旧页面几何；`xhs-page-contract.css` 成为唯一可执行页面几何，HTML state 升至 v12；插图只给宽度，高度由 3:4 单轴推导 | 3:4/9:8、页边、对齐、无页码均由一个合同决定；DOM 比例与越界检查复核 | `styles.css` 零 `.html-page` 规则；271/271；本地五页实机零 overflow/零 warning，待 Preview |
+| RC4 配置存在被冒充连接成功 | 顶部状态保存后短暂“在线”，轮询又变“未验证” | Provider 配置态与成功调用态分离；只在同一 provider/base/model 的真实成功调用后登记验证 | 换 Key 或模型立即清验证；health 无成功回执只能是 `CONFIGURED_UNVERIFIED` | session-scoped verified-call 回归通过 |
+| RC5 测试和部署被误当作品验收 | U14/U15/U17，D12/D13/D20/D24；代码全绿仍可把肉眼可见坏版发上网 | 发布前必须在同一候选制品完成桌面、窄屏、逐页截图、编辑保存、真实 ZIP 与稳定域名回读 | 任一视觉/下载/核心旅程未现场通过，不允许从 Preview promote | 本地候选已逐页量测、编辑/撤销并真实下载 ZIP；Preview/Production 仍为 NOT RUN |
+
+方法来源：约束式布局采用“模型提案 + 确定性约束/后处理”，参考 [LayoutFormer++](https://openaccess.thecvf.com/content/CVPR2023/papers/Jiang_LayoutFormer_Conditional_Graphic_Layout_Generation_via_Constraint_Serialization_and_Decoding_CVPR_2023_paper.pdf)、[LayoutRectifier](https://onlinelibrary.wiley.com/doi/10.1111/cgf.70273) 与 [Constrained Graphic Layout Generation](https://arxiv.org/abs/2108.00871)；浏览器视觉回归采用 [Playwright screenshot baselines](https://playwright.dev/docs/next/test-snapshots) 的稳定环境原则；图片取景遵循 [MDN object-fit](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/object-fit) 的裁切语义与 [Apple saliency crop](https://developer.apple.com/documentation/vision/cropping-images-using-saliency) 的主体保留原则；中文可读性与不裁字参考 [W3C 中文排版需求](https://www.w3.org/International/clreq/) 和 [WCAG Text Spacing](https://www.w3.org/WAI/WCAG21/Understanding/text-spacing)。未能从可访问的小红书官方公开文档确认统一的 3:4 尺寸条款；本项目的 1080×1440、KV 9:8、封面 1/3+2/3 是用户确认的产品合同，不冒充平台官方规范。
+
 ```mermaid
 flowchart TB
   %% =====================================================================
@@ -75,7 +89,7 @@ flowchart TB
       I01["buildIllustrationUnits<br/>scene / action / detail / comparison"]:::current
       I02["母版1：上两行合并 9:8 KV + 底行 A/B/C<br/>母版2起：3×3 D–L，按需续页"]:::current
       I03["图像模型生成母版"]:::current
-      I04["Sharp 按模板角色切片<br/>KV 1080×960；插图 1080×1440"]:::current
+      I04["Sharp 先识别真实 KV/A-B-C 分界再按角色切片<br/>分界不可信则 fail closed；KV 1080×960；插图 1080×1440"]:::current
       I05["面板资产<br/>保留 role / aspect / presence / edge metadata"]:::current
       I01 --> I02 --> I03 --> I04 --> I05
     end
@@ -85,7 +99,7 @@ flowchart TB
       PAK01["Content Package<br/>pages + panels + image assets"]:::current
       PAK02["Page Plan + Design Program v1<br/>整组构思：composition / focal order / rhythm<br/>image edge/scale / title measure / whitespace"]:::current
       PAK03["design-program.mjs<br/>枚举与范围约束；semantic hero 优先<br/>旧稿确定性回退"]:::current
-      PAK04["html_state v10<br/>设计程序 + 用户版式/取景/对象编辑<br/>同一可回载状态"]:::current
+      PAK04["html_state v12 + 单一 page contract<br/>设计程序 + 用户版式/取景/对象编辑<br/>同一可回载状态"]:::current
       PAK05["DOM / 像素几何评分<br/>overflow、重叠、比例、图片存在性"]:::current
       PAK01 --> PAK02 --> PAK03 --> PAK04 --> PAK05
     end
@@ -103,10 +117,10 @@ flowchart TB
 
     subgraph CROPNOW["A7｜当前图片适配"]
       direction LR
-      CR01["独立图片默认 cover"]:::current
-      CR02["最小 110% scale"]:::current
-      CR03["HTML 再做 -2% inset + 104% 尺寸 + zoom"]:::current
-      CR04["同一张图被连续三次构图<br/>切母版 → 面板归一化 → 编辑器显示"]:::debt
+      CR01["生成源与消费槽共用 3:4；封面共用 9:8"]:::current
+      CR02["默认 zoom=100%；主体焦点只改变取景"]:::current
+      CR03["单一 page contract 决定槽位与页边"]:::current
+      CR04["自由编辑只保存有界 delta<br/>不重写规范几何"]:::current
       CR01 --> CR02 --> CR03 --> CR04
     end
 
@@ -204,19 +218,22 @@ flowchart TB
       D14["D14 旧 html/editor state 可保留旧版式，代码改了旧稿未迁移｜挂点 A6｜修复 P1/P5"]:::debt
       D15["D15 CSS 多层覆写、重复选择器、固定行高导致漂移｜挂点 A6｜修复 P4"]:::debt
       D16["D16 contentEditable 曾观察 React 崩溃风险，当前需回归复验｜挂点 A6｜修复 P5/P7"]:::debt
-      D17["D17 RESOLVED_PRODUCTION v15｜结构性 containment、长标题换行与五页导出已在最终 Preview 回读，正式域名命中同一 CSS｜挂点 A5/A6"]:::gate
+      D17["D17 REOPENED_PRODUCTION / PASS_LOCAL_CANDIDATE｜旧正式版被用户现场坏版推翻；新单一页面合同已本地逐页通过，待新 Preview｜挂点 A5/A6"]:::gate
       D18["D18 没有明确先定槽位再裁剪，裁剪被用来补救坏比例｜挂点 A5/A7｜修复 P1/P3"]:::debt
       D19["D19 生成提示词没有输出可裁剪余量与结构化 bbox｜挂点 A3/A4｜修复 P2/P3"]:::debt
       D20["D20 Reality feedback 已有但未进入 layout/crop fitness｜挂点 A8｜修复 P8"]:::debt
       D21["D21 字号 Gate 只检查正文，漏掉眉题、提示、品牌与页码｜挂点 A5/A8｜修复 P4/P7"]:::debt
       D22["D22 旧 figure 样式残留非对称 radius/shadow，覆盖角色化媒体策略｜挂点 A6/A7｜修复 P3/P4"]:::debt
       D23["D23 母版按前 N 个几何格顺序绑定，空白格会被当成页面插图并使后续图错位｜挂点 A4｜修复 P2/P7"]:::debt
-      D24["D24 RESOLVED_PRODUCTION｜先生成校验、再由可见链接保存；Chrome Desktop ZIP 实物、CRC、PNG 尺寸及正式同一 JS 已回读｜挂点 A8"]:::gate
+      D24["D24 PASS_LOCAL_RECONFIRMED｜新候选在手机端真实打开编辑侧栏、生成并保存 ZIP；实物可解且 5×1080×1440｜挂点 A8"]:::gate
       D25["D25 对象点击事件冒泡会清空选中态，使移动/缩放控件看似存在却不可用｜挂点 A6｜修复 P5/P7"]:::debt
       D26["D26 编辑视口未暴露封面文字与图片间距问题，真实导出 PNG 才看到贴撞｜挂点 A6/A8｜修复 P4/P7"]:::debt
       D27["D27 母版固定 3:4 与内页近方形槽位冲突，再叠加全局 116% overscan，白边与主体过大只能二选一｜挂点 A4/A5/A7｜修复 P1-P4"]:::debt
       D28["D28 取景能力藏在通用编辑手势里且缩放无产品上限，用户无法发现也无法稳定控制｜挂点 A6/A7｜修复 P3/P5/P7"]:::debt
-      D29["D29 RESOLVED_PRODUCTION｜切片自适应预算 + 4 MB 总闸；真实 BYOK 母版返回浏览器并组装 3 页/3 图，生成链同构制品已提升正式｜挂点 A4/A8"]:::gate
+      D29["D29 REOPENED_PRODUCTION / PASS_MECHANISM_LOCAL｜旧固定 2/3 被现实推翻；新真实 KV 分界检测与失败补绘已回归，待 Preview BYOK｜挂点 A4/A8"]:::gate
+      D30["D30 PASS_LOCAL｜Provider 配置存在不再冒充已验证；仅成功生成调用可进入已验证态｜挂点 A1/A8"]:::gate
+      D31["D31 PASS_LOCAL｜重复层级、异常叠字与超容量文案在付费图片调用前退回重写｜挂点 A3/A5"]:::gate
+      D32["D32 PASS_LOCAL_REALITY｜唯一页面几何合同、3:4 单轴推导、DOM 文本/越界门与真实导出已回读｜挂点 A5/A6/A8"]:::gate
     end
 
     ICROP["问题簇 CROP<br/>U02 U05 U10 U18<br/>D02 D06-D10 D18 D19"]:::issue
@@ -248,6 +265,10 @@ flowchart TB
     D28 --> ISTATE
     D29 --> ITRANSPORT
     D24 --> ITRANSPORT
+    D30 --> ITRANSPORT
+    D31 --> ILAYOUT
+    D32 --> ILAYOUT
+    D32 --> IEXPORT
     U07 & U09 --> ISTATE
     D01 & D14 & D16 --> ISTATE
     U14 & U15 --> IEXPORT
@@ -398,6 +419,7 @@ flowchart TB
     EV28["R28 D29 PASS_PREVIEW｜dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE 用 BYOK 完成真实付费母版；缺失 page-4-hero 在同请求有界补绘，3 页/3 图回到浏览器并可编辑"]:::evidence
     EV29["R29 D17/D24/A14/A15 PASS_PREVIEW｜最终 dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4：268/268 + build；长标题无 overflow；undo→redo 恢复原编辑；保存刷新保留；Chrome 下载 ZIP 实物 1,560,041 bytes，CRC PASS，5×1080×1440，sha256=da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::evidence
     EV30["R30 production_applied PASS｜Git main=e1e775f；promote 最终候选后 Production=dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名 HTML 200、health 200、无 Key 401；线上 CSS/JS 与本地已验收构建 SHA-256 完全一致；rollback=dpl_Afw8Q5Vai578FVs11waZvd24CYBp"]:::evidence
+    EV31["R31 根治候选 PASS_LOCAL_REALITY｜styles.css 不再含任何 html-page 几何，3:4 单轴推导；271/271 + build；476px 实机五页均 3:4、KV 9:8、内图 3:4、零 overflow/告警；改字/移动/undo；手机侧栏真实下载 ZIP，8 文件可解、5×1080×1440 并打开目检"]:::evidence
     EV01 --> P5
     EV02 --> P4
     EV03 --> U20
@@ -458,6 +480,11 @@ flowchart TB
     EV29 --> P7
     EV30 --> CT03
     EV30 --> CT04
+    EV31 --> D17
+    EV31 --> D24
+    EV31 --> D32
+    EV31 --> CT01
+    EV31 --> CT02
     EV24 --> A12
     EV24 --> A13
     EV24 --> A14
@@ -576,11 +603,11 @@ flowchart TB
 
     subgraph TRUTH["F3｜Completion Truth 五层"]
       direction LR
-      CT01["mechanism_ready<br/>PASS：9:8 KV/3:4 插图角色化切片、智能布局、自由编辑与像素导出 Gate 已实现"]:::target
-      CT02["package_verified<br/>PASS_PREVIEW：268/268 tests、Vite build、Desktop ZIP 8 文件 CRC、5 张 1080×1440 PNG 逐图与像素边距回读<br/>ZIP sha256 da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::target
-      CT03["production_applied<br/>PASS：dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名绑定；线上 CSS/JS Hash 与已验收构建一致"]:::target
-      CT04["runtime_operational<br/>PASS_PRODUCTION_ARTIFACT：真实 BYOK 生成链、编辑、undo/redo、保存刷新与 Chrome ZIP 落盘已现场回读"]:::target
-      CT05["reality_validated<br/>PASS_WORKBENCH_REALITY：稳定域名、资源、接口与关键 Preview 旅程通过；外部平台 24h/72h/7d 作品效果 NOT RUN"]:::gate
+      CT01["mechanism_ready<br/>PASS_LOCAL：自适应母版分界、预付费内容门、单一页面合同、真实调用验证态与 DOM 文本溢出门已实现；271/271 回归"]:::target
+      CT02["package_verified<br/>PASS_LOCAL_REALITY：build、五页逐页几何、编辑/撤销与 ZIP 实物已一起完成；不等于 Preview/Production"]:::target
+      CT03["production_applied<br/>STALE：现有 dpl_Cj8uAE9utVX3oyLf6auJHMi824kj 部署事实保留，但用户现场已证明其作品质量不可交付；本轮新机制尚未部署"]:::stop
+      CT04["runtime_operational<br/>NOT RUN：本轮新切片、质量门和验证态尚未在 Preview 用真实 BYOK 回读"]:::gate
+      CT05["reality_validated<br/>PASS_LOCAL_CANDIDATE / FAIL_CURRENT_PRODUCTION：本地旧稿已重新 dogfood；正式版仍不可交付，待 Preview 新 BYOK 与稳定域名复验"]:::stop
       CT01 --> CT02 --> CT03 --> CT04 --> CT05
     end
 

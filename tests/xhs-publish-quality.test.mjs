@@ -26,3 +26,16 @@ test("publish gate rejects a long cover, missing hero, and missing wellness boun
   assert.ok(issues.some((issue) => issue.code === "XHS_SINGLE_HERO_REQUIRED"));
   assert.ok(issues.some((issue) => issue.code === "XHS_WELLNESS_SAFETY_BOUNDARY_MISSING"));
 });
+
+test("publish gate rejects repeated section labels, typo repeats and overstuffed panel copy", () => {
+  const issues = inspectXhsPublishQuality([
+    { page_role: "hook", eyebrow: "处暑养生", title: "三个实用养养法", info_panels: [] },
+    { page_role: "method", eyebrow: "第一养：跟着节气", title: "第一养：把入睡时间往前提", info_panels: [
+      { ...panel(1), body: "这段文字明显超过三格版式允许的单格正文预算，继续往下堆字只会让排版器缩字或直接把后半截藏起来，因此必须在生成阶段重写。" },
+      panel(2), panel(3),
+    ] },
+  ], { pillar: "wellness", publishBody: "若持续不适或出现异常，请停下并咨询专业人士。" });
+  assert.ok(issues.some((issue) => issue.code === "XHS_HEADING_TYPO_REPEAT"));
+  assert.ok(issues.some((issue) => issue.code === "XHS_HEADING_PREFIX_DUPLICATED"));
+  assert.ok(issues.some((issue) => issue.code === "XHS_PANEL_COPY_BUDGET"));
+});

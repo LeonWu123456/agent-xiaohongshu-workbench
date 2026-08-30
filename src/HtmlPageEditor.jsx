@@ -132,6 +132,20 @@ export function inspectHtmlPageLayout(pageElement) {
        at the viewport origin and used to create a false HORIZONTAL_OVERFLOW
        warning even after a successful export. */
     .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
+  const textBlocks = [...pageElement.querySelectorAll(".html-page__eyebrow, .html-page__title, .html-page__panel-copy h2, .html-page__panel-copy p, .html-page__body p")]
+    .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
+  textBlocks.forEach((element) => {
+    const style = getComputedStyle(element);
+    const clipsOwnBox = ((style.overflowX !== "visible" && element.scrollWidth > element.clientWidth + 1)
+      || (style.overflowY !== "visible" && element.scrollHeight > element.clientHeight + 1));
+    const container = element.closest(".html-page__panel-copy, .html-page__header, .html-page__body");
+    const escapesContainer = container && container !== element
+      ? !rectContainedBy(element.getBoundingClientRect(), container.getBoundingClientRect(), 2)
+      : false;
+    if (clipsOwnBox || escapesContainer) {
+      reasons.push(`TEXT_CLIPPED:${element.className || element.tagName}`);
+    }
+  });
   content.forEach((element) => {
     const rect = element.getBoundingClientRect();
     const identity = element.dataset.panelId || element.dataset.imageId || element.className;

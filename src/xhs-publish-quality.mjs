@@ -1,6 +1,21 @@
 import { recommendHtmlLayout } from "./html-layout.mjs";
 
 function compact(value) { return String(value || "").replace(/\s/g, "").length; }
+function normalized(value) { return String(value || "").replace(/[\s：:，,。.!！?？、·\-—_]/g, ""); }
+
+function sectionPrefix(value) {
+  return normalized(value).match(/^(?:第)?[一二三四五六七八九十\d]+(?:步|养|招|法|点|个|页)/)?.[0] || "";
+}
+
+function hasSuspiciousAdjacentRepeat(value) {
+  const text = normalized(value);
+  const allowed = new Set(["慢慢", "轻轻", "渐渐", "好好", "天天", "常常", "往往", "刚刚", "稳稳", "步步"]);
+  for (let index = 1; index < text.length; index += 1) {
+    const pair = text.slice(index - 1, index + 1);
+    if (text[index] === text[index - 1] && !allowed.has(pair)) return true;
+  }
+  return false;
+}
 
 /**
  * A deterministic pre-publish scorecard. It checks information architecture,
@@ -13,6 +28,10 @@ export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "" 
   pages.forEach((page, index) => {
     const role = String(page?.page_role || (index === 0 ? "hook" : "example"));
     const panels = Array.isArray(page?.info_panels) ? page.info_panels : [];
+    const eyebrowPrefix = sectionPrefix(page?.eyebrow);
+    const titlePrefix = sectionPrefix(page?.title);
+    if (eyebrowPrefix && eyebrowPrefix === titlePrefix) issues.push({ code: "XHS_HEADING_PREFIX_DUPLICATED", page: index + 1 });
+    if (hasSuspiciousAdjacentRepeat(page?.eyebrow) || hasSuspiciousAdjacentRepeat(page?.title)) issues.push({ code: "XHS_HEADING_TYPO_REPEAT", page: index + 1 });
     if (index === 0) {
       if (role !== "hook") issues.push({ code: "XHS_COVER_ROLE_REQUIRED", page: 1 });
       if (compact(page?.eyebrow) > 10) issues.push({ code: "XHS_COVER_EYEBROW_TOO_LONG", page: 1 });
@@ -21,14 +40,15 @@ export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "" 
       if (panels.length) issues.push({ code: "XHS_COVER_SINGLE_VISUAL_REQUIRED", page: 1 });
       return;
     }
-    if (compact(page?.eyebrow) > 18 || compact(page?.title) > 24) issues.push({ code: "XHS_INNER_TITLE_BUDGET", page: index + 1 });
+    if (compact(page?.eyebrow) > 14 || compact(page?.title) > 18) issues.push({ code: "XHS_INNER_TITLE_BUDGET", page: index + 1 });
     if (["method", "checklist", "pitfall"].includes(role) && (panels.length < 2 || panels.length > 4)) {
       issues.push({ code: "XHS_METHOD_UNITS_REQUIRED", page: index + 1 });
     }
     if (panels.length >= 2 && panels.filter((panel) => panel?.content_role === "hero").length !== 1) {
       issues.push({ code: "XHS_SINGLE_HERO_REQUIRED", page: index + 1 });
     }
-    if (panels.some((panel) => compact(panel?.title) < 2 || compact(panel?.title) > 28 || compact(panel?.body) < 12 || compact(panel?.body) > 120)) {
+    const panelBodyLimit = panels.length >= 4 ? 36 : panels.length === 3 ? 52 : 72;
+    if (panels.some((panel) => compact(panel?.title) < 2 || compact(panel?.title) > 14 || compact(panel?.body) < 12 || compact(panel?.body) > panelBodyLimit || hasSuspiciousAdjacentRepeat(panel?.title))) {
       issues.push({ code: "XHS_PANEL_COPY_BUDGET", page: index + 1 });
     }
   });

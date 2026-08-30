@@ -24,6 +24,11 @@ import {
   motherSheetRegionForUnit,
 } from "../src/mother-sheet.mjs";
 import { inspectMotherSheetTileStats } from "../src/mother-sheet-tile-quality.mjs";
+import { inspectMotherSheetTilePixels } from "../src/mother-sheet-tile-quality.mjs";
+import { detectKvTemplateRegions } from "../src/mother-sheet-adaptive-regions.mjs";
+import { cleanupGeneratedGridArtifacts } from "../src/mother-sheet-artifact-cleanup.mjs";
+import { detectUniformEdgeInsets, exactThreeByFourCrop } from "../src/mother-sheet-trim.mjs";
+import { assertXhsPublishQuality } from "../src/xhs-publish-quality.mjs";
 import {
   PAGE_CANDIDATE_RESPONSE_SCHEMA,
   TEXT_DRAFT_RESPONSE_SCHEMA,
@@ -200,11 +205,40 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
   if (!width || !height || Math.abs(width / height - .75) > .01) {
     throw new Error(`MOTHER_SHEET_ASPECT_RATIO_INVALID:${width}x${height}`);
   }
+  let adaptiveKv = null;
+  if (job?.template === "kv-top-3x2") {
+    const raw = await sharp(bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    adaptiveKv = detectKvTemplateRegions({ data: new Uint8Array(raw.data), width: raw.info.width, height: raw.info.height, channels: raw.info.channels });
+    if (!adaptiveKv) {
+      if (!allowMissing) throw new Error("MOTHER_SHEET_KV_BOUNDARY_NOT_FOUND");
+      return units.map((unit, index) => ({
+        unit_id: unit.unit_id,
+        page_index: unit.page_index,
+        panel_index: unit.panel_index,
+        missing: true,
+        mother_sheet_slot: index === 0 ? 1 : index + 6,
+        mother_sheet_region_role: index === 0 ? "kv-top-adaptive-9:8" : "illustration-adaptive-3:4",
+        presence_gate: { hasVisibleSubject: false, reason: "KV_BOUNDARY_NOT_FOUND" },
+      }));
+    }
+  }
   return Promise.all(units.map(async (unit, index) => {
-    const region = motherSheetRegionForUnit(width, height, job, index);
+    const adaptiveRegion = adaptiveKv?.regions[index];
+    const region = adaptiveRegion
+      ? { ...adaptiveRegion, slotIndex: index === 0 ? 0 : index + 5, regionRole: index === 0 ? "kv-top-adaptive-9:8" : "illustration-adaptive-3:4" }
+      : motherSheetRegionForUnit(width, height, job, index);
     const { slotIndex, regionRole, ...cropRegion } = region;
-    const preferredAspect = regionRole === "kv-top-3x2-9:8" ? "9:8" : "3:4";
-    const baseTile = await sharp(bytes).extract(cropRegion).png().toBuffer();
+    const preferredAspect = regionRole.includes("kv-top") ? "9:8" : "3:4";
+    let baseTile = await sharp(bytes).extract(cropRegion).png().toBuffer();
+    const rawTile = await sharp(baseTile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cleaned = cleanupGeneratedGridArtifacts({ data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels }, { kv: regionRole === "kv-2x2-3:4" });
+    let cleanedPipeline = sharp(Buffer.from(cleaned.data), { raw: { width: cleaned.width, height: cleaned.height, channels: cleaned.channels } });
+    if (preferredAspect === "3:4") {
+      const insets = detectUniformEdgeInsets(cleaned);
+      const exact = exactThreeByFourCrop(cleaned.width, cleaned.height, insets);
+      cleanedPipeline = cleanedPipeline.extract(exact);
+    }
+    baseTile = await cleanedPipeline.png().toBuffer();
     const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
     if (!quality.hasVisibleSubject) {
       if (!allowMissing) throw new Error(`MOTHER_SHEET_UNIT_MISSING:${unit.unit_id}`);
@@ -220,6 +254,16 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
     }
     const tile = await encodeTileForPublicTransport(baseTile, preferredAspect, maxBytes);
     const tileBytes = tile.bytes;
+    const finalRaw = await sharp(tileBytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const pixelGate = inspectMotherSheetTilePixels({ data: new Uint8Array(finalRaw.data), width: finalRaw.info.width, height: finalRaw.info.height, channels: finalRaw.info.channels }, { expectedAspect: preferredAspect });
+    if (!pixelGate.hasCleanEdges) {
+      if (!allowMissing) throw new Error(`MOTHER_SHEET_TILE_CONTAMINATED:${unit.unit_id}:${pixelGate.contaminatedSides.join("+") || "ASPECT"}`);
+      return {
+        unit_id: unit.unit_id, page_index: unit.page_index, panel_index: unit.panel_index, missing: true,
+        mother_sheet_slot: slotIndex + 1, mother_sheet_region_role: regionRole,
+        presence_gate: quality, pixel_gate: pixelGate,
+      };
+    }
     return {
       unit_id: unit.unit_id,
       page_index: unit.page_index,
@@ -237,6 +281,8 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
       mother_sheet_slot: slotIndex + 1,
       mother_sheet_region_role: regionRole,
       presence_gate: quality,
+      pixel_gate: pixelGate,
+      ...(adaptiveKv ? { adaptive_boundary: adaptiveKv.boundary } : {}),
     };
   }));
 }
@@ -281,6 +327,13 @@ async function generateImages(input, settings, request) {
     const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
     try {
       pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: attempt === 3 });
+      assertXhsPublishQuality(pages.map((page) => ({
+        page_role: page.pageRole,
+        eyebrow: page.eyebrow,
+        title: page.title,
+        body: page.body,
+        info_panels: page.panels.map((panel) => ({ title: panel.title, body: panel.body, content_role: panel.contentRole })),
+      })), { pillar: input.draft.pillar, publishBody: input.draft.body });
       planAttempts.push({ attempt, status: "PASS" });
       break;
     } catch (error) {
@@ -327,7 +380,7 @@ async function generateImages(input, settings, request) {
     ? undefined
     : assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null)?.unit_id)?.src);
   const panelAssetsByPage = pages.map((page, pageIndex) => (page.panels || []).map((_panel, panelIndex) => assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index === panelIndex)?.unit_id)?.src));
-  let content = assembleArkContentFromDraft(input.draft, pages, { pageAssets, panelAssetsByPage }, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: sheets.length, illustrationUnitCount: units.length }, input.production_mode);
+  let content = assembleArkContentFromDraft(input.draft, pages, { pageAssets, panelAssetsByPage }, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: sheets.length, illustrationUnitCount: units.length, enforcePublishQuality: true }, input.production_mode);
   content = {
     ...content,
     pages: content.pages.map((page, pageIndex) => {

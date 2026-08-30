@@ -47,6 +47,7 @@ import { editorModeForPage } from "./html-layout.mjs";
 import { resolveDownloadTarget } from "./download-transport.mjs";
 import { XIAOSHIMEI_AVATAR_DATA_URL } from "../api/xiaoshimei-avatar-data.mjs";
 import "./styles.css";
+import "./xhs-page-contract.css";
 
 const STORAGE_KEY = "xiaoshimei-studio.local-beta.v1";
 const LIBRARY_KEY = "xiaoshimei-studio.library.local-beta.v1";
@@ -595,9 +596,9 @@ function App() {
       const settings = await provider.updateSettings(providerSettingsForm);
       setProviderMeta(settings);
       setProviderSettingsForm((current) => ({ ...current, api_key: "" }));
-      setProviderHealth(settings.configured ? "ONLINE" : "OFFLINE");
+      setProviderHealth(settings.configured ? "UNVERIFIED" : "OFFLINE");
       setProviderSettingsOpen(false);
-      setToast(IS_PUBLIC_RUNTIME ? "模型已连接；API Key 只保存在当前标签页" : "生成服务已切换；API Key 只保存在本机钥匙串");
+      setToast(IS_PUBLIC_RUNTIME ? "设置已保存；首次成功生成后会显示连接已验证。API Key 只保存在当前标签页" : "生成服务已切换；API Key 只保存在本机钥匙串");
     } catch (error) {
       setToast(`生成服务设置未保存：${String(error?.providerCode || error?.message || "UNKNOWN")}`);
     } finally {
@@ -904,6 +905,7 @@ function App() {
       clearGenerationFailure();
       setToast("请求已收到：现在只生成文字，不会产生图片费用");
       const draft = await provider.generateTextDraft({ topic, text_requirements: textRequirements, prompt_context: promptContextForProvider(promptValues), pillar, goal, profile_contract: buildGenerationContract(profile) });
+      setProviderHealth("ONLINE");
       setTextDraft(draft);
       setTextConfirmed(false);
       setAssembledDraftId(null);
@@ -988,6 +990,7 @@ function App() {
       setToast(imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       const draftForImages = { ...textDraft, prompt_context: promptContextForProvider(promptValues) };
       const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote })));
+      setProviderHealth("ONLINE");
       resetContent(result); setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
       setAssembledDraftId(textDraft.draft_id);
       clearGenerationFailure();

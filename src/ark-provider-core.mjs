@@ -200,8 +200,20 @@ export function pagePlanRetryGuidance(error) {
   const code = String(error?.message || error || "");
   const pageMatch = code.match(/(?:pages\[|FAILED:)(\d+)/);
   const pageLabel = pageMatch ? `第${Number(pageMatch[1]) + 1}页` : "命中页面";
+  if (/XHS_HEADING_PREFIX_DUPLICATED/.test(code)) {
+    return `${pageLabel}的眉题和标题重复使用了“第一步/第一养”等同一层级词。下一版只保留一次层级编号：眉题负责章节，标题直接写具体动作或判断。`;
+  }
+  if (/XHS_HEADING_TYPO_REPEAT/.test(code)) {
+    return `${pageLabel}出现了“养养法”一类相邻重复字。下一版逐字校对眉题、标题和panel标题，删除无语义的叠字，不改动已确认事实。`;
+  }
+  if (/XHS_PANEL_COPY_BUDGET/.test(code)) {
+    return `${pageLabel}的图文单元超过成品容量。下一版每个panel标题最多14字；2格页每格正文最多72字、3格页最多52字、4格页最多36字。宁可把内容分到下一页，也不要缩字或截断。`;
+  }
+  if (/XHS_INNER_TITLE_BUDGET/.test(code)) {
+    return `${pageLabel}的章节标题太长。下一版内页眉题最多14字、标题最多18字；保留一个具体动作或判断，删掉重复层级和同义前缀。`;
+  }
   if (/PAGE_PLAN_LAYOUT_BUDGET_FAILED/.test(code)) {
-    return `${pageLabel}超出排版字数预算。下一版只压缩该页：封面页眉最多10字、标题最多16字；内页页眉最多18字、标题最多24字；正文35–160字。保留一个主要信息任务和原有事实边界，不把镜头描述塞进正文。`;
+    return `${pageLabel}超出排版字数预算。下一版只压缩该页：封面页眉最多10字、标题最多16字；内页页眉最多14字、标题最多18字；正文35–160字。保留一个主要信息任务和原有事实边界，不把镜头描述塞进正文。`;
   }
   if (/eye_care_action_not_visible/.test(code)) {
     return `${pageLabel}的护眼动作无法从静态画面直接看懂。下一版必须在 visual_action 和 image_prompt 中明确写出眼睛或视线状态，并让小师妹完成一个肉眼可见动作，例如望向窗外远处并自然眨眼、指腹沿眼眶边缘轻柔按揉但不压眼球、眼球按上下左右缓慢转动，或放下手机闭眼休息；不能只写放松、休息或氛围。`;
@@ -210,7 +222,7 @@ export function pagePlanRetryGuidance(error) {
     return `${pageLabel}的动作合同不够可见。下一版让小师妹完成一件静态图可直接验证的具体动作，写清手的位置、眼睛或视线状态、身体姿势和关键器物；不要用微笑、看镜头、感受或抽象氛围代替动作。`;
   }
   if (/PANEL_BUDGET|INFO_PANELS_REQUIRED|INFO_PANEL_COUNT|HERO_COUNT|SHOT_VARIETY/.test(code)) {
-    return `${pageLabel}的信息分镜结构没有通过预算。下一版知识信息页只保留2–4个panel，恰好1个hero；每个panel标题最多28字、正文12–120字、只讲一个要点，三个以上panel至少使用两种镜头角色。`;
+    return `${pageLabel}的信息分镜结构没有通过预算。下一版知识信息页只保留2–4个panel，恰好1个hero；每个panel标题最多14字，正文按2格72字/3格52字/4格36字封顶且不少于12字，只讲一个要点；三个以上panel至少使用两种镜头角色。`;
   }
   if (/BODY_TOO_SHORT/.test(code)) {
     return `${pageLabel}的读者正文不足35字。下一版补齐一个明确判断、可执行动作或避坑边界，保持短句且不要加入镜头、光线或构图说明。`;
@@ -383,8 +395,8 @@ export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback
     "封面动作必须能被一张静态图直接证实，优先表现手与具体器物的接触（例如把手机屏幕朝下扣在桌上）；不要把放松、思考、感受或单纯移开视线当作主动作。",
     "每页image_prompt必须明确写“小师妹”并描述完整或半身人物动作；不能只写一只手、局部手部、单人或泛称人物。",
     "每页另填 visual_action，只写一件能被静态图片肉眼验证的动作。它是图片验收合同，不是发布文案。",
-    "每页body是图片上可见的读者文字，不写镜头术语。封面页眉控制在4–10字、标题控制在6–16字，只说一个明确对象、困扰或收益；封面正文保留为内容元数据但不承担首屏阅读。其余页页眉不超过18字、标题不超过24字、正文必须为35–160个汉字并使用短句；不要塞满整篇正文。",
-    "每页都必须返回panels。场景叙事页和封面返回空数组；知识信息页返回2–4组，每组title/body只承载一个要点，visual_action只描述与该组要点一一对应的可见插图动作。panel顺序必须和image_prompt内分镜的阅读顺序完全一致。",
+    "每页body是图片上可见的读者文字，不写镜头术语。封面页眉控制在4–10字、标题控制在6–16字，只说一个明确对象、困扰或收益；封面正文保留为内容元数据但不承担首屏阅读。其余页页眉不超过14字、标题不超过18字、正文必须为35–160个汉字并使用短句；不要塞满整篇正文。眉题与标题不能重复使用同一个‘第一步/第一养’层级前缀。",
+    "每页都必须返回panels。场景叙事页和封面返回空数组；知识信息页返回2–4组，每组title最多14字，body不少于12字并按2格72字/3格52字/4格36字封顶，只承载一个要点；visual_action只描述与该组要点一一对应的可见插图动作。panel顺序必须和image_prompt内分镜的阅读顺序完全一致。",
     "知识信息页必须明确视觉主次：恰好一个panel的content_role是hero，其余是support或detail；hero承载本页最重要的动作或判断。三个以上panel至少使用两种shot_role，按scene交代环境、action看清手与器物、detail近景证明细节，禁止三张都画成相似半身头像。highlight_phrases只能摘自本panel标题或正文原文。",
     "先把整组页面当成完整作品构思，再为每页返回design_program。它不是CSS：composition决定整页叙事结构，focal_order写读者视线顺序，rhythm决定行间节奏，image_edge决定第一张插图靠左还是靠右，image_scale决定图像份量，title_measure决定标题行宽，whitespace_anchor决定主要留白落点。相邻内页避免全部使用相同节奏和同一首图方向。hero_panel必须指向content_role=hero的panel；没有panel时填0。",
     "设计约束：封面使用cover-focus；结尾优先quiet-coda；知识内页在editorial-flow与feature-lead中按信息主次选择。所有选择必须服务于本页内容，不为变化而变化。工作台仍会强制文字与插图对齐相反页边，模型不得要求自由HTML、任意CSS、叠字图片或不可编辑合成图。",
@@ -443,8 +455,8 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     }, index);
     if (index === 0 && normalized.pageRole !== "hook") throw new TypeError("PAGE_PLAN_FIRST_ROLE_MUST_BE_HOOK");
     if (index > 0 && normalized.pageRole === "hook") throw new TypeError(`PAGE_PLAN_DUPLICATE_HOOK:${index}`);
-    const eyebrowLimit = index === 0 ? 10 : 18;
-    const titleLimit = index === 0 ? 16 : 24;
+    const eyebrowLimit = index === 0 ? 10 : 14;
+    const titleLimit = index === 0 ? 16 : 18;
     const eyebrowLength = compactLength(normalized.eyebrow);
     const titleLength = compactLength(normalized.title);
     const bodyLength = compactLength(normalized.body);
@@ -453,7 +465,8 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     }
     if (compactLength(normalized.body) < 35) throw new TypeError(`PAGE_PLAN_BODY_TOO_SHORT:${index}`);
     if (compactLength(normalized.visualAction) < 8) throw new TypeError(`PAGE_PLAN_VISUAL_ACTION_TOO_SHORT:${index}`);
-    if (normalized.panels.some((panel) => compactLength(panel.title) > 28 || compactLength(panel.body) < 12 || compactLength(panel.body) > 120 || compactLength(panel.visualAction) < 8)) throw new TypeError(`PAGE_PLAN_PANEL_BUDGET_FAILED:${index}`);
+    const panelBodyLimit = normalized.panels.length >= 4 ? 36 : normalized.panels.length === 3 ? 52 : 72;
+    if (normalized.panels.some((panel) => compactLength(panel.title) > 14 || compactLength(panel.body) < 12 || compactLength(panel.body) > panelBodyLimit || compactLength(panel.visualAction) < 8)) throw new TypeError(`PAGE_PLAN_PANEL_BUDGET_FAILED:${index}`);
     if (context.productionMode && productionModeUsesInfoPanels(context.productionMode, normalized.pageRole, index) && (normalized.panels.length < 2 || normalized.panels.length > 4)) throw new TypeError(`PAGE_PLAN_INFO_PANELS_REQUIRED:${index}`);
     if (normalized.panels.length === 1 || normalized.panels.length > 4) throw new TypeError(`PAGE_PLAN_INFO_PANEL_COUNT_INVALID:${index}`);
     if (normalized.panels.length >= 2 && normalized.panels.filter((panel) => panel.contentRole === "hero").length !== 1) throw new TypeError(`PAGE_PLAN_HERO_COUNT_INVALID:${index}`);
