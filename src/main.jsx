@@ -174,8 +174,18 @@ function jsonBlob(value) {
 }
 
 async function downloadBlob(name, blob) {
+  const prepared = await prepareBlobDownload(name, blob);
+  triggerPreparedDownload(prepared);
+  return { transport: prepared.transport, savedPath: prepared.savedPath };
+}
+
+async function prepareBlobDownload(name, blob) {
   const { url, revoke, transport, savedPath } = await resolveDownloadTarget({ name, blob, isPublicRuntime: IS_PUBLIC_RUNTIME });
   window.__xiaoshimeiLastDownload = { name, size: blob.size, type: blob.type, transport, saved_path: savedPath, completed_at: new Date().toISOString() };
+  return { name, url, revoke, transport, savedPath, size: blob.size, type: blob.type };
+}
+
+function triggerPreparedDownload({ name, url, revoke }) {
   const link = document.createElement("a");
   link.href = url;
   link.download = name;
@@ -184,7 +194,6 @@ async function downloadBlob(name, blob) {
   link.click();
   link.remove();
   if (revoke) setTimeout(() => URL.revokeObjectURL(url), 60000);
-  return { transport, savedPath };
 }
 
 function explainExportFailure(error) {
@@ -431,6 +440,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [storageIssue, setStorageIssue] = useState("");
   const [exportState, setExportState] = useState("IDLE");
+  const [preparedExport, setPreparedExport] = useState(null);
   const [generationState, setGenerationState] = useState("IDLE");
   const [generationError, setGenerationError] = useState(loadGenerationFailure);
   const [textDraft, setTextDraft] = useState(initialGenerationSession?.text_draft || null);
@@ -513,6 +523,14 @@ function App() {
       : hasConfirmedContent ? generatedImageCount : 0;
   const creatorJourney = deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfirmedContent, generatedImageCount: generatedForCurrentDraft, requiredImageCount, layoutIssueCount: 0, exportState });
   const currentInLibrary = Boolean(content.id && library.some((item) => item.id === content.id && item.saved_at === content.saved_at));
+
+  useEffect(() => {
+    setPreparedExport((current) => {
+      if (current?.revoke) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    setExportState((current) => current === "READY" || current === "COMPLETE" ? "IDLE" : current);
+  }, [content]);
 
   useEffect(() => {
     if (!textDraft) return;
@@ -1215,9 +1233,10 @@ function App() {
         const bytes = Uint8Array.from(atob(dataUrl.split(",")[1]), (character) => character.charCodeAt(0));
         pngPages.push(bytes);
       }
-      const download = await downloadBlob("小师妹-发布包.zip", await buildPublishZip(content, pngPages, { createdAt: content.created_at }));
-      setExportState("COMPLETE");
-      setToast(`${download.savedPath ? `ZIP 已保存到下载目录` : download.transport === "http_attachment" ? "ZIP 下载已开始" : "已触发浏览器下载"}：${visiblePages.length} 张 PNG + 文案 + 数据`);
+      const prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(content, pngPages, { createdAt: content.created_at }));
+      setPreparedExport({ ...prepared, pageCount: visiblePages.length });
+      setExportState("READY");
+      setToast(`发布包已生成并校验：${visiblePages.length} 张 PNG + 文案 + 数据。请点击“保存发布包”。`);
     } catch (error) {
       setExportState("FAILED");
       document.documentElement.dataset.xsmExportFailure = String(error?.message || error);
@@ -1500,7 +1519,7 @@ function App() {
               </section>
             </section>}
             {!isDraftInputOnly && <section className="workbench-section workbench-export" aria-label="保存与下载">
-              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft}><Save />保存草稿</button><button type="button" className="download-final" data-export-state={exportState} onClick={downloadZip} disabled={exportState === "GENERATING"}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{exportState === "GENERATING" ? "正在生成发布包…" : exportState === "COMPLETE" ? "再次下载发布包" : "下载发布包"}</button></div>
+              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={preparedExport.url} download={preparedExport.name} onClick={() => { setExportState("COMPLETE"); setToast(`ZIP 下载已开始：${preparedExport.pageCount} 张 PNG + 文案 + 数据`); }}><Download />保存发布包</a> : <button type="button" className="download-final" data-export-state={exportState} onClick={downloadZip} disabled={exportState === "GENERATING"}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{exportState === "GENERATING" ? "正在生成发布包…" : "下载发布包"}</button>}</div>
               {exportState === "FAILED" && <p className="export-inline-error">下载没有完成；请先处理上方排版提示后重试。</p>}
             </section>}
             </div>

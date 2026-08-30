@@ -930,7 +930,7 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
 .generation-error button { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 0; border-radius: 7px; color: white; background: #91472e; font-size: 9px; font-weight: 700; }
 .workbench-export { border-bottom: 0; padding: 18px 24px 34px; }
 .export-actions { display: grid; grid-template-columns: .8fr 1.2fr; gap: 8px; }
-.export-actions button { min-height: 42px; border-radius: 9px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 10px; font-weight: 700; }
+.export-actions button, .export-actions a { min-height: 42px; border-radius: 9px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 10px; font-weight: 700; text-decoration: none; }
 .export-actions svg { width: 15px; }
 .save-final { border: 1px solid var(--line); background: rgba(255,255,255,.58); }
 .download-final { border: 0; color: white; background: var(--moss); }
@@ -1589,7 +1589,7 @@ select { min-height: 42px; padding: 10px 12px; border-radius: 10px; font-size: 1
 .creator-submit { min-height: 44px; font-size: 13px; }
 .workbench-export { padding: 20px 20px 30px; }
 .export-actions { gap: 10px; }
-.export-actions button { min-height: 46px; font-size: 12px; }
+.export-actions button, .export-actions a { min-height: 46px; font-size: 12px; }
 .creator-resume { min-height: 42px; margin: 0 16px 16px; font-size: 11px; }
 
 .creator-next-action span,

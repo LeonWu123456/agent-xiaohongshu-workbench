@@ -164,6 +164,9 @@ test("creator journey is bound to the current confirmed draft and required image
   assert.match(source, /link\.remove\(\)/);
   assert.match(source, /resolveDownloadTarget/);
   assert.match(source, /isPublicRuntime: IS_PUBLIC_RUNTIME/);
+  assert.match(source, /preparedExport\.url/);
+  assert.match(source, /download=\{preparedExport\.name\}/);
+  assert.match(source, /保存发布包/);
   assert.doesNotMatch(source, /fetch\("\/api\/local-export"/);
 });
 

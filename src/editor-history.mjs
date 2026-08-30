@@ -15,7 +15,7 @@ export function createEditorHistory(present, options = {}) {
 export function updateEditorHistory(history, next, options = {}) {
   if (Object.is(next, history.present)) return history;
   if (options.record === false) {
-    return { ...history, present: next, future: [] };
+    return { ...history, present: next, future: options.clearFuture === true ? [] : history.future };
   }
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const group = typeof options.group === "string" && options.group ? options.group : null;
