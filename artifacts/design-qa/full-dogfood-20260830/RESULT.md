@@ -74,8 +74,8 @@
 - 公网/本地下载分流：`src/download-transport.mjs`
 - 安全排版与旧稿迁移：`src/html-layout.mjs`、`src/styles.css` v14
 - 真实生成回执：`~/.mesy/runtime/packages/xiaoshimei-studio-v2/artifacts/provider-runs/images-2026-08-30T08-52-49-596Z-c82e63c9.json`
-- 最新发布前复核包：`~/Downloads/小师妹-发布包-2026-08-30T13-24-11-537Z-1.zip`
-- 最新发布前复核包 SHA-256：`1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`
+- 最新传输/排版 QA 夹具：`~/Downloads/小师妹-QA夹具-传输排版-20260830.zip`（白底几何测试图，不是待发布内容）
+- QA 夹具 ZIP SHA-256：`1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`
 
 ## 唯一剩余现实条件
 

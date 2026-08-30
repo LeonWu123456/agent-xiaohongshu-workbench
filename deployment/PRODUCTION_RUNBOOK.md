@@ -66,5 +66,6 @@
 - 当前 Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp` 已由真实使用证明不可交付：`/api/provider/generate-images` 函数日志为 200，但浏览器收到 `Failed to fetch`；公网 ZIP 下载也无法完成。
 - 根因分别是：整次生成把全部原尺寸切片以 Base64 塞进一个 JSON，缺少传输预算；以及公网错误地先调用仅本地存在的 `/api/local-export`。
 - 本地修复分支：`fix/online-generation-export-layout-20260830`。
-- 本地证据：264/264 tests；Vite build；五页窄屏无 overflow/overlap；改字、撤销、重做、刷新保存通过；ZIP `~/Downloads/小师妹-发布包-2026-08-30T13-24-11-537Z-1.zip` CRC PASS，5 张 PNG 均 1080×1440，SHA-256 `1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`。
+- 本地提交：`e169bd3`；尚未推送。
+- 本地证据：264/264 tests；Vite build；五页窄屏无 overflow/overlap；改字、撤销、重做、刷新保存通过；白底几何 QA 夹具 `~/Downloads/小师妹-QA夹具-传输排版-20260830.zip` CRC PASS，5 张 PNG 均 1080×1440，SHA-256 `1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`。该夹具只证明传输和排版，不冒充真实待发布内容。
 - 发布边界：未获 Human Gate 前不推送、不生成 Preview、不替换 Production。获批后只允许“修复分支 → Preview 真实 BYOK/下载验收 → 同一 deployment promote → 正式域名回读”这一条路径。
