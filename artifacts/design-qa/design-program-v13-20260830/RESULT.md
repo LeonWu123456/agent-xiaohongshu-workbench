@@ -57,7 +57,7 @@ confirmed article + page sequence + panel semantics + style lock
 - `package_verified`: PASS_LOCAL_ZIP
 - `runtime_operational`: PASS_LOCAL_SERVICES；本轮发布前复核未新增付费调用
 - `visual_reality_validated`: PASS_LOCAL_DOGFOOD
-- `production_applied`: NOT_RUN
+- `production_applied`: PASS_VERCEL_PRODUCTION；deployment `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`
 - `reader_outcome_validated`: NOT_RUN
 
-因此目前可以说“本地能力桥、编辑与发布包已现实验证”；在 Vercel Preview 与正式域名完成同样回读前，仍不能说最新 v13 已在线上生效。
+因此目前可以说“本地能力桥、编辑与发布包已现实验证，最新 v13 已在线上生效”；不能把它扩大为小红书真实发布或读者效果已验证。
