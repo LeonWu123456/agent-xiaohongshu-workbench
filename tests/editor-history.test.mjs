@@ -36,3 +36,12 @@ test("metadata-only writes can avoid adding an undo step", () => {
   assert.equal(history.past.length, 0);
   assert.equal(history.present.saved_at, "now");
 });
+
+test("non-recorded layout initialization does not destroy redo", () => {
+  let history = createEditorHistory({ value: 1, density: "airy" });
+  history = updateEditorHistory(history, { value: 2, density: "airy" }, { now: 100 });
+  history = undoEditorHistory(history);
+  history = updateEditorHistory(history, { ...history.present, density: "compact" }, { record: false });
+  assert.equal(history.future.length, 1);
+  assert.equal(redoEditorHistory(history).present.value, 2);
+});

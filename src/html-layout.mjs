@@ -1,7 +1,7 @@
 import { mediaPolicyFor, panelPreferredAspect } from "./media-role.mjs";
 import { designProgramLayout, normalizeDesignProgram } from "./design-program.mjs";
 
-export const HTML_LAYOUT_STATE_VERSION = 10;
+export const HTML_LAYOUT_STATE_VERSION = 11;
 const HTML_ROLE_LAYOUT_MIGRATION_VERSION = 9;
 export const HTML_IMAGE_FOCAL_MIN = 12;
 export const HTML_IMAGE_FOCAL_MAX = 88;
@@ -156,7 +156,11 @@ export function normalizeHtmlState(value, page, pageIndex = 0) {
       /* v6 stored panel transforms against a width-owned image geometry. Once
          rows became the containment authority those offsets could move art
          across neighbouring copy, so only those stale panel transforms reset. */
-      if (sourceVersion < 7 && /^panel-\d+-(?:image|copy)$/.test(key)) return;
+      if (sourceVersion < HTML_LAYOUT_STATE_VERSION && /^panel-\d+-(?:image|copy)$/.test(key)) return;
+      // v11 makes the title and every panel row structurally contained. Old
+      // title offsets were authored against nowrap phrases and can push the
+      // whole heading beyond the page even after the new grid is applied.
+      if (sourceVersion < HTML_LAYOUT_STATE_VERSION && key === "title-block") return;
       // v9 changes the hook cover from an inset portrait to a full-width 9:8
       // frame. Old transforms were measured against incompatible geometry;
       // reset only those cover objects, then preserve every new free edit.
@@ -171,7 +175,7 @@ export function normalizeHtmlState(value, page, pageIndex = 0) {
   return {
     __xsm_html_version: HTML_LAYOUT_STATE_VERSION,
     layout_id: layoutId,
-    density: sourceVersion >= HTML_ROLE_LAYOUT_MIGRATION_VERSION && ["airy", "balanced", "compact"].includes(source.density)
+    density: sourceVersion >= HTML_LAYOUT_STATE_VERSION && ["airy", "balanced", "compact"].includes(source.density)
       ? source.density
       : recommendHtmlDensity(page),
     design_program: designProgram,

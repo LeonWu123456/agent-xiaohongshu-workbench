@@ -60,3 +60,25 @@
 | rollback deployment | `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |
 
 当前边界：GitHub 可写 `main` 已合并 PR `#1`（merge commit `cdc713b2d465f625fbc34ee39fdadf08de4f2e7d`），正式域名已命中本轮新制品。未使用付费生成调用，未验证外部小红书发布或读者效果；上游 PR `#13` 仍等待上游维护者处理。
+
+## 2026-08-30 生产事故与待发布修复
+
+- 当前 Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp` 已由真实使用证明不可交付：`/api/provider/generate-images` 函数日志为 200，但浏览器收到 `Failed to fetch`；公网 ZIP 下载也无法完成。
+- 根因分别是：整次生成把全部原尺寸切片以 Base64 塞进一个 JSON，缺少传输预算；以及公网错误地先调用仅本地存在的 `/api/local-export`。
+- 本地修复分支：`fix/online-generation-export-layout-20260830`。
+- 本地提交：`e169bd3`；尚未推送。
+- 本地证据：264/264 tests；Vite build；五页窄屏无 overflow/overlap；改字、撤销、重做、刷新保存通过；白底几何 QA 夹具 `~/Downloads/小师妹-QA夹具-传输排版-20260830.zip` CRC PASS，5 张 PNG 均 1080×1440，SHA-256 `1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`。该夹具只证明传输和排版，不冒充真实待发布内容。
+- 发布边界：未获 Human Gate 前不推送、不生成 Preview、不替换 Production。获批后只允许“修复分支 → Preview 真实 BYOK/下载验收 → 同一 deployment promote → 正式域名回读”这一条路径。
+
+### 事故修复 Preview 回读
+
+| 字段 | 值 |
+|---|---|
+| Human Gate | 已批准：推送、Preview、真实 BYOK、下载验收；仅全绿时提升同一 deployment |
+| source commit | `c4696a3`（生成链截止 `38ca9d5`；其后仅标题 CSS、history 与下载交互） |
+| real-generation Preview | `dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE`：真实付费母版返回浏览器，3 页/3 图组装并可编辑 |
+| final Preview | `dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4` · `https://xiaoshimei-full-workbench-7lnsp2620-892350620-5733s-projects.vercel.app/` |
+| Preview QA | Ready；HTML 200；health 200 `AWAITING_BYOK`；无 Key 401 `ARK_API_KEY_REQUIRED`；长标题无 overflow；undo/redo；保存刷新；5 页发布包实际下载到 Desktop |
+| package evidence | `~/Desktop/小师妹-发布包-最终预览QA-20260830.zip`；1,560,041 bytes；CRC PASS；5 PNG 均 1080×1440；SHA-256 `da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438` |
+| current Production | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`，仍是事故版本，尚未替换 |
+| rollback after promotion | `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；历史安全点另保留 `dpl_CunmG5zG5kq6CLtVJzaDjjLsQ5aN` |

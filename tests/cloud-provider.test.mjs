@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import handler from "../api/provider.mjs";
-import { splitMotherSheetForUnits } from "../api/provider.mjs";
+import {
+  PUBLIC_GENERATION_RESPONSE_MAX_BYTES,
+  assertPublicGenerationResponseBudget,
+  buildMissingUnitRepairJobs,
+  publicTileBudgetForResponse,
+  splitMotherSheetForUnits,
+} from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
 import sharp from "sharp";
@@ -72,5 +78,47 @@ test("cloud provider turns one mother sheet into independent trimmed browser ass
   }
   assert.equal(tiles[0].mother_sheet_region_role, "kv-top-3x2-9:8");
   assert.equal(tiles[0].preferred_aspect, "9:8");
-  assert.ok(tiles[0].width > tiles[1].width * 2.9);
+  assert.ok(tiles[0].height < tiles[1].height);
+});
+
+test("cloud mother-sheet tiles stay inside the public response transport budget", async () => {
+  const width = 900;
+  const height = 1200;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < pixels.length; index += 1) pixels[index] = (index * 73 + Math.floor(index / 97) * 29) % 256;
+  const sheet = await sharp(pixels, { raw: { width, height, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
+  const units = Array.from({ length: 9 }, (_, index) => ({
+    unit_id: `unit-${index}`, page_index: index, panel_index: null,
+    media_role: "hero_scene", preferred_aspect: "3:4", fit_policy: "cover",
+  }));
+  const budget = 90_000;
+  const tiles = await splitMotherSheetForUnits(sheet, { template: "grid-3x3", units }, { maxBytes: budget });
+  assert.equal(tiles.length, 9);
+  tiles.forEach((tile) => assert.ok(tile.size_bytes <= budget, `${tile.unit_id} is ${tile.size_bytes} bytes`));
+});
+
+test("cloud mother-sheet slicing preserves missing-unit evidence for bounded repair", async () => {
+  const blank = await sharp({ create: { width: 900, height: 1200, channels: 3, background: "white" } }).jpeg().toBuffer();
+  const units = [
+    { unit_id: "page-1-hero", page_index: 0, panel_index: null, preferred_aspect: "9:8", media_role: "cover_kv", fit_policy: "cover" },
+    { unit_id: "page-4-hero", page_index: 3, panel_index: null, preferred_aspect: "3:4", media_role: "hero_scene", fit_policy: "cover" },
+  ];
+  const tiles = await splitMotherSheetForUnits(blank, { template: "grid-3x3", units }, { allowMissing: true });
+  assert.deepEqual(tiles.map((tile) => tile.missing), [true, true]);
+  await assert.rejects(() => splitMotherSheetForUnits(blank, { template: "grid-3x3", units }), /MOTHER_SHEET_UNIT_MISSING/);
+  const jobs = buildMissingUnitRepairJobs(units, 2);
+  assert.equal(jobs.length, 2);
+  assert.equal(jobs[0].template, "kv-top-3x2");
+  assert.equal(jobs[1].template, "grid-3x3");
+  assert.equal(jobs[1].units[0].unit_id, "page-4-hero");
+});
+
+test("cloud response budget fails closed before a browser receives an oversized JSON body", () => {
+  const withinBudget = { payload: "a".repeat(32_000) };
+  assert.ok(assertPublicGenerationResponseBudget(withinBudget) > 32_000);
+  assert.throws(
+    () => assertPublicGenerationResponseBudget({ payload: "a".repeat(PUBLIC_GENERATION_RESPONSE_MAX_BYTES + 1) }),
+    /PUBLIC_RESPONSE_BUDGET_EXCEEDED/,
+  );
+  assert.ok(publicTileBudgetForResponse(24) < publicTileBudgetForResponse(4));
 });
