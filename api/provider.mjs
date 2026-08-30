@@ -37,6 +37,45 @@ export const config = { maxDuration: 300 };
 const IMAGE_PRICE_CNY = 0.22;
 const DEFAULT_TEXT_MODEL = "doubao-seed-2-0-lite-260428";
 const DEFAULT_IMAGE_MODEL = "doubao-seedream-5-0-lite-260128";
+export const PUBLIC_GENERATION_RESPONSE_MAX_BYTES = 4_000_000;
+const PUBLIC_TILE_PAYLOAD_BUDGET_BYTES = 2_600_000;
+
+export function publicTileBudgetForResponse(unitCount) {
+  const count = Math.max(1, Number(unitCount) || 1);
+  return Math.max(56_000, Math.min(160_000, Math.floor(PUBLIC_TILE_PAYLOAD_BUDGET_BYTES / count)));
+}
+
+async function encodeTileForPublicTransport(baseTile, preferredAspect, maxBytes) {
+  const ratio = preferredAspect === "9:8" ? 9 / 8 : 3 / 4;
+  const profiles = [
+    { width: 720, quality: 82 },
+    { width: 640, quality: 76 },
+    { width: 560, quality: 70 },
+    { width: 480, quality: 64 },
+    { width: 420, quality: 56 },
+  ];
+  let last = null;
+  for (const profile of profiles) {
+    const height = Math.round(profile.width / ratio);
+    const bytes = await sharp(baseTile)
+      .resize({ width: profile.width, height, fit: "cover", position: "centre" })
+      .flatten({ background: "#ffffff" })
+      .jpeg({ quality: profile.quality, chromaSubsampling: "4:2:0", mozjpeg: true })
+      .toBuffer();
+    last = { bytes, width: profile.width, height };
+    if (bytes.length <= maxBytes) return last;
+  }
+  if (last?.bytes.length <= maxBytes) return last;
+  throw new Error(`PUBLIC_TILE_BUDGET_EXCEEDED:${last?.bytes.length || 0}:${maxBytes}`);
+}
+
+export function assertPublicGenerationResponseBudget(content) {
+  const sizeBytes = Buffer.byteLength(JSON.stringify(content));
+  if (sizeBytes > PUBLIC_GENERATION_RESPONSE_MAX_BYTES) {
+    throw new Error(`PUBLIC_RESPONSE_BUDGET_EXCEEDED:${sizeBytes}:${PUBLIC_GENERATION_RESPONSE_MAX_BYTES}`);
+  }
+  return sizeBytes;
+}
 
 function cleanModel(value, fallback) {
   const model = String(value || fallback).trim();
@@ -147,11 +186,12 @@ async function generateTextDraft(input, settings) {
   };
 }
 
-export async function splitMotherSheetForUnits(bytes, jobOrUnits) {
+export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 1024) throw new TypeError("MOTHER_SHEET_BYTES_INVALID");
   const job = Array.isArray(jobOrUnits) ? { template: "grid-3x3", units: jobOrUnits } : jobOrUnits;
   const units = job?.units;
   if (!Array.isArray(units) || units.length < 1 || units.length > 9) throw new TypeError("MOTHER_SHEET_UNITS_INVALID");
+  const maxBytes = Math.max(32_000, Number(options.maxBytes) || 160_000);
   const metadata = await sharp(bytes).metadata();
   const width = Number(metadata.width || 0);
   const height = Number(metadata.height || 0);
@@ -165,10 +205,8 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits) {
     const baseTile = await sharp(bytes).extract(cropRegion).png().toBuffer();
     const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
     if (!quality.hasVisibleSubject) throw new Error(`MOTHER_SHEET_UNIT_MISSING:${unit.unit_id}`);
-    const tileBytes = await sharp(baseTile)
-      .flatten({ background: "#ffffff" })
-      .jpeg({ quality: 90, chromaSubsampling: "4:4:4", mozjpeg: true })
-      .toBuffer();
+    const tile = await encodeTileForPublicTransport(baseTile, preferredAspect, maxBytes);
+    const tileBytes = tile.bytes;
     return {
       unit_id: unit.unit_id,
       page_index: unit.page_index,
@@ -176,13 +214,13 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits) {
       src: `data:image/jpeg;base64,${tileBytes.toString("base64")}`,
       sha256: sha256Bytes(tileBytes),
       size_bytes: tileBytes.length,
-      width: region.width,
-      height: region.height,
+      width: tile.width,
+      height: tile.height,
       media_role: unit.media_role,
       preferred_aspect: preferredAspect,
       fit_policy: unit.fit_policy,
       edge_trim: { left: 0, right: 0, top: 0, bottom: 0 },
-      aspect_crop: { left: 0, top: 0, width: region.width, height: region.height },
+      aspect_crop: { left: 0, top: 0, width: tile.width, height: tile.height },
       mother_sheet_slot: slotIndex + 1,
       mother_sheet_region_role: regionRole,
       presence_gate: quality,
@@ -211,13 +249,14 @@ async function generateImages(input, settings, request) {
 
   const units = buildIllustrationUnits(pages);
   const jobs = groupIllustrationUnits(units);
+  const tileBudget = publicTileBudgetForResponse(units.length);
   const extraReferences = input.reference_images.map((item) => item.data_url);
   const sheets = [];
   for (const job of jobs) {
     const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
     const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_${job.sheet_index + 1}_CALL_FAILED`);
     const sheet = { job, ...(await imagePayload(payload)) };
-    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job);
+    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget });
     sheets.push(sheet);
   }
 
@@ -231,13 +270,15 @@ async function generateImages(input, settings, request) {
       slot_index: tile.mother_sheet_slot - 1,
     }));
   }
-  const pageAssets = pages.map((_page, pageIndex) => assetByUnit.get(units.find((unit) => unit.page_index === pageIndex)?.unit_id)?.src);
+  const pageAssets = pages.map((page, pageIndex) => (page.panels || []).length
+    ? undefined
+    : assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null)?.unit_id)?.src);
   const panelAssetsByPage = pages.map((page, pageIndex) => (page.panels || []).map((_panel, panelIndex) => assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index === panelIndex)?.unit_id)?.src));
   let content = assembleArkContentFromDraft(input.draft, pages, { pageAssets, panelAssetsByPage }, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: sheets.length, illustrationUnitCount: units.length }, input.production_mode);
   content = {
     ...content,
     pages: content.pages.map((page, pageIndex) => {
-      const pageUnit = units.find((unit) => unit.page_index === pageIndex);
+      const pageUnit = units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null);
       const pageAsset = assetByUnit.get(pageUnit?.unit_id);
       return {
         ...page,
@@ -260,8 +301,12 @@ async function generateImages(input, settings, request) {
       page_plan_attempts: planAttempts,
       mother_sheet_sha256: sheets.map((sheet) => sheet.sha256),
       tile_sha256: sheets.flatMap((sheet) => sheet.tiles.map((tile) => tile.sha256)),
+      tile_transport_budget_bytes: tileBudget,
     },
   };
+  const responseSizeBytes = assertPublicGenerationResponseBudget(content);
+  content.generation.response_size_bytes = responseSizeBytes;
+  assertPublicGenerationResponseBudget(content);
   return parseContentPackage(JSON.stringify(content));
 }
 

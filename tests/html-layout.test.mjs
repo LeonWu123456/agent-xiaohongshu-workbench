@@ -76,6 +76,7 @@ test("copy density is chosen from actual content pressure when old state migrate
   const densePage = { title: "长内容", info_panels: Array.from({ length: 4 }, (_, index) => ({ title: `步骤${index}`, body: "需要保留但不能把底部顶出页面的说明文字".repeat(5) })) };
   assert.equal(recommendHtmlDensity(densePage), "compact");
   assert.equal(normalizeHtmlState({ __xsm_html_version: 3, density: "airy" }, densePage, 1).density, "compact");
+  assert.equal(normalizeHtmlState({ __xsm_html_version: 10, density: "airy" }, densePage, 1).density, "compact");
 });
 
 test("closing pages migrate away from a duplicated cover while preserving later explicit choices", () => {
@@ -99,7 +100,7 @@ test("rhythm changes only cycle layouts compatible with the page content topolog
   assert.deepEqual(layoutsForPage({ page_role: "hook" }).map((layout) => layout.id), ["cover-poster", "visual-story"]);
 });
 
-test("v7 drops stale panel transforms while preserving unrelated object edits", () => {
+test("v11 drops stale panel and title transforms while preserving unrelated object edits", () => {
   const page = { page_role: "method", info_panels: [{}, {}, {}] };
   const migrated = normalizeHtmlState({
     __xsm_html_version: 6,
@@ -112,7 +113,7 @@ test("v7 drops stale panel transforms while preserving unrelated object edits", 
   }, page, 2);
   assert.equal(migrated.object_edits["panel-0-image"], undefined);
   assert.equal(migrated.object_edits["panel-1-copy"], undefined);
-  assert.deepEqual(migrated.object_edits["title-block"], { x: 2, y: 1, scale: 1 });
+  assert.equal(migrated.object_edits["title-block"], undefined);
 
   const current = normalizeHtmlState({
     __xsm_html_version: HTML_LAYOUT_STATE_VERSION,
@@ -143,6 +144,30 @@ test("v9 resets only stale cover geometry and preserves new free edits", () => {
     object_edits: { "hero-image": { x: -4, y: 3, scale: 1.04 } },
   }, page, 0);
   assert.deepEqual(current.object_edits["hero-image"], { x: -4, y: 3, scale: 1.04 });
+});
+
+test("v11 resets unsafe title and panel offsets while preserving current free edits", () => {
+  const page = { page_role: "method", title: "先调整起居养神 慢慢收回夏日耗散的阳气", info_panels: [{}, {}, {}] };
+  const migrated = normalizeHtmlState({
+    __xsm_html_version: 10,
+    density: "airy",
+    object_edits: {
+      "title-block": { x: 8, y: 2, scale: 1.2 },
+      "panel-0-copy": { x: 9, y: 5, scale: 1.1 },
+      "panel-1-image": { x: -7, y: -4, scale: 1.15 },
+      "body-block": { x: 2, y: 1, scale: 1 },
+    },
+  }, page, 1);
+  assert.equal(migrated.object_edits["title-block"], undefined);
+  assert.equal(migrated.object_edits["panel-0-copy"], undefined);
+  assert.equal(migrated.object_edits["panel-1-image"], undefined);
+  assert.deepEqual(migrated.object_edits["body-block"], { x: 2, y: 1, scale: 1 });
+
+  const current = normalizeHtmlState({
+    __xsm_html_version: HTML_LAYOUT_STATE_VERSION,
+    object_edits: { "panel-0-copy": { x: 3, y: 2, scale: 1.05 } },
+  }, page, 1);
+  assert.deepEqual(current.object_edits["panel-0-copy"], { x: 3, y: 2, scale: 1.05 });
 });
 
 test("content package preserves HTML mode and state across save and reload", () => {

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import handler from "../api/provider.mjs";
-import { splitMotherSheetForUnits } from "../api/provider.mjs";
+import {
+  PUBLIC_GENERATION_RESPONSE_MAX_BYTES,
+  assertPublicGenerationResponseBudget,
+  publicTileBudgetForResponse,
+  splitMotherSheetForUnits,
+} from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
 import sharp from "sharp";
@@ -72,5 +77,31 @@ test("cloud provider turns one mother sheet into independent trimmed browser ass
   }
   assert.equal(tiles[0].mother_sheet_region_role, "kv-top-3x2-9:8");
   assert.equal(tiles[0].preferred_aspect, "9:8");
-  assert.ok(tiles[0].width > tiles[1].width * 2.9);
+  assert.ok(tiles[0].height < tiles[1].height);
+});
+
+test("cloud mother-sheet tiles stay inside the public response transport budget", async () => {
+  const width = 900;
+  const height = 1200;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < pixels.length; index += 1) pixels[index] = (index * 73 + Math.floor(index / 97) * 29) % 256;
+  const sheet = await sharp(pixels, { raw: { width, height, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
+  const units = Array.from({ length: 9 }, (_, index) => ({
+    unit_id: `unit-${index}`, page_index: index, panel_index: null,
+    media_role: "hero_scene", preferred_aspect: "3:4", fit_policy: "cover",
+  }));
+  const budget = 90_000;
+  const tiles = await splitMotherSheetForUnits(sheet, { template: "grid-3x3", units }, { maxBytes: budget });
+  assert.equal(tiles.length, 9);
+  tiles.forEach((tile) => assert.ok(tile.size_bytes <= budget, `${tile.unit_id} is ${tile.size_bytes} bytes`));
+});
+
+test("cloud response budget fails closed before a browser receives an oversized JSON body", () => {
+  const withinBudget = { payload: "a".repeat(32_000) };
+  assert.ok(assertPublicGenerationResponseBudget(withinBudget) > 32_000);
+  assert.throws(
+    () => assertPublicGenerationResponseBudget({ payload: "a".repeat(PUBLIC_GENERATION_RESPONSE_MAX_BYTES + 1) }),
+    /PUBLIC_RESPONSE_BUDGET_EXCEEDED/,
+  );
+  assert.ok(publicTileBudgetForResponse(24) < publicTileBudgetForResponse(4));
 });

@@ -44,6 +44,7 @@ import { SMART_LAYOUT_RECIPES, applySmartLayoutSequence, buildEditablePanelLayou
 import { MaturePageEditor, renderMaturePageToPng } from "./MaturePageEditor.jsx";
 import { HtmlPageEditor, renderHtmlPageToPng } from "./HtmlPageEditor.jsx";
 import { editorModeForPage } from "./html-layout.mjs";
+import { resolveDownloadTarget } from "./download-transport.mjs";
 import { XIAOSHIMEI_AVATAR_DATA_URL } from "../api/xiaoshimei-avatar-data.mjs";
 import "./styles.css";
 
@@ -173,25 +174,7 @@ function jsonBlob(value) {
 }
 
 async function downloadBlob(name, blob) {
-  let url;
-  let revoke = false;
-  let transport = "http_attachment";
-  let savedPath = null;
-  try {
-    const response = await fetch("/api/local-export", {
-      method: "POST",
-      headers: { "content-type": blob.type || "application/octet-stream", "x-export-filename": encodeURIComponent(name) },
-      body: blob,
-    });
-    const result = await response.json();
-    if (!response.ok || !result.download_url) throw new Error(result.error || `HTTP ${response.status}`);
-    url = result.download_url;
-    savedPath = result.saved_path || null;
-  } catch {
-    transport = "blob_fallback";
-    url = URL.createObjectURL(blob);
-    revoke = true;
-  }
+  const { url, revoke, transport, savedPath } = await resolveDownloadTarget({ name, blob, isPublicRuntime: IS_PUBLIC_RUNTIME });
   window.__xiaoshimeiLastDownload = { name, size: blob.size, type: blob.type, transport, saved_path: savedPath, completed_at: new Date().toISOString() };
   const link = document.createElement("a");
   link.href = url;
@@ -200,7 +183,7 @@ async function downloadBlob(name, blob) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  if (revoke) setTimeout(() => URL.revokeObjectURL(url), 1000);
+  if (revoke) setTimeout(() => URL.revokeObjectURL(url), 60000);
   return { transport, savedPath };
 }
 

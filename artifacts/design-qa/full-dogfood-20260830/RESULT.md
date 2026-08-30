@@ -4,9 +4,11 @@
 
 ## 结论
 
-本地工作台的完整创作链已经真实走通：原文 → 文字生成 → 人工确认 → 付费母版 → 5 页排版 → 编辑/撤销 → 保存/刷新 → 360px 窄屏 → 复制发布文案 → 下载并解包。A10–A17 在当前本地 5 页实例全部通过。
+上午的本地完整创作链确实走通过，但随后正式站暴露了两个会阻断交付的生产事故：`generate-images` 函数返回 200 后浏览器仍 `Failed to fetch`，以及公网下载错误地先调用本地专用 `/api/local-export`。因此本文件此前的“正式版可用”结论被现实推翻，不再沿用。
 
-这不等于公网正式版已经更新，也不等于小红书真实发布或传播效果已经验证。最新代码尚未部署；外部发布仍受 Human Gate 约束。
+当前修复分支已在本地重新闭环：公网生成响应加入按插图总数分配的切片字节预算与 4 MB 总响应闸；公网下载直接走浏览器 attachment；HTML v11 清理旧标题/面板位移，v14 用明确的 3:4 宽高和配套 Grid 列把图文限制在各自行内。264/264 tests、生产构建、五页窄屏测量、改字/撤销/重做、保存刷新、真实下载、ZIP CRC、5 张 1080×1440 PNG 和逐页目检均通过。
+
+这仍不等于公网正式版已经更新：当前 Vercel Production 还是事故版本，且修复后尚未用公网 BYOK 重跑一次真实付费生图。外部发布与生产替换仍受一次 Human Gate 约束。
 
 ## TaskSpec 主流程对照
 
@@ -43,10 +45,10 @@
 | 层 | 结果 |
 |---|---|
 | mechanism_ready | PASS_LOCAL：动态母版分隔线、边带清理、付费原图断点、语义标题换行、复制失败回读均已实现 |
-| package_verified | PASS_LOCAL_ZIP：259/259 tests，Vite build，ZIP CRC，5 张 1080×1440 PNG 逐页目检 |
-| production_applied | PASS：Vercel Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp`；稳定域名 JS/CSS 与本地构建 SHA-256 一致 |
-| runtime_operational | PASS_LOCAL：真实 Provider 完成 2 次付费图片调用并保存/刷新/导出 |
-| reality_validated | PASS_LOCAL_DOGFOOD：本地真实用户旅程可用；外部平台与读者效果未验证 |
+| package_verified | PASS_LOCAL_ZIP：264/264 tests，Vite build，ZIP CRC，5 张 1080×1440 PNG 逐页目检 |
+| production_applied | FAIL_CURRENT：Vercel Production `dpl_Afw8Q5Vai578FVs11waZvd24CYBp` 未包含本轮传输、下载和 v14 排版修复 |
+| runtime_operational | PARTIAL：本地编辑/保存/导出可用；当前正式站生图与下载已由现实证明不可用 |
+| reality_validated | PASS_LOCAL_DOGFOOD：本地五页关键旅程可用；修复后公网真实生图、下载与外部平台效果未验证 |
 
 ## 本轮发现并上移的根因
 
@@ -56,6 +58,9 @@
 4. 付费调用与切片写成一个不可恢复步骤。现在先登记已付费原图，再切片；切片失败从本地原图重放，不再重复计费。
 5. 标题可以按单字断行。现在高亮和普通片段都按语义短语换行。
 6. 复制按钮过去不等待 Clipboard 结果，可能假成功。现在 Clipboard API 失败会回退到选区复制，仍失败则显示真实失败。
+7. 公网生图把所有母版切片原尺寸 Base64 一次返回；Vercel 函数日志是 200，不代表响应成功到达浏览器。现在每张切片按整次单元数自适应压缩，并在 JSON 超过 4 MB 前明确失败。
+8. 公网下载先请求只存在于本地 Express 的 `/api/local-export`，异步失败后才 Blob fallback。现在公网从一开始就走浏览器 attachment，本地才使用原子落盘接口。
+9. `left-first` 只交换 DOM 顺序、没交换 Grid 列定义，图片和文字会坐进对方的列；标题短语又被强制 nowrap。现在左右顺序和列模板成对绑定，长标题允许语义换行，旧危险位移通过 v11 一次迁移清除。
 
 ## 资产落点
 
@@ -65,9 +70,13 @@
 - 串格边带清理：`src/mother-sheet-artifact-cleanup.mjs`
 - 付费断点：`src/image-run-checkpoint.mjs`
 - 可重放修复：`scripts/repair-generated-run-assets.mjs`
+- 公网切片传输预算：`api/provider.mjs`
+- 公网/本地下载分流：`src/download-transport.mjs`
+- 安全排版与旧稿迁移：`src/html-layout.mjs`、`src/styles.css` v14
 - 真实生成回执：`~/.mesy/runtime/packages/xiaoshimei-studio-v2/artifacts/provider-runs/images-2026-08-30T08-52-49-596Z-c82e63c9.json`
-- 最新发布前复核包 SHA-256：`6855026976bdf8ec0407360c19b7dcb98c9f4617b10ac0adfc8aede367706621`
+- 最新发布前复核包：`~/Downloads/小师妹-发布包-2026-08-30T13-24-11-537Z-1.zip`
+- 最新发布前复核包 SHA-256：`1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31`
 
 ## 唯一剩余现实条件
 
-如要把“正式版也已修复”写成 PASS，下一步只能是：获得一次明确的公网部署 Human Gate → 部署当前构建 → 在正式 URL 重走保存、360px、复制和下载发布包 → 对新 ZIP 再做 CRC/尺寸/逐页目检。未做之前，正式版保持“旧部署可用、最新修复未应用”。
+如要把“正式版也已修复”写成 PASS，下一步只能是：获得一次明确的公网发布 Human Gate → 推送当前修复分支并生成 Vercel Preview → 在 Preview 用 BYOK 重跑一次真实生图与浏览器下载 → 桌面/窄屏/保存/编辑/ZIP 全通过后提升同一 deployment 到 Production → 正式域名回读。未做之前，正式版保持“事故版本，不能交给小师妹使用”。
