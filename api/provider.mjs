@@ -316,6 +316,67 @@ export function buildMissingUnitRepairJobs(units, startIndex = 0) {
   return jobs;
 }
 
+export function buildStandaloneRepairPrompt(unit, { styleLock = null, imageContext = null } = {}) {
+  if (!unit || typeof unit !== "object" || Array.isArray(unit) || !String(unit.unit_id || "").trim()) throw new TypeError("STANDALONE_REPAIR_UNIT_INVALID");
+  const action = String(unit.visual_action || "").trim() || "小师妹完成与本页主题一致的清楚动作";
+  const detail = String(unit.image_prompt || "").trim() || "东方生活场景，人物动作清楚，构图简洁";
+  const preferredAspect = unit.preferred_aspect === "9:8" ? "9:8" : "3:4";
+  const composition = preferredAspect === "9:8"
+    ? "把完整主视觉放在整张3:4画布中央的9:8安全区内，上下只留纯白背景；人物、双手、脚和关键器物必须完整，后续会直接裁出中央9:8区域"
+    : "让人物与关键器物完整占据3:4画布中央约58%–72%，头顶、发髻、双手、脚和动作器物都不得出框";
+  return [
+    "生成一张严格3:4竖幅的单张补图。这不是母图、不是拼图、不是网格，也没有其他待填区域；整张画布只表现下面这一个动作。",
+    `${composition}。背景必须为视觉上接近#FFFFFF的连续纯白，不出现相框式白边、彩色底、阴影卡片、分隔线或空白占位格。`,
+    "画面只出现同一位小师妹：黑色高发髻、红色长发带、米白盘扣上衣、红色灯笼裤、米白布鞋；不得出现标题、正文、数字、字母、标志、水印、UI或对话框。",
+    `唯一动作合同｜${unit.unit_id}｜${action}｜${detail}`,
+    styleLock ? `人物与线条风格锁：${JSON.stringify(styleLock)}` : "保持干净线条、东方生活质感和少量朱红暖色点缀。",
+    imageContext ? `用户画面要求：${JSON.stringify(imageContext)}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+export async function sliceStandaloneRepairForUnit(bytes, unit, options = {}) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 1024) throw new TypeError("STANDALONE_REPAIR_BYTES_INVALID");
+  if (!unit || typeof unit !== "object" || Array.isArray(unit) || !String(unit.unit_id || "").trim()) throw new TypeError("STANDALONE_REPAIR_UNIT_INVALID");
+  const maxBytes = Math.max(32_000, Number(options.maxBytes) || 160_000);
+  const allowMissing = options.allowMissing === true;
+  const metadata = await sharp(bytes).metadata();
+  const width = Number(metadata.width || 0);
+  const height = Number(metadata.height || 0);
+  if (!width || !height || Math.abs(width / height - .75) > .01) throw new Error(`STANDALONE_REPAIR_ASPECT_RATIO_INVALID:${width}x${height}`);
+  const preferredAspect = unit.preferred_aspect === "9:8" ? "9:8" : "3:4";
+  const crop = preferredAspect === "9:8"
+    ? { left: 0, top: Math.max(0, Math.floor((height - Math.round(width / (9 / 8))) / 2)), width, height: Math.min(height, Math.round(width / (9 / 8))) }
+    : { left: 0, top: 0, width, height };
+  const baseTile = await sharp(bytes).flatten({ background: "#ffffff" }).extract(crop).png().toBuffer();
+  const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
+  const missing = (reason, pixelGate = null) => ({
+    unit_id: unit.unit_id, page_index: unit.page_index, panel_index: unit.panel_index, missing: true,
+    mother_sheet_slot: 1, mother_sheet_region_role: `standalone-repair-${preferredAspect}`, presence_gate: quality,
+    ...(pixelGate ? { pixel_gate: pixelGate } : {}), repair_failure_reason: reason,
+  });
+  if (!quality.hasVisibleSubject) {
+    if (allowMissing) return missing("VISUAL_SUBJECT_MISSING");
+    throw new Error(`STANDALONE_REPAIR_UNIT_MISSING:${unit.unit_id}`);
+  }
+  const tile = await encodeTileForPublicTransport(baseTile, preferredAspect, maxBytes);
+  const finalRaw = await sharp(tile.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const pixelGate = inspectMotherSheetTilePixels({ data: new Uint8Array(finalRaw.data), width: finalRaw.info.width, height: finalRaw.info.height, channels: finalRaw.info.channels }, { expectedAspect: preferredAspect });
+  if (!pixelGate.hasCleanEdges) {
+    if (allowMissing) return missing(`CONTAMINATED:${pixelGate.contaminatedSides.join("+") || "ASPECT"}`, pixelGate);
+    throw new Error(`STANDALONE_REPAIR_TILE_CONTAMINATED:${unit.unit_id}:${pixelGate.contaminatedSides.join("+") || "ASPECT"}`);
+  }
+  return {
+    unit_id: unit.unit_id, page_index: unit.page_index, panel_index: unit.panel_index,
+    src: `data:image/jpeg;base64,${tile.bytes.toString("base64")}`,
+    sha256: sha256Bytes(tile.bytes), size_bytes: tile.bytes.length, width: tile.width, height: tile.height,
+    media_role: unit.media_role, preferred_aspect: preferredAspect, fit_policy: unit.fit_policy,
+    edge_trim: { left: 0, right: 0, top: 0, bottom: 0 },
+    aspect_crop: { left: crop.left, top: crop.top, width: crop.width, height: crop.height },
+    mother_sheet_slot: 1, mother_sheet_region_role: `standalone-repair-${preferredAspect}`,
+    presence_gate: quality, pixel_gate: pixelGate, repair_source: "standalone-image",
+  };
+}
+
 async function generateImages(input, settings, request) {
   if (input.resume_run_id) throw new TypeError("PUBLIC_RESUME_NOT_SUPPORTED_RETRY_CURRENT_NODE");
   const pageCount = input.image_count === "AUTO" ? input.draft.recommended_image_count : input.image_count;
@@ -348,9 +409,12 @@ async function generateImages(input, settings, request) {
   const tileBudget = publicTileBudgetForResponse(units.length);
   const extraReferences = input.reference_images.map((item) => item.data_url);
   const sheets = [];
+  const standaloneRepairTiles = [];
+  let actualImageCalls = 0;
   for (const job of jobs) {
     const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
     const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_${job.sheet_index + 1}_CALL_FAILED`);
+    actualImageCalls += 1;
     const sheet = { job, ...(await imagePayload(payload)) };
     sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget, allowMissing: true });
     sheets.push(sheet);
@@ -358,12 +422,38 @@ async function generateImages(input, settings, request) {
 
   const missingUnitIds = new Set(sheets.flatMap((sheet) => sheet.tiles.filter((tile) => tile.missing).map((tile) => tile.unit_id)));
   const repairJobs = buildMissingUnitRepairJobs(units.filter((unit) => missingUnitIds.has(unit.unit_id)), sheets.length);
-  for (const job of repairJobs) {
+  const groupedRepairJobs = repairJobs.filter((job) => job.units.length > 1);
+  for (const job of groupedRepairJobs) {
     const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
     const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_REPAIR_${job.sheet_index + 1}_CALL_FAILED`);
+    actualImageCalls += 1;
     const sheet = { job, ...(await imagePayload(payload)) };
-    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget });
+    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget, allowMissing: true });
     sheets.push(sheet);
+  }
+
+  const repairedUnitIds = new Set(sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.unit_id)));
+  const standaloneRepairUnits = units.filter((unit) => missingUnitIds.has(unit.unit_id) && !repairedUnitIds.has(unit.unit_id));
+  for (const unit of standaloneRepairUnits) {
+    const prompt = buildStandaloneRepairPrompt(unit, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
+    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `STANDALONE_REPAIR_${unit.unit_id}_CALL_FAILED`);
+    actualImageCalls += 1;
+    const image = await imagePayload(payload);
+    standaloneRepairTiles.push(await sliceStandaloneRepairForUnit(image.bytes, unit, { maxBytes: tileBudget, allowMissing: true }));
+  }
+
+  const unresolvedUnitIds = standaloneRepairTiles.filter((tile) => tile.missing).map((tile) => tile.unit_id);
+  if (unresolvedUnitIds.length) {
+    const error = new Error(`MOTHER_SHEET_REPAIR_EXHAUSTED:${unresolvedUnitIds.join(",")}`);
+    error.details = {
+      completed_units: units.length - unresolvedUnitIds.length,
+      total_units: units.length,
+      missing_unit_ids: unresolvedUnitIds,
+      actual_image_calls: actualImageCalls,
+      estimated_image_cost_cny: Number((actualImageCalls * IMAGE_PRICE_CNY).toFixed(2)),
+      retry_scope: "MISSING_UNITS_ONLY_NOT_YET_IMPLEMENTED_ON_PUBLIC_RUNTIME",
+    };
+    throw error;
   }
 
   const assetByUnit = new Map();
@@ -376,6 +466,13 @@ async function generateImages(input, settings, request) {
       slot_index: tile.mother_sheet_slot - 1,
     }));
   }
+  standaloneRepairTiles.filter((tile) => !tile.missing).forEach((tile) => assetByUnit.set(tile.unit_id, {
+    src: tile.src,
+    sha256: tile.sha256,
+    size_bytes: tile.size_bytes,
+    sheet_index: null,
+    slot_index: 0,
+  }));
   const pageAssets = pages.map((page, pageIndex) => (page.panels || []).length
     ? undefined
     : assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null)?.unit_id)?.src);
@@ -402,14 +499,16 @@ async function generateImages(input, settings, request) {
       strategy: "3x3_mother_sheet_server_tiles",
       mother_sheet_count: sheets.length,
       illustration_unit_count: units.length,
-      actual_image_calls: sheets.length,
-      estimated_image_cost_cny: Number((sheets.length * IMAGE_PRICE_CNY).toFixed(2)),
+      actual_image_calls: actualImageCalls,
+      estimated_image_cost_cny: Number((actualImageCalls * IMAGE_PRICE_CNY).toFixed(2)),
       page_plan_attempts: planAttempts,
       mother_sheet_sha256: sheets.map((sheet) => sheet.sha256),
-      tile_sha256: sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)),
+      tile_sha256: [...sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)), ...standaloneRepairTiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)],
       tile_transport_budget_bytes: tileBudget,
       repaired_missing_unit_count: missingUnitIds.size,
-      repair_mother_sheet_count: repairJobs.length,
+      repair_mother_sheet_count: groupedRepairJobs.length,
+      standalone_repair_count: standaloneRepairTiles.length,
+      standalone_repair_sha256: standaloneRepairTiles.filter((tile) => !tile.missing).map((tile) => tile.sha256),
     },
   };
   const responseSizeBytes = assertPublicGenerationResponseBudget(content);
@@ -442,6 +541,6 @@ export default async function handler(request, response) {
   } catch (error) {
     const code = String(error?.message || error || "PROVIDER_FAILED").slice(0, 360);
     const status = code.includes("API_KEY_REQUIRED") ? 401 : code.includes("INVALID") || error instanceof TypeError ? 400 : 422;
-    return send(response, status, { error: "ARK_PROBE_FAILED", code, stage: route === "text-draft" ? "text" : "image" });
+    return send(response, status, { error: "ARK_PROBE_FAILED", code, stage: route === "text-draft" ? "text" : "image", ...(error?.details && typeof error.details === "object" ? { details: error.details } : {}) });
   }
 }

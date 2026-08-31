@@ -5,7 +5,9 @@ import {
   PUBLIC_GENERATION_RESPONSE_MAX_BYTES,
   assertPublicGenerationResponseBudget,
   buildMissingUnitRepairJobs,
+  buildStandaloneRepairPrompt,
   publicTileBudgetForResponse,
+  sliceStandaloneRepairForUnit,
   splitMotherSheetForUnits,
 } from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
@@ -127,6 +129,30 @@ test("cloud mother-sheet slicing preserves missing-unit evidence for bounded rep
   assert.equal(jobs[0].template, "kv-top-3x2");
   assert.equal(jobs[1].template, "grid-3x3");
   assert.equal(jobs[1].units[0].unit_id, "page-4-hero");
+});
+
+test("cloud single-unit repair avoids paying for a sparse 3x3 mother sheet", async () => {
+  const unit = {
+    unit_id: "page-4-panel-1", page_index: 3, panel_index: 0,
+    media_role: "inline_sticker", preferred_aspect: "3:4", fit_policy: "contain",
+    visual_action: "小师妹把桌面上的书本竖直归拢到木质书立旁",
+    image_prompt: "完整人物与书本都在画面中央，手部动作清楚",
+  };
+  const prompt = buildStandaloneRepairPrompt(unit);
+  assert.match(prompt, /不是母图、不是拼图、不是网格/);
+  assert.match(prompt, /page-4-panel-1/);
+  assert.match(prompt, /竖直归拢/);
+  const image = await sharp(Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200"><rect width="900" height="1200" fill="white"/><circle cx="450" cy="360" r="180" fill="#b94035"/><rect x="300" y="520" width="300" height="480" rx="80" fill="#d79b55"/></svg>`)).jpeg({ quality: 92 }).toBuffer();
+  const tile = await sliceStandaloneRepairForUnit(image, unit, { maxBytes: 100_000 });
+  assert.equal(tile.unit_id, unit.unit_id);
+  assert.equal(tile.repair_source, "standalone-image");
+  assert.equal(tile.missing, undefined);
+  assert.ok(Math.abs(tile.width / tile.height - .75) < .012);
+  assert.ok(tile.size_bytes <= 100_000);
+  const blank = await sharp({ create: { width: 900, height: 1200, channels: 3, background: "white" } }).jpeg().toBuffer();
+  const missing = await sliceStandaloneRepairForUnit(blank, unit, { allowMissing: true });
+  assert.equal(missing.missing, true);
+  assert.equal(missing.repair_failure_reason, "VISUAL_SUBJECT_MISSING");
 });
 
 test("cloud response budget fails closed before a browser receives an oversized JSON body", () => {
