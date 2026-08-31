@@ -30,6 +30,73 @@ flowchart LR
 
 方法来源：约束式布局采用“模型提案 + 确定性约束/后处理”，参考 [LayoutFormer++](https://openaccess.thecvf.com/content/CVPR2023/papers/Jiang_LayoutFormer_Conditional_Graphic_Layout_Generation_via_Constraint_Serialization_and_Decoding_CVPR_2023_paper.pdf)、[LayoutRectifier](https://onlinelibrary.wiley.com/doi/10.1111/cgf.70273) 与 [Constrained Graphic Layout Generation](https://arxiv.org/abs/2108.00871)；浏览器视觉回归采用 [Playwright screenshot baselines](https://playwright.dev/docs/next/test-snapshots) 的稳定环境原则；图片取景遵循 [MDN object-fit](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/object-fit) 的裁切语义与 [Apple saliency crop](https://developer.apple.com/documentation/vision/cropping-images-using-saliency) 的主体保留原则；中文可读性与不裁字参考 [W3C 中文排版需求](https://www.w3.org/International/clreq/) 和 [WCAG Text Spacing](https://www.w3.org/WAI/WCAG21/Understanding/text-spacing)。未能从可访问的小红书官方公开文档确认统一的 3:4 尺寸条款；本项目的 1080×1440、KV 9:8、封面 1/3+2/3 是用户确认的产品合同，不冒充平台官方规范。
 
+## 2026-08-31 未确认文字草稿丢失事故：最小可执行 Map Slice
+
+本切片绑定当前用户明确指令形成的短生命周期 E1/E2 Task 边界：`object_ref=Products/Xiaoshimei-Studio-v2`，`goal=修复草稿保全、入口反馈与发布血缘`，`effect=本地可逆源码/合同/测试`。`TSK-260827-1821 / AIGC-D20` 的 object/goal/effect 不匹配，明确 hard reject，不能借它取得 Preview 或生产权限；生产提升必须另有同对象正式 Task、Authority 与 Writer 回读。
+
+- `one_next_experiment`：本地同一候选 commit 已完成“未组装文字 → 新创作 → 返回 → 刷新”、真实焦点输入、390px 窄屏、跨稿发布双锁、旧成稿复制与 ZIP 实物回读；下一实验只能是在同一 commit 的 Preview 原样重放，再提升同一制品到稳定域名，禁止换 commit 后继承旧 PASS。
+- `stop`：持久化未成功就切到空白稿、任一字段丢失、旧稿状态串入新稿、按钮无聚焦反馈、发布文案与确认文字不等、证据身份不全，或 Map 源 Hash 漂移。任一项发生就不得提升生产。
+
+### 本次事故的当前生产事实
+
+| 可观测结果 | 当前判定 | 不能被误读为 |
+|---|---|---|
+| 稳定域名点“新创作”后，未组装 `textDraft` 不在资产库，当前窗口切到空白稿 | `FAIL_CURRENT_PRODUCTION` | 用户误操作 |
+| 资产库能重开旧 5 页 `content` | `PARTIAL_RECOVERY_ONLY` | 完整 authoring session 已保存 |
+| 空白态“填写原文”未给出可见聚焦/光标反馈 | `FAIL_CURRENT_PRODUCTION` | 按钮已可用 |
+| 同一轮用户回读中，“文字草稿”与“发布文案”语义发生独立改写 | `FAIL_CURRENT_PRODUCTION` | 发布文案已是确认文字的投影 |
+| 本地候选完成新创作/返回/刷新、真实聚焦、跨稿副作用 0、旧稿 1.9 MB ZIP CRC 回读 | `PASS_LOCAL_FOR_FIX` | Preview、正式域名或用户现实结果已修复 |
+| 本次修复的 Preview/正式域名同身份重放 | `NOT_RUN / NOT_APPLIED` | 旧部署或旧 dogfood 可代替新修复验收 |
+
+```mermaid
+flowchart TB
+  subgraph NEWDRAFT["新创作事务"]
+    UI_NEW["UI-NEW-CREATION<br/>用户点新创作"] --> ACT_NEW["ACT-NEW-DRAFT<br/>先保存，后切换"]
+    ACT_NEW -->|"complete authoring snapshot"| STORE_SESSION["STORE-AUTHORING-SESSION<br/>draft/session/source/text/confirmation/image-plan/content"]
+    STORE_SESSION -->|"write + readback PASS"| FLOW_BLANK["FLOW-ENTER-BLANK-DRAFT"]
+    STORE_SESSION -.->|"FAIL：保留当前稿 + 可见错误"| UI_CURRENT["UI-CURRENT-DRAFT"]
+    FLOW_BLANK --> UI_RETURN["UI-RETURN-PREVIOUS<br/>可见返回上一稿"] --> FLOW_RESTORE["FLOW-RETURN-PREVIOUS<br/>原子恢复同一 snapshot"] --> UI_CURRENT
+    RULE_ATOMIC["RULE-ATOMIC-DRAFT-SWITCH<br/>无成功持久化即无界面切换"] --> ACT_NEW
+    RULE_ATOMIC --> FLOW_RESTORE
+  end
+
+  subgraph SOURCECTA["原文入口反馈"]
+    UI_SOURCE_CTA["UI-SOURCE-CTA<br/>填写原文"] --> ACT_FOCUS["ACT-FOCUS-SOURCE<br/>展开 + 滚动 + focus"] --> UI_SOURCE_INPUT["UI-SOURCE-INPUT<br/>输入框成为 activeElement<br/>焦点环与光标可见"]
+  end
+
+  subgraph CONTENTAUTH["文字与发布的单一内容权威"]
+    ACT_CONFIRM["ACT-CONFIRM-TEXT"] --> STORE_CONFIRMED["STORE-CONFIRMED-TEXT<br/>draft_id + session_id + text_version/hash"]
+    STORE_CONFIRMED --> RULE_CONTENT["RULE-SINGLE-CONTENT-AUTHORITY<br/>发布标题/正文/标签只投影当前已确认文字"] --> UI_PUBLISH["UI-PUBLISH-COPY"]
+    RULE_LINEAGE["RULE-LINEAGE-GATE"] --> LINEAGE_MATCH{"当前 draft/session/text_version 相等？"}
+    LINEAGE_MATCH -->|是| RULE_CONTENT
+    LINEAGE_MATCH -->|否| BLOCK_PUBLISH["BLOCK-PUBLISH<br/>跨稿串状态"] --> RULE_ACTION["RULE-ZERO-SIDE-EFFECT<br/>原生 disabled + 执行函数二次校验<br/>复制/ZIP/旧链接调用数=0；保存仍可用"]
+    ACT_EDIT_AFTER["ACT-EDIT-AFTER-CONFIRM"] -->|"显式 diff + 撤销确认态"| ACT_CONFIRM
+  end
+
+  subgraph EVIDENCE["证据与模型身份"]
+    TEST_SURVIVE["TEST-UNASSEMBLED-DRAFT-SURVIVES"] & TEST_RETURN["TEST-RETURN-PREVIOUS"] & TEST_FOCUS["TEST-FOCUS-AFTER-CTA"] & TEST_CROSS["TEST-NO-CROSS-DRAFT-STATE"] & TEST_PUBLISH["TEST-PUBLISH-PROJECTION"] & TEST_ZERO["TEST-BLOCKED-SIDE-EFFECTS-ZERO"] --> RULE_EVIDENCE["RULE-EVIDENCE-IDENTITY<br/>task_id + commit_sha + deployment_id<br/>origin + browser_profile_id<br/>draft_id + generation_session_id + artifact_sha256"]
+    RULE_EVIDENCE --> EVIDENCE_MATCH{"证据 identity 字段齐全且相等？"}
+    EVIDENCE_MATCH -->|是| RELEASE_GATE["RELEASE-GATE"]
+    EVIDENCE_MATCH -->|"否；旧证据不得跨 identity"| EVIDENCE_GAP["EVIDENCE_GAP<br/>BLOCK RELEASE"]
+    RULE_MAP["RULE-MAP-SOURCE-INTEGRITY<br/>node source_ref/hash 必须与当前源字节一致"] --> MAP_MATCH{"Map 源 Hash 一致？"}
+    MAP_MATCH -->|是| RELEASE_GATE
+    MAP_MATCH -->|否| MODEL_ERROR["MODEL_ERROR<br/>禁止 ALIGNED / BLOCK RELEASE"]
+  end
+```
+
+### 节点到源码/消费者测试的绑定
+
+| 节点组 | `source_ref` | 必须运行的消费者证据 | 当前状态 |
+|---|---|---|---|
+| `ACT-NEW-DRAFT / STORE-AUTHORING-SESSION / FLOW-RETURN-PREVIOUS` | `src/main.jsx` + `src/workspace-state.mjs` | `TEST-UNASSEMBLED-DRAFT-SURVIVES` + `TEST-RETURN-PREVIOUS` + 持久化失败不切换 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
+| `UI-SOURCE-CTA / ACT-FOCUS-SOURCE / UI-SOURCE-INPUT` | `src/main.jsx` + `src/styles.css` | 真实点击后断言 panel 可见、`document.activeElement` 与可见 focus ring；源码正则不计 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
+| `STORE-CONFIRMED-TEXT / RULE-SINGLE-CONTENT-AUTHORITY / RULE-LINEAGE-GATE` | `src/content-engine.mjs` + `src/publication-authority.mjs` + `src/publication-action-guard.mjs` + `src/main.jsx` | `TEST-NO-CROSS-DRAFT-STATE` + `TEST-PUBLISH-PROJECTION` + 阻断态原生禁用与副作用调用数 0；允许态恰好 1 次 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
+| `RULE-EVIDENCE-IDENTITY / RULE-MAP-SOURCE-INTEGRITY` | 本地图 + `logic/logic-model.json` + `logic/reality-status.json` + `deployment/PRODUCTION_RUNBOOK.md` | 同一 identity 的 mechanism/Preview/桌面/窄屏/正式域名回读；逐个 `source_ref` SHA-256 与当前字节一致 | `NOT_RUN`；不得写 `ALIGNED` |
+
+`STORE-AUTHORING-SESSION` 的最小完整载荷是 `schema_version / saved_at / draft_id / generation_session_id / source_topic / pillar / goal / text_requirements / title_candidates / selected_title / body / tags / text_confirmed / assembled_draft_id / image_plan / image_count / image_call_count / image_resume / content`；BYOK Key 不得进入该快照。旧 `content-only` 完整稿必须以显式 `CONTENT_ONLY` 模式打开并清空不相干 generation state，可继续编辑、保存与导出；一旦进入新文字流程，就必须在同一 `DraftRecord` 建立 confirmed lineage，禁止暗中沿用上一稿的 session。
+
+上述 `RULE-EVIDENCE-IDENTITY` 对 mechanism/target/reality 三层都生效：必须是同一 Task、commit、deployment、origin/profile、draft/session 和 artifact，才能把测试、Preview 和浏览器回读串成一次 PASS。Map 是 intended model；`source_ref/hash` 与当前字节不一致时只能判 `MODEL_ERROR`，不得修改现实来配合地图，也不得保留 `ALIGNED`。
+
 ```mermaid
 flowchart TB
   %% =====================================================================
@@ -52,7 +119,7 @@ flowchart TB
   %% =====================================================================
   %% A. 当前完整逻辑
   %% =====================================================================
-    subgraph NOW["A｜当前工作台完整逻辑：Reality readback 2026-08-28"]
+    subgraph NOW["A｜当前工作台完整逻辑：Reality readback 2026-08-31"]
     direction TB
 
     subgraph SURF["A1｜用户表面"]
@@ -129,8 +196,8 @@ flowchart TB
       E01["HTML：html2canvas<br/>检查画布非空与图片区域"]:::current
       E02["Fabric：导出 PNG<br/>当前缺非空与图片区域检查"]:::debt
       E03["publish-package<br/>只验 PNG 签名与尺寸"]:::debt
-      E04["JSZip：5 张 PNG<br/>发布文案、content、manifest"]:::current
-      E05["localStorage 资产库"]:::current
+      E04["JSZip：5 张 PNG<br/>发布文案、content、manifest<br/>当前未证明发布文案只投影 confirmed text"]:::debt
+      E05["localStorage 资产库<br/>当前只可恢复已组装 content<br/>未确认 textDraft / lineage 不完整"]:::debt
       E06["24h / 72h / 7d Reality Feedback<br/>尚未反哺版式与裁剪 fitness"]:::debt
       E01 --> E03
       E02 --> E03
@@ -198,6 +265,9 @@ flowchart TB
       U20["U20 成品仍出现手机无意义小字｜挂点 A5/A6｜修复 P4/P7"]:::issue
       U21["U21 圆角矩形四角不对称且插图有灰边｜挂点 A6/A7/A8｜修复 P3/P4/P6"]:::issue
       U22["U22 内页圆角过重、交错图文未顺边对齐、裁剪入口不显眼｜挂点 A5-A7｜修复 P3/P4/P5"]:::issue
+      U23["U23 新创作吞掉未确认文字，且没有返回上一稿｜挂点 A2/A8｜修复 P1/P5/P7"]:::issue
+      U24["U24 填写原文按钮无聚焦/光标反馈，用户看到的是‘按不了’｜挂点 A2｜修复 P5/P7"]:::issue
+      U25["U25 文字草稿与发布文案独立改写，用户不知道哪份才是成品｜挂点 A3/A8｜修复 P1/P5/P7"]:::issue
     end
 
     subgraph DISCOVERED["B2｜现场进一步发现"]
@@ -234,6 +304,9 @@ flowchart TB
       D30["D30 PASS_LOCAL｜Provider 配置存在不再冒充已验证；仅成功生成调用可进入已验证态｜挂点 A1/A8"]:::gate
       D31["D31 PASS_LOCAL｜重复层级、异常叠字与超容量文案在付费图片调用前退回重写｜挂点 A3/A5"]:::gate
       D32["D32 PASS_LOCAL_REALITY｜唯一页面几何合同、3:4 单轴推导、DOM 文本/越界门与真实导出已回读｜挂点 A5/A6/A8"]:::gate
+      D33["D33 FAIL_CURRENT_PRODUCTION｜资产库保存 assembled content，不保存完整 authoring session｜挂点 A8｜修复 P1/P5"]:::debt
+      D34["D34 FAIL_CURRENT_PRODUCTION｜打开另一稿可残留上一稿 text/session/image state，无 lineage gate｜挂点 A2/A3/A8｜修复 P1/P5/P7"]:::debt
+      D35["D35 FAIL_TEST_COVERAGE｜旧合同测试只匹配源码 setter，不验证按钮后的消费者反馈与持久化结果｜挂点 A8｜修复 P7"]:::debt
     end
 
     ICROP["问题簇 CROP<br/>U02 U05 U10 U18<br/>D02 D06-D10 D18 D19"]:::issue
@@ -242,6 +315,7 @@ flowchart TB
     IEXPORT["问题簇 EXPORT/QA<br/>U14 U15<br/>D12 D13"]:::issue
     ITRANSPORT["问题簇 PUBLIC TRANSPORT<br/>D24 D29"]:::issue
     IPROCESS["问题簇 PROCESS/LEARNING<br/>U17 D20"]:::issue
+    IAUTHORING["问题簇 AUTHORING AUTHORITY<br/>U23-U25<br/>D33-D35"]:::issue
 
     U02 & U05 & U10 & U18 --> ICROP
     D02 & D06 & D07 & D08 & D09 & D10 & D18 & D19 --> ICROP
@@ -274,6 +348,8 @@ flowchart TB
     U14 & U15 --> IEXPORT
     D12 & D13 --> IEXPORT
     U17 & D20 --> IPROCESS
+    U23 & U24 & U25 --> IAUTHORING
+    D33 & D34 & D35 --> IAUTHORING
   end
 
   I01 -.-> ICROP
@@ -281,6 +357,8 @@ flowchart TB
   H01 -.-> ISTATE
   E03 -.-> IEXPORT
   E06 -.-> IPROCESS
+  E04 -.-> IAUTHORING
+  E05 -.-> IAUTHORING
 
   %% =====================================================================
   %% C. 目标架构：唯一推荐，但必须由原型和真实包证据转正
@@ -291,11 +369,13 @@ flowchart TB
 
     subgraph CANON["C1｜一个规范数据真相"]
       direction LR
+      IR00["Authoring Session IR<br/>原文 + text draft + confirmation + image plan + content<br/>draft/session/text version 同一 lineage"]:::target
+      IR05["Confirmed Text Authority<br/>标题候选 + 最终标题 + 正文 + 标签<br/>发布文案只做确定性投影"]:::target
       IR01["Semantic Content IR<br/>Page → Header → Title → Lede → Sections → Highlight → Figure → Footer"]:::target
       IR02["Asset IR<br/>media_role · src · source_kind<br/>alpha/subject/face/action/prop bbox<br/>preferred_aspects · fit_policy · crop_candidates · manual_crop"]:::target
       IR03["Page Composition IR<br/>语义 block tree + density budget<br/>不把绝对 x/y 当页面真相"]:::target
       IR04["Versioned Migration<br/>旧稿显式 reapply/migrate，禁止静默沿用旧布局"]:::target
-      IR01 --> IR03
+      IR00 --> IR05 --> IR01 --> IR03
       IR02 --> IR03
       IR03 --> IR04
     end
@@ -343,11 +423,11 @@ flowchart TB
       EX02["从 canonical DOM 导出<br/>先保留 html2canvas；对比 html-to-image"]:::target
       EX03["逐页检查非空、非纯色、文字区域、每个 figure 像素区"]:::target
       EX04["生成 ZIP 后自动解压检查<br/>再用 Finder/Preview 打开真实 PNG"]:::target
-      EX05["编辑器、预览、发布包使用同一 content/layout/crop 状态"]:::target
+      EX05["编辑器、预览、发布文案、发布包<br/>使用同一 authoring/content/layout/crop lineage"]:::target
       EX01 --> EX02 --> EX03 --> EX04 --> EX05
     end
 
-    DEC0 --> IR01
+    DEC0 --> IR00
     IR02 --> MR01 & MR02 & MR03 & MR04 & MR05
     IR03 --> XM01
     XM10 --> EN01
@@ -361,13 +441,13 @@ flowchart TB
   subgraph REPAIR["D｜从备料到现实闭环的修复流程"]
     direction LR
     P0["P0 冻结基线<br/>Desktop/ref 两张参考<br/>当前 5 页发布包与 content JSON<br/>桌面/窄屏截图、问题编号、旧编辑状态"]:::phase
-    P1["P1 统一合同<br/>Content IR + Asset IR + Page Composition IR<br/>schema version + 非破坏迁移"]:::phase
+    P1["P1 统一合同<br/>Authoring Session + Confirmed Text + Content/Asset/Composition IR<br/>schema version + lineage + 非破坏迁移"]:::phase
     P2["P2 修母版切片<br/>吸收 huashu bbox/density/alpha 轮子<br/>Sharp 检测真实格线、背景、白边<br/>输出 tile metadata"]:::phase
     P3["P3 角色化构图<br/>media_role → slot ratio → crop candidate<br/>react-easy-crop 手动微调<br/>保存百分比 crop 与 undo"]:::phase
     P4["P4 HTML 语义排版<br/>模块库 + 编辑决策层<br/>真实 DOM 测量、手机字号、安全区、density/overflow solver<br/>内容过载时缩文、换版或拆页"]:::phase
-    P5["P5 编辑器迁移<br/>HTML 成为整页主引擎<br/>Fabric 只留 legacy/局部精修<br/>旧稿显式迁移、文字编辑稳定性"]:::phase
+    P5["P5 编辑器与草稿事务<br/>新创作先保存后切换；可见返回上一稿<br/>原文 CTA 聚焦反馈；旧稿显式迁移<br/>HTML 整页主引擎，Fabric 只留 legacy/局部精修"]:::phase
     P6["P6 导出收口<br/>单一 DOM export<br/>字体/图片 ready、每页内容检查<br/>ZIP 解压与系统预览 readback"]:::phase
-    P7["P7 全旅程验收<br/>单元 + visual golden + 360px 手机缩略<br/>所有按钮 dogfood、5 页发布包逐张打开<br/>与 Desktop/ref 做结构和节奏对照"]:::phase
+    P7["P7 全旅程验收<br/>消费者交互断言 + visual golden + 360px 手机缩略<br/>新创作/返回/聚焦/跨稿/发布投影 + 所有按钮 dogfood<br/>5 页发布包逐张打开，与 Desktop/ref 对照"]:::phase
     P8["P8 Reality 学习<br/>实际使用者接受后再看 24h/72h/7d<br/>把真实阅读/互动反馈回灌 layout/crop fitness<br/>重复 Episode 足够时才触发 gene-skill"]:::phase
     P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
   end
@@ -380,7 +460,10 @@ flowchart TB
   IEXPORT --> P6
   IEXPORT --> P7
   IPROCESS --> P8
-  P1 --> IR01
+  IAUTHORING --> P1
+  IAUTHORING --> P5
+  IAUTHORING --> P7
+  P1 --> IR00
   P2 --> MR05
   P3 --> EN03
   P4 --> EN01
@@ -408,7 +491,7 @@ flowchart TB
     EV17["R17 P4/A13 PASS｜导出 PNG 暴露封面贴撞后修正 portrait 专用尺寸；实测文字到图片间距约 23.6px，无溢出告警"]:::evidence
     EV18["R18 P7 PASS（本地发布包）｜225/225 tests、build PASS、ZIP 六文件无 CRC 错误；3 张 PNG 均 1080×1440 并逐张目检"]:::evidence
     EV19["R19 A4/A7 PASS（现实重放）｜公网 API 不再给各页重复整张母版；2 张已付费母版经 Sharp 主体检测与有界去边切为 12 个独立 JPEG，页面回读 12 个不同 Hash，刷新后无存储告警"]:::evidence
-    EV20["R20 production_applied PASS｜Vercel dpl_2Zrubh7bf4nALw4uoUQVjDEJurn3 READY，稳定别名已指向最终 CSS/API；窄屏圆角 computed style 为对称 14px"]:::evidence
+    EV20["R20 HISTORICAL production_applied PASS FOR RELEASE IDENTITY｜Vercel dpl_2Zrubh7bf4nALw4uoUQVjDEJurn3 READY，稳定别名已指向当轮 CSS/API；只保留该旧 release 事实"]:::evidence
     EV21["R21 A15/P7 PASS（公网渲染实物）｜235/235 tests、build PASS；生产页面回载后导出 5 页 ZIP，8 个文件 CRC 全 PASS，5 张 PNG 均 1080×1440，逐页 contact sheet 目检无九宫格/白边/空图"]:::evidence
     EV22["R22 D24 REMAINS｜应用内 Blob 按钮会进入“再次下载发布包”，但内置浏览器仍不能给出文件系统路径；本轮用同一生产 UI 的 headless Chromium download/saveAs 取得可回读 ZIP，按钮文案不得单独算落盘"]:::gate
     EV23["R23 provenance PASS｜最终 content.json 保留完整原始素材、真实生成正文、5 标签、5 页与 12 个独立图片源；ZIP Hash=8f5199b51adb78831e187eb04c81d5efe413e04c0b0b74bd4a5e02e0a460da14"]:::evidence
@@ -418,8 +501,11 @@ flowchart TB
     EV27["R27 生产事故纠偏 PASS_LOCAL｜线上日志证实 generate-images 函数 200、浏览器 Failed to fetch；切片响应加入自适应字节预算与 4 MB 总闸；公网下载移除 local-only 探测；v11 迁移清掉旧标题/面板位移，v14 绑定左右列与 3:4 明确宽高。264/264 tests + build；五页窄屏无告警；新 ZIP CRC PASS、5×1080×1440 逐页目检，Hash=1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31。尚未部署、未重跑公网付费生图。"]:::gate
     EV28["R28 D29 PASS_PREVIEW｜dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE 用 BYOK 完成真实付费母版；缺失 page-4-hero 在同请求有界补绘，3 页/3 图回到浏览器并可编辑"]:::evidence
     EV29["R29 D17/D24/A14/A15 PASS_PREVIEW｜最终 dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4：268/268 + build；长标题无 overflow；undo→redo 恢复原编辑；保存刷新保留；Chrome 下载 ZIP 实物 1,560,041 bytes，CRC PASS，5×1080×1440，sha256=da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::evidence
-    EV30["R30 production_applied PASS｜Git main=e1e775f；promote 最终候选后 Production=dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名 HTML 200、health 200、无 Key 401；线上 CSS/JS 与本地已验收构建 SHA-256 完全一致；rollback=dpl_Afw8Q5Vai578FVs11waZvd24CYBp"]:::evidence
+    EV30["R30 HISTORICAL production_applied PASS FOR RELEASE IDENTITY｜Git main=e1e775f；Production=dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；当轮线上 CSS/JS 与已验收构建 SHA-256 一致；rollback=dpl_Afw8Q5Vai578FVs11waZvd24CYBp；不继承给本次事故"]:::evidence
     EV31["R31 根治候选 PASS_LOCAL_REALITY｜styles.css 不再含任何 html-page 几何，3:4 单轴推导；271/271 + build；476px 实机五页均 3:4、KV 9:8、内图 3:4、零 overflow/告警；改字/移动/undo；手机侧栏真实下载 ZIP，8 文件可解、5×1080×1440 并打开目检"]:::evidence
+    EV32["R32 A18-A21 FAIL_CURRENT_PRODUCTION｜稳定域名现场：新创作吞未确认文字、无返回入口；填写原文无聚焦反馈；文字草稿与发布文案分叉；本次修复未上 Preview/生产"]:::stop
+    EV33["R33 恢复只是 PARTIAL｜资产库可重开旧 5 页 content，但被新创作清掉的未组装 textDraft 不在其中；必须以用户已给原文重建，不得冒充无损持久化"]:::gate
+    EV34["R34 A18-A22 PASS_LOCAL_REALITY｜299/299 tests + production build；未组装文字经新创作/返回/刷新逐字恢复；填写原文真实 focus 后键盘输入；390px 无横溢；跨稿复制/ZIP 原生禁用且副作用 0、保存可用；CONTENT_ONLY 复制恰好 1 次，1,917,150-byte ZIP 落盘并 CRC PASS。Preview/Production NOT RUN"]:::evidence
     EV01 --> P5
     EV02 --> P4
     EV03 --> U20
@@ -478,13 +564,32 @@ flowchart TB
     EV29 --> A14
     EV29 --> A15
     EV29 --> P7
-    EV30 --> CT03
-    EV30 --> CT04
+    EV30 -.->|旧 release identity，仅保留历史部署事实| CT03
+    EV30 -.->|不得跨 identity 继承| CT04
     EV31 --> D17
     EV31 --> D24
     EV31 --> D32
-    EV31 --> CT01
-    EV31 --> CT02
+    EV31 -.->|只证明旧几何切片| CT01
+    EV31 -.->|不覆盖 authoring 事故| CT02
+    EV32 --> D33
+    EV32 --> D34
+    EV32 --> D35
+    EV32 --> A18
+    EV32 --> A19
+    EV32 --> A20
+    EV32 --> A21
+    EV32 --> CT01
+    EV32 --> CT02
+    EV32 --> CT03
+    EV32 --> CT04
+    EV32 --> CT05
+    EV33 --> A18
+    EV34 --> A18
+    EV34 --> A19
+    EV34 --> A20
+    EV34 --> A22
+    EV34 --> CT01
+    EV34 --> CT02
     EV24 --> A12
     EV24 --> A13
     EV24 --> A14
@@ -589,25 +694,30 @@ flowchart TB
       A15["A15 导出：5 张 PNG 均非空、含预期图片区域<br/>ZIP 可解压，Finder/Preview 实际可打开"]:::gate
       A16["A16 参考：与 Desktop/ref 对照<br/>达到大字、纵向节奏、插图服务段落、非 PPT"]:::gate
       A17["A17 全旅程：每个按钮至少走一遍<br/>桌面与窄屏均现场截图验收"]:::gate
-      A10 & A11 & A12 & A13 & A14 & A15 & A16 & A17 --> PASSALL{"全部 PASS？"}:::gate
+      A18["A18 草稿安全：新创作前原子保存完整 authoring session<br/>失败不切换；返回上一稿逐字恢复，确认前调图数仍为 0"]:::gate
+      A19["A19 原文入口：点击后原文面板可见<br/>输入框=activeElement，焦点环和光标可见"]:::gate
+      A20["A20 内容权威：发布标题/正文/标签 Hash 与当前 confirmed text 相等<br/>确认后改文必须显式 diff + 重新确认；跨稿 lineage mismatch 即阻断"]:::gate
+      A21["A21 证据身份：同 task_id + commit + deployment + origin/profile<br/>+ draft/session + artifact hash；旧证据不跨 identity，Map 源 Hash 不一致即 MODEL_ERROR"]:::gate
+      A22["A22 动作结果：阻断态使用原生 disabled + 函数内 lineage 二次校验<br/>复制/ZIP/旧链接副作用=0；允许态恰好执行 1 次；保存不受阻"]:::gate
+      A10 & A11 & A12 & A13 & A14 & A15 & A16 & A17 & A18 & A19 & A20 & A21 & A22 --> PASSALL{"全部 PASS？"}:::gate
     end
 
     subgraph ROLLBACK["F2｜Rollback"]
       direction LR
       RB01["feature flag：HTML_CANONICAL_HYBRID"]:::stop
-      RB02["保留现有 content JSON 与旧 renderer 只读兼容"]:::stop
-      RB03["迁移只新增 schema version，不破坏原稿"]:::stop
+      RB02["保留现有 authoring snapshot / content JSON<br/>与旧 renderer 只读兼容"]:::stop
+      RB03["迁移只新增 schema version；先回读后切换<br/>失败保留原稿，不清空当前状态"]:::stop
       RB04["任一关键验收 FAIL<br/>关闭 flag，回当前 dual mode<br/>保留失败快照与可复现实例"]:::stop
       RB01 --> RB02 --> RB03 --> RB04
     end
 
     subgraph TRUTH["F3｜Completion Truth 五层"]
       direction LR
-      CT01["mechanism_ready<br/>PASS_LOCAL：自适应母版分界、预付费内容门、单一页面合同、真实调用验证态与 DOM 文本溢出门已实现；271/271 回归"]:::target
-      CT02["package_verified<br/>PASS_LOCAL_REALITY：build、五页逐页几何、编辑/撤销与 ZIP 实物已一起完成；不等于 Preview/Production"]:::target
-      CT03["production_applied<br/>STALE：现有 dpl_Cj8uAE9utVX3oyLf6auJHMi824kj 部署事实保留，但用户现场已证明其作品质量不可交付；本轮新机制尚未部署"]:::stop
-      CT04["runtime_operational<br/>NOT RUN：本轮新切片、质量门和验证态尚未在 Preview 用真实 BYOK 回读"]:::gate
-      CT05["reality_validated<br/>PASS_LOCAL_CANDIDATE / FAIL_CURRENT_PRODUCTION：本地旧稿已重新 dogfood；正式版仍不可交付，待 Preview 新 BYOK 与稳定域名复验"]:::stop
+      CT01["mechanism_ready<br/>PASS_LOCAL_FOR_FIX：统一 DraftRecord、原子切稿/返回、真实聚焦、lineage token、原生禁用 + 内层守卫均经本地消费者重放；<br/>不代表当前生产已修复"]:::evidence
+      CT02["package_verified<br/>PASS_LOCAL_FOR_FIX：299/299、production build、桌面/390px 事故旅程、跨稿副作用 0、1.9 MB ZIP 实物 CRC 回读；<br/>Preview 同 identity 仍 NOT RUN"]:::evidence
+      CT03["production_applied<br/>FAIL_CURRENT_FIX_NOT_APPLIED：旧 production deployment 事实保留，但其正在运行已确认缺陷；<br/>本次修复没有完成同 commit Preview 验收与生产提升"]:::stop
+      CT04["runtime_operational<br/>PASS_LOCAL_CANDIDATE / FAIL_CURRENT_PRODUCTION：本地生产构建事故重放通过；稳定域名仍运行旧缺陷版本，Preview 同身份重放尚未运行"]:::stop
+      CT05["reality_validated<br/>PASS_LOCAL_CANDIDATE / FAIL_CURRENT_PRODUCTION：浏览器与 ZIP 实物证明本地候选行为；用户稳定域名旅程与被删‘入秋’稿重建仍未闭环"]:::stop
       CT01 --> CT02 --> CT03 --> CT04 --> CT05
     end
 
@@ -616,5 +726,6 @@ flowchart TB
   end
 
   P7 --> A10
+  P7 --> A18
   DEC0 -.->|必须由 P0-P7 的真实证据解除| PASSALL
 ```

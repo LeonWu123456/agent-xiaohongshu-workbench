@@ -343,6 +343,13 @@ test("publish package helpers produce ordered complete manifest and five tags", 
   assert.equal((publishCopy(probe).match(/#/g) || []).length, 5);
 });
 
+test("content packages preserve the confirmed text draft lineage", () => {
+  const probe = generateContentPackage({ topic: "发布来源" });
+  probe.generation.source_draft_id = "text-draft-authority-1";
+  const restored = parseContentPackage(JSON.stringify(probe));
+  assert.equal(restored.generation.source_draft_id, "text-draft-authority-1");
+});
+
 test("edited selected title remains a member of title candidates for reload", () => {
   const probe = generateContentPackage({ topic: "标题回载" });
   const nextTitle = "保存回载验证｜小师妹";

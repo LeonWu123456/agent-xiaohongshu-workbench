@@ -20,9 +20,24 @@ import {
   REORDERABLE_LAYER_KEYS, TEXT_LAYER_KEYS, layerIsLocked, layerIsVisible,
   layerZIndex, moveLayer, setLayerFlag,
 } from "./layer-model.mjs";
-import { buildWorkspaceBackup, parseWorkspaceBackup, persistWorkspaceState, prepareFreshDraftWorkspace } from "./workspace-state.mjs";
+import {
+  AUTHORING_SESSION_SCHEMA,
+  activateDraftRecord,
+  activeDraftRecord,
+  beginNewDraft,
+  buildWorkspaceBackupV2,
+  libraryContents,
+  loadOrMigrateWorkspaceEnvelope,
+  migrateLegacyWorkspaceState,
+  normalizeAuthoringSession,
+  parseWorkspaceBackup,
+  persistWorkspaceEnvelope,
+  saveDraftRecord,
+  saveWorkspaceProfile,
+} from "./workspace-state.mjs";
 import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
-import { GENERATION_SESSION_SCHEMA, loadGenerationSession, persistGenerationSession } from "./generation-session.mjs";
+import { derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
+import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { deriveCreatorJourney } from "./creator-journey.mjs";
 import { REALITY_METRICS, REALITY_WINDOWS, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
 import {
@@ -55,7 +70,14 @@ const PROFILE_KEY = "xiaoshimei-studio.profile.v2";
 const PROMPT_MEMORY_KEY = "xiaoshimei-studio.prompt-memory.v1";
 const GENERATION_FAILURE_KEY = "xiaoshimei-studio.last-generation-failure.v1";
 const GENERATION_SESSION_KEY = "xiaoshimei-studio.generation-session.v1";
-const STORAGE_KEYS = { content: STORAGE_KEY, library: LIBRARY_KEY, profile: PROFILE_KEY };
+const WORKSPACE_KEY = "xiaoshimei-studio.workspace.v2";
+const STORAGE_KEYS = {
+  envelope: WORKSPACE_KEY,
+  content: STORAGE_KEY,
+  library: LIBRARY_KEY,
+  profile: PROFILE_KEY,
+  generationSession: GENERATION_SESSION_KEY,
+};
 const DEFAULT_TOPIC = "工作太久眼睛发紧，如何用3分钟离屏恢复状态？";
 const IS_PUBLIC_RUNTIME = !new Set(["localhost", "127.0.0.1", "[::1]", "::1"]).has(window.location.hostname);
 const PROVIDER_URL = String(import.meta.env.VITE_XIAOSHIMEI_PROVIDER_URL || (IS_PUBLIC_RUNTIME ? `${window.location.origin}/api/provider/generate` : "http://127.0.0.1:4175/generate")).trim();
@@ -155,6 +177,25 @@ function loadProfile() {
   catch { return createProfileV2(); }
 }
 
+function loadInitialWorkspace() {
+  const fallbackContent = loadStored() || generateContentPackage({ topic: DEFAULT_TOPIC });
+  const fallbackProfile = loadProfile();
+  const fallbackLibrary = loadLibrary();
+  let fallbackGenerationSession = null;
+  try { fallbackGenerationSession = localStorage.getItem(GENERATION_SESSION_KEY); } catch {}
+  const loaded = loadOrMigrateWorkspaceEnvelope(localStorage, STORAGE_KEYS, {
+    activeDraftId: fallbackContent.id || crypto.randomUUID(),
+    fallbackContent,
+    fallbackLibrary,
+    fallbackProfile,
+    fallbackGenerationSession,
+  });
+  const persistence = loaded.migrated
+    ? persistWorkspaceEnvelope(localStorage, loaded.workspace, STORAGE_KEYS)
+    : { ok: true, code: "WORKSPACE_ALREADY_V2" };
+  return { ...loaded, persistence };
+}
+
 function loadPromptMemory() {
   return parsePromptMemory(localStorage.getItem(PROMPT_MEMORY_KEY));
 }
@@ -218,12 +259,12 @@ function explainExportFailure(error) {
 }
 
 
-function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "" }) {
+function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "", textareaId, textareaRef }) {
   return <section className={`prompt-context-field ${className}`}>
     <label>
       <span>{field.label}</span>
       {field.helper && <small>{field.helper}</small>}
-      <textarea rows={rows} value={value} placeholder={field.placeholder || ""} onChange={(event) => onChange(event.target.value)} onBlur={() => onRemember(value)} />
+      <textarea id={textareaId} ref={textareaRef} rows={rows} value={value} placeholder={field.placeholder || ""} onChange={(event) => onChange(event.target.value)} onBlur={() => onRemember(value)} />
     </label>
     {history.length > 0 && <details className="prompt-history">
       <summary>历史记录 · {history.length} 条 <ChevronDown /></summary>
@@ -390,9 +431,16 @@ function RealityFeedbackEditor({ item, onSave, onClose }) {
 }
 
 function App() {
-  const initial = useMemo(() => loadStored() || generateContentPackage({ topic: DEFAULT_TOPIC }), []);
+  const initialWorkspaceLoad = useMemo(() => loadInitialWorkspace(), []);
+  const initialWorkspace = initialWorkspaceLoad.workspace;
+  const initialRecord = useMemo(() => activeDraftRecord(initialWorkspace), [initialWorkspace]);
+  const initial = initialRecord.content_package;
+  const initialGenerationSession = initialRecord.generation_session;
   const initialPromptMemory = useMemo(() => loadPromptMemory(), []);
-  const initialGenerationSession = useMemo(() => loadGenerationSession(localStorage, GENERATION_SESSION_KEY), []);
+  const [workspaceEnvelope, setWorkspaceEnvelope] = useState(initialWorkspace);
+  const workspaceEnvelopeRef = useRef(initialWorkspace);
+  const [previousDraftId, setPreviousDraftId] = useState(null);
+  const [activatedAsContentOnly, setActivatedAsContentOnly] = useState(initialGenerationSession == null);
   const [contentHistory, setContentHistory] = useState(() => createEditorHistory(initial));
   const [layoutRefreshToken, setLayoutRefreshToken] = useState(0);
   const content = contentHistory.present;
@@ -434,12 +482,12 @@ function App() {
   const [researchPositioning, setResearchPositioning] = useState("");
   const [researchBusy, setResearchBusy] = useState(false);
   const [researchMessage, setResearchMessage] = useState("");
-  const [library, setLibrary] = useState(loadLibrary);
+  const [library, setLibrary] = useState(() => libraryContents(initialWorkspace));
   const [realityFeedbackId, setRealityFeedbackId] = useState(null);
-  const [profile, setProfile] = useState(loadProfile);
+  const [profile, setProfile] = useState(initialWorkspace.profile);
   const [authorityAdmission, setAuthorityAdmission] = useState(null);
   const [toast, setToast] = useState("");
-  const [storageIssue, setStorageIssue] = useState("");
+  const [storageIssue, setStorageIssue] = useState(initialWorkspaceLoad.persistence.ok ? "" : "旧工作台已读入，但 v2 草稿权威尚未可靠落盘；请立即备份工作台。");
   const [exportState, setExportState] = useState("IDLE");
   const [preparedExport, setPreparedExport] = useState(null);
   const [generationState, setGenerationState] = useState("IDLE");
@@ -476,9 +524,12 @@ function App() {
   const infoPanelImageRef = useRef(null);
   const backgroundImageRef = useRef(null);
   const actionReferenceRef = useRef(null);
+  const sourceInputRef = useRef(null);
+  const contentRef = useRef(content);
+  const publicationAuthorityRef = useRef(null);
 
   const visiblePages = content.pages.slice(0, content.visible_pages);
-  const realityFeedbackItem = library.find((item) => item.id === realityFeedbackId) || null;
+  const realityFeedbackItem = library.find((item) => item.draft_record_id === realityFeedbackId) || null;
   const currentPage = visiblePages[Math.min(pageIndex, visiblePages.length - 1)];
   const currentEditorMode = editorModeForPage(currentPage);
   const currentStyle = TEXT_LAYER_KEYS.includes(selectedObject) ? currentPage.object_styles[selectedObject] : null;
@@ -523,7 +574,37 @@ function App() {
       ? generatedImageCount
       : hasConfirmedContent ? generatedImageCount : 0;
   const creatorJourney = deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfirmedContent, generatedImageCount: generatedForCurrentDraft, requiredImageCount, layoutIssueCount: 0, exportState });
-  const currentInLibrary = Boolean(content.id && library.some((item) => item.id === content.id && item.saved_at === content.saved_at));
+  const currentInLibrary = Boolean(library.some((item) => item.draft_record_id === workspaceEnvelope.active_draft_id && item.saved_at === content.saved_at));
+  const canReturnPrevious = Boolean(previousDraftId
+    && previousDraftId !== workspaceEnvelope.active_draft_id
+    && workspaceEnvelope.drafts.some((draft) => draft.draft_id === previousDraftId));
+  const publicationAuthority = useMemo(() => derivePublicationAuthority({
+    content,
+    textDraft,
+    textConfirmed,
+    assembledDraftId,
+    activatedAsContentOnly,
+  }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly]);
+  contentRef.current = content;
+  publicationAuthorityRef.current = publicationAuthority;
+
+  function currentAuthoringSession() {
+    if (activatedAsContentOnly) return null;
+    return normalizeAuthoringSession({
+      schema: AUTHORING_SESSION_SCHEMA,
+      topic,
+      pillar,
+      goal,
+      text_requirements: textRequirements,
+      text_draft: textDraft,
+      text_confirmed: textConfirmed,
+      assembled_draft_id: assembledDraftId,
+      image_count_mode: imageCountMode,
+      custom_image_count: customImageCount,
+      production_mode: productionMode,
+      image_resume: imageResume,
+    });
+  }
 
   useEffect(() => {
     setPreparedExport((current) => {
@@ -531,14 +612,31 @@ function App() {
       return null;
     });
     setExportState((current) => current === "READY" || current === "COMPLETE" ? "IDLE" : current);
-  }, [content]);
+  }, [content, publicationAuthority.token]);
 
   useEffect(() => {
-    if (!textDraft) return;
-    try {
-      persistGenerationSession(localStorage, GENERATION_SESSION_KEY, { schema: GENERATION_SESSION_SCHEMA, topic, pillar, goal, text_requirements: textRequirements, text_draft: textDraft, text_confirmed: textConfirmed, assembled_draft_id: assembledDraftId, image_count_mode: imageCountMode, custom_image_count: customImageCount, production_mode: productionMode, image_resume: imageResume });
-    } catch {}
-  }, [topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume]);
+    const timer = window.setTimeout(() => {
+      try {
+        const next = saveDraftRecord(workspaceEnvelopeRef.current, {
+          contentPackage: content,
+          generationSession: currentAuthoringSession(),
+        });
+        const persisted = persistWorkspaceEnvelope(localStorage, next, STORAGE_KEYS);
+        if (!persisted.ok) {
+          setStorageIssue("当前稿尚未可靠落盘；旧数据已回滚，请立即备份工作台。");
+          return;
+        }
+        workspaceEnvelopeRef.current = next;
+        setWorkspaceEnvelope(next);
+        setLibrary(libraryContents(next));
+        setStorageIssue("");
+      } catch (error) {
+        console.warn(error);
+        setStorageIssue("当前稿结构无效，自动保存已暂停；原有草稿未被覆盖。");
+      }
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [content, topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume, activatedAsContentOnly]);
 
   function beginImageCrop() {
     const imageSelected = selectedObject === "image" || infoObjectSelection(selectedObject)?.kind === "image";
@@ -567,6 +665,12 @@ function App() {
       const node = document.getElementById(targetId);
       if (!node) return;
       node.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (targetId === "creator-source") {
+        window.requestAnimationFrame(() => {
+          sourceInputRef.current?.focus({ preventScroll: true });
+          setToast("原文输入框已打开，可以直接粘贴或输入");
+        });
+      }
     }, 0);
   }
 
@@ -618,6 +722,7 @@ function App() {
   }
 
   function setPromptFieldValue(fieldId, value) {
+    setActivatedAsContentOnly(false);
     setAssembledDraftId(null);
     if (fieldId === "source_topic") { setTopic(value); setTextConfirmed(false); return; }
     if (fieldId === "text_requirements") { setTextRequirements(value); setTextConfirmed(false); return; }
@@ -658,23 +763,17 @@ function App() {
   }, [view]);
 
   useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(content)); setStorageIssue(""); }
-    catch { setStorageIssue("本机存储空间不足或不可用：当前改动尚未可靠落盘，请立即备份工作台。"); }
-  }, [content]);
-  useEffect(() => {
     const draft = new URL(window.location.href).searchParams.get("draft");
     if (!draft) return;
     let active = true;
     loadLocalDraft(draft, { origin: window.location.origin })
       .then((imported) => {
         if (!active || !imported) return;
-        resetContent(imported); setTopic(imported.source_input); setPillar(imported.pillar); setGoal(imported.goal);
-        setPageIndex(0); setSelectedObject("title"); setView("compose");
-        setToast("同源 AI 草稿已加载并保存到本机；尚未独立评测");
+        createContentOnlyRecord(imported, "同源 AI 草稿已加载并保存到本机；尚未独立评测");
       })
       .catch((error) => { console.warn(error); if (active) setToast("草稿链接无效，原内容未改变"); });
     return () => { active = false; };
-  }, [resetContent]);
+  }, []);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = setTimeout(() => setToast(""), 2200);
@@ -837,44 +936,166 @@ function App() {
     mutatePage((page) => ({ ...page, layer_state: moveLayer(page.layer_state, key, direction) }));
   }
 
-  function openCreator() {
-    const next = prepareFreshDraftWorkspace({
-      currentContent: content,
-      library,
-      profile,
-      draftId: content.id || crypto.randomUUID(),
-      savedAt: new Date().toISOString(),
-    });
-    const persisted = persistWorkspaceState(localStorage, next, STORAGE_KEYS);
-    if (!persisted.ok) {
-      setStorageIssue("新稿没有建立：旧稿无法安全保留，请先下载工作台备份。");
-      setToast("旧稿未丢失；新创作已暂停");
-      return;
-    }
-    resetContent(next.currentContent);
-    setLibrary(next.library);
-    setTopic("");
-    setPillar(next.currentContent.pillar);
-    setGoal(next.currentContent.goal);
+  function applyDraftRecord(record) {
+    const nextContent = record.content_package;
+    const session = record.generation_session;
+    resetContent(nextContent);
+    setTopic(session?.topic ?? nextContent.source_input ?? "");
+    setPillar(session?.pillar || nextContent.pillar);
+    setGoal(session?.goal || nextContent.goal);
+    setTextRequirements(session?.text_requirements || "");
+    setTextDraft(session?.text_draft || null);
+    setTextConfirmed(Boolean(session?.text_confirmed));
+    setAssembledDraftId(session?.assembled_draft_id || null);
+    setImageCountMode(session?.image_count_mode || "AUTO");
+    setCustomImageCount(session?.custom_image_count || 3);
+    setProductionMode(session?.production_mode || "smart");
+    setImageResume(session?.image_resume || null);
+    setActivatedAsContentOnly(session == null);
     setPageIndex(0);
     setSelectedObject("title");
-    setView("compose");
-    setCreatorOpen(true);
-    setMobileInspectorOpen(true);
-    setTextDraft(null);
-    setTextConfirmed(false);
-    setAssembledDraftId(null);
+    setActionReferences([]);
+    setActionReferenceNote("");
     setGenerationState("IDLE");
     setGenerationError(null);
     try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
-    setImageCountMode("AUTO");
-    setProductionMode("smart");
-    setImageResume(null);
-    try { localStorage.removeItem(GENERATION_SESSION_KEY); } catch {}
-    setActionReferences([]);
-    setActionReferenceNote("");
+    setPreparedExport((current) => {
+      if (current?.revoke) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    setExportState("IDLE");
+  }
+
+  function persistAndAdoptWorkspace(nextWorkspace, { record = null, previousId, nextProfile } = {}) {
+    const persisted = persistWorkspaceEnvelope(localStorage, nextWorkspace, STORAGE_KEYS);
+    if (!persisted.ok) {
+      setStorageIssue("切换稿件失败：旧稿与当前页面均未改变，请先下载工作台备份。");
+      setToast("切换已暂停，旧稿没有丢失");
+      return false;
+    }
+    workspaceEnvelopeRef.current = nextWorkspace;
+    setWorkspaceEnvelope(nextWorkspace);
+    setLibrary(libraryContents(nextWorkspace));
+    if (nextProfile) setProfile(nextProfile);
+    if (previousId !== undefined) setPreviousDraftId(previousId);
+    if (record) applyDraftRecord(record);
     setStorageIssue("");
-    setToast(next.preservedPrevious ? "已开始新稿；上一稿已自动保留到资产库" : "已开始空白新稿");
+    return true;
+  }
+
+  function workspaceWithCurrentSnapshot() {
+    return saveDraftRecord(workspaceEnvelopeRef.current, {
+      contentPackage: content,
+      generationSession: currentAuthoringSession(),
+    });
+  }
+
+  function createContentOnlyRecord(nextContent, successMessage) {
+    try {
+      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+        newDraftId: crypto.randomUUID(),
+        currentContent: content,
+        currentSession: currentAuthoringSession(),
+        contentPackage: nextContent,
+      });
+      if (!persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId })) return false;
+      setView("compose");
+      setCreatorOpen(false);
+      setToast(successMessage);
+      return true;
+    } catch (error) {
+      console.warn(error);
+      setToast("新稿无法建立，原稿没有改变");
+      return false;
+    }
+  }
+
+  function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
+    try {
+      const contentPackage = {
+        ...generateContentPackage({ topic: "", pillar: nextPillar, goal: nextGoal }),
+        source_input: source,
+        pillar: nextPillar,
+        goal: nextGoal,
+      };
+      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+        newDraftId: crypto.randomUUID(),
+        currentContent: content,
+        currentSession: currentAuthoringSession(),
+        contentPackage,
+      });
+      const session = normalizeAuthoringSession({
+        schema: AUTHORING_SESSION_SCHEMA,
+        topic: source,
+        pillar: nextPillar,
+        goal: nextGoal,
+        text_requirements: "",
+        text_draft: null,
+        text_confirmed: false,
+        assembled_draft_id: null,
+        image_count_mode: "AUTO",
+        custom_image_count: 3,
+        production_mode: "smart",
+        image_resume: null,
+      });
+      const nextWorkspace = saveDraftRecord(created.workspace, {
+        draftId: created.activeDraft.draft_id,
+        generationSession: session,
+      });
+      const nextRecord = activeDraftRecord(nextWorkspace);
+      if (!persistAndAdoptWorkspace(nextWorkspace, { record: nextRecord, previousId: created.previousDraftId })) return false;
+      setView("compose");
+      setCreatorOpen(true);
+      setMobileInspectorOpen(true);
+      setToast(successMessage);
+      return true;
+    } catch (error) {
+      console.warn(error);
+      setToast("选题没有切换，原稿仍在");
+      return false;
+    }
+  }
+
+  function activateWorkspaceDraft(draftId) {
+    try {
+      const snapshotted = workspaceWithCurrentSnapshot();
+      const activated = activateDraftRecord(snapshotted, draftId);
+      if (!persistAndAdoptWorkspace(activated.workspace, { record: activated.activeDraft, previousId: activated.previousDraftId })) return false;
+      setRealityFeedbackId(null);
+      setView("compose");
+      setCreatorOpen(Boolean(activated.activeDraft.generation_session));
+      setToast("已切回完整稿件；文字、画布与发布来源同步恢复");
+      return true;
+    } catch (error) {
+      console.warn(error);
+      setToast("这份稿件无法打开，当前稿没有改变");
+      return false;
+    }
+  }
+
+  function openCreator() {
+    if (isFreshDraft && workspaceEnvelopeRef.current.active_draft_id === workspaceEnvelope.active_draft_id) {
+      setView("compose"); setCreatorOpen(true); setMobileInspectorOpen(true);
+      scrollCreatorStage("creator-source");
+      return;
+    }
+    try {
+      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+        newDraftId: crypto.randomUUID(),
+        currentContent: content,
+        currentSession: currentAuthoringSession(),
+        contentPackage: generateContentPackage({ topic: "", pillar: "wellness", goal: "save" }),
+      });
+      if (!persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId })) return;
+      setView("compose");
+      setCreatorOpen(true);
+      setMobileInspectorOpen(true);
+      setToast("已开始新稿；上一稿已完整保留，可随时返回");
+    } catch (error) {
+      console.warn(error);
+      setStorageIssue("新稿没有建立：旧稿无法安全保留，请先下载工作台备份。");
+      setToast("旧稿未丢失；新创作已暂停");
+    }
   }
 
   function failGeneration(feedback) {
@@ -900,6 +1121,7 @@ function App() {
       return;
     }
     try {
+      setActivatedAsContentOnly(false);
       rememberAllPromptInputs();
       setGenerationState("TEXT_GENERATING");
       clearGenerationFailure();
@@ -921,6 +1143,7 @@ function App() {
   }
 
   function editTextDraft(field, value, index = null) {
+    setActivatedAsContentOnly(false);
     setImageResume(null);
     setTextConfirmed(false);
     setAssembledDraftId(null);
@@ -937,6 +1160,7 @@ function App() {
   }
 
   function chooseDraftTitle(title) {
+    setActivatedAsContentOnly(false);
     setTextConfirmed(false);
     setAssembledDraftId(null);
     setTextDraft((current) => current ? { ...current, selected_title: title } : current);
@@ -1004,15 +1228,30 @@ function App() {
   }
 
   function saveDraft() {
-    const entry = { ...content, id: content.id || crypto.randomUUID(), saved_at: new Date().toISOString() };
-    const next = [entry, ...library.filter((item) => item.id !== entry.id)].slice(0, 50);
-    const persisted = persistWorkspaceState(localStorage, { currentContent: entry, library: next, profile }, STORAGE_KEYS);
-    if (!persisted.ok) { setStorageIssue("保存失败：本机存储不可用。请先导出工作台备份，再释放浏览器空间。"); setToast("保存失败，旧资产库未改变"); return; }
-    setContent(entry, { record: false });
-    setLibrary(next);
-    setStorageIssue("");
-    try { localStorage.removeItem(GENERATION_SESSION_KEY); } catch {}
-    setToast("已保存到本机资产库");
+    try {
+      const now = new Date().toISOString();
+      const backfilledGeneration = publicationAuthority.code === "LEGACY_EXACT_MATCH" && textDraft?.draft_id
+        ? { ...content.generation, source_draft_id: textDraft.draft_id }
+        : content.generation;
+      const entry = {
+        ...content,
+        generation: backfilledGeneration,
+        id: content.id || crypto.randomUUID(),
+        saved_at: now,
+      };
+      const nextWorkspace = saveDraftRecord(workspaceEnvelopeRef.current, {
+        contentPackage: entry,
+        generationSession: currentAuthoringSession(),
+        updatedAt: now,
+      });
+      if (!persistAndAdoptWorkspace(nextWorkspace)) return;
+      setContent(entry, { record: false });
+      setToast(publicationAuthority.allowed ? "已保存到本机资产库" : "草稿已完整保存；发布仍锁定，未发生串稿");
+    } catch (error) {
+      console.warn(error);
+      setStorageIssue("保存失败：本机存储不可用。请先导出工作台备份，再释放浏览器空间。");
+      setToast("保存失败，旧资产库未改变");
+    }
   }
 
   async function importJson(event) {
@@ -1032,14 +1271,14 @@ function App() {
         const admission = await admitProducerWithVerdict(producerItem.serialized, verdictItem.serialized, evaluatorInputItem.serialized);
         if (expansionItem && !expansionHandoffItem) throw new TypeError("EXPANSION_HANDOFF_REQUIRED");
         const imported = expansionItem ? await admitSingleExpansion(admission, expansionItem.serialized, expansionHandoffItem.serialized) : admission.content;
-        setAuthorityAdmission(admission); resetContent(imported); setTopic(imported.source_input); setPillar(imported.pillar); setGoal(imported.goal); setPageIndex(0); setView("compose");
-        setToast(expansionItem ? `已绑定 KEEP 并导入唯一 ${imported.visible_pages} 页扩展包` : "已核验根目录 KEEP，真实两页 Producer 包已导入");
+        setAuthorityAdmission(admission);
+        createContentOnlyRecord(imported, expansionItem ? `已绑定 KEEP 并导入唯一 ${imported.visible_pages} 页扩展包` : "已核验根目录 KEEP，真实两页 Producer 包已导入");
         return;
       }
       if (expansionItem && authorityAdmission) {
         if (!expansionHandoffItem) throw new TypeError("EXPANSION_HANDOFF_REQUIRED");
         const imported = await admitSingleExpansion(authorityAdmission, expansionItem.serialized, expansionHandoffItem.serialized);
-        resetContent(imported); setPageIndex(0); setView("compose"); setToast(`已导入唯一 ${imported.visible_pages} 页扩展包；等待新评测`); return;
+        createContentOnlyRecord(imported, `已导入唯一 ${imported.visible_pages} 页扩展包；等待新评测`); return;
       }
       const serialized = values[0].serialized;
       const contract = inspectImportContract(serialized);
@@ -1049,8 +1288,7 @@ function App() {
       }
       if (contract.status !== "READY") throw new TypeError(contract.code);
       const imported = importLocalEditableDraft(serialized);
-      resetContent(imported); setTopic(imported.source_input); setPillar(imported.pillar); setGoal(imported.goal); setPageIndex(0); setView("compose");
-      setToast(contract.contract === "LEGACY_SEVEN_PAGE" ? "7 页 legacy 草稿已安全回载" : `${imported.visible_pages} 页本地草稿已安全回载`);
+      createContentOnlyRecord(imported, contract.contract === "LEGACY_SEVEN_PAGE" ? "7 页 legacy 草稿已安全回载" : `${imported.visible_pages} 页本地草稿已安全回载`);
     } catch (error) {
       console.warn(error);
       setToast("内容包不受支持，当前草稿未改变");
@@ -1058,29 +1296,36 @@ function App() {
   }
 
   function saveProfile() {
-    const checked = parseProfileV2(JSON.stringify(profile));
-    const persisted = persistWorkspaceState(localStorage, { currentContent: content, library, profile: checked }, STORAGE_KEYS);
-    if (!persisted.ok) { setStorageIssue("Profile 保存失败：本机存储不可用，请导出工作台备份。"); setToast("Profile 保存失败"); return; }
-    setStorageIssue("");
-    setProfile(checked); setToast("Profile v2 已保存到本机");
+    try {
+      const checked = parseProfileV2(JSON.stringify(profile));
+      const snapshotted = workspaceWithCurrentSnapshot();
+      const nextWorkspace = saveWorkspaceProfile(snapshotted, checked);
+      if (!persistAndAdoptWorkspace(nextWorkspace, { nextProfile: checked })) return;
+      setToast("Profile v2 已保存到本机");
+    } catch (error) {
+      console.warn(error);
+      setStorageIssue("Profile 保存失败：本机存储不可用，请导出工作台备份。");
+      setToast("Profile 保存失败");
+    }
   }
 
   async function importProfile(event) {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
     try {
       const next = parseProfileV2(await file.text());
-      const persisted = persistWorkspaceState(localStorage, { currentContent: content, library, profile: next }, STORAGE_KEYS);
-      if (!persisted.ok) throw new Error(persisted.code);
-      setProfile(next); setStorageIssue(""); setToast("Profile v2 已回载");
+      const snapshotted = workspaceWithCurrentSnapshot();
+      const nextWorkspace = saveWorkspaceProfile(snapshotted, next);
+      if (!persistAndAdoptWorkspace(nextWorkspace, { nextProfile: next })) return;
+      setToast("Profile v2 已回载");
     }
     catch { setToast("Profile v2 合同无效，原档案未改变"); }
   }
 
   function downloadWorkspaceBackup() {
     try {
-      const backup = buildWorkspaceBackup({ profile, currentContent: content, library });
+      const backup = buildWorkspaceBackupV2({ workspace: workspaceWithCurrentSnapshot() });
       downloadBlob("小师妹-工作台备份.json", jsonBlob(backup));
-      setToast("工作台备份已下载：账号档案、当前稿与资产库");
+      setToast("工作台备份已下载：账号档案、每份稿件、文字会话与资产库");
     } catch (error) {
       console.warn(error); setToast("工作台备份失败，请先修复无效草稿");
     }
@@ -1090,11 +1335,16 @@ function App() {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
     try {
       const restored = parseWorkspaceBackup(await file.text());
-      const persisted = persistWorkspaceState(localStorage, restored, STORAGE_KEYS);
-      if (!persisted.ok) throw new Error(persisted.code);
-      setProfile(restored.profile); resetContent(restored.currentContent); setLibrary(restored.library);
-      setTopic(restored.currentContent.source_input); setPillar(restored.currentContent.pillar); setGoal(restored.currentContent.goal);
-      setPageIndex(0); setView("compose"); setStorageIssue(""); setToast("工作台已完整恢复；不携带新的评测或放量权限");
+      const nextWorkspace = restored.workspaceEnvelope || migrateLegacyWorkspaceState({
+        profile: restored.profile,
+        currentContent: restored.currentContent,
+        library: restored.library,
+        generationSession: null,
+        activeDraftId: restored.currentContent.id || crypto.randomUUID(),
+      });
+      const record = activeDraftRecord(nextWorkspace);
+      if (!persistAndAdoptWorkspace(nextWorkspace, { record, previousId: null, nextProfile: nextWorkspace.profile })) return;
+      setView("compose"); setToast("工作台已完整恢复；文字会话与各稿件同步回载，不携带新的评测或放量权限");
     } catch (error) {
       console.warn(error); setToast("工作台备份无效或无法落盘，原数据未改变");
     }
@@ -1223,23 +1473,57 @@ function App() {
     setToast("页面已删除");
   }
 
+  async function copyPublicationCopy() {
+    const gate = publicationAuthorityRef.current;
+    try {
+      const result = await runGuardedPublicationAction({
+        gate,
+        action: () => copyTextToClipboard(publishCopy(contentRef.current)),
+      });
+      if (!result.allowed) {
+        setToast(publicationBlockMessage(gate?.code));
+        return;
+      }
+      setToast("发布文案已复制");
+    } catch {
+      setToast("复制失败，请直接从发布文案框选复制");
+    }
+  }
+
   async function downloadZip() {
+    const initialGate = publicationAuthorityRef.current;
+    if (!publicationSnapshotDecision({ gate: initialGate }).allowed) {
+      setToast(publicationBlockMessage(initialGate?.code));
+      return;
+    }
+    const authorityToken = initialGate.token;
+    const contentSnapshot = contentRef.current;
+    const pageSnapshots = contentSnapshot.pages.slice(0, contentSnapshot.visible_pages);
     try {
       setExportState("GENERATING");
       setToast("正在渲染发布包…");
       const pngPages = [];
-      for (let index = 0; index < visiblePages.length; index += 1) {
-        const page = visiblePages[index];
+      for (let index = 0; index < pageSnapshots.length; index += 1) {
+        const page = pageSnapshots[index];
         const dataUrl = editorModeForPage(page) === "html"
-          ? await renderHtmlPageToPng(page, index, visiblePages.length)
-          : await renderMaturePageToPng(page, index, visiblePages.length);
+          ? await renderHtmlPageToPng(page, index, pageSnapshots.length)
+          : await renderMaturePageToPng(page, index, pageSnapshots.length);
         const bytes = Uint8Array.from(atob(dataUrl.split(",")[1]), (character) => character.charCodeAt(0));
         pngPages.push(bytes);
       }
-      const prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(content, pngPages, { createdAt: content.created_at }));
-      setPreparedExport({ ...prepared, pageCount: visiblePages.length });
+      const afterRenderDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
+      if (!afterRenderDecision.allowed) {
+        throw new Error("PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
+      }
+      const prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(contentSnapshot, pngPages, { createdAt: contentSnapshot.created_at }));
+      const finalDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
+      if (!finalDecision.allowed) {
+        if (prepared.revoke) URL.revokeObjectURL(prepared.url);
+        throw new Error("PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
+      }
+      setPreparedExport({ ...prepared, pageCount: pageSnapshots.length, authorityToken, contentSnapshot });
       setExportState("READY");
-      setToast(`发布包已生成并校验：${visiblePages.length} 张 PNG + 文案 + 数据。请点击“保存发布包”。`);
+      setToast(`发布包已生成并校验：${pageSnapshots.length} 张 PNG + 文案 + 数据。请点击“保存发布包”。`);
     } catch (error) {
       setExportState("FAILED");
       document.documentElement.dataset.xsmExportFailure = String(error?.message || error);
@@ -1250,6 +1534,21 @@ function App() {
       console.error(error);
       setToast(explainExportFailure(error));
     }
+  }
+
+  function downloadPreparedExport(event) {
+    const gate = publicationAuthorityRef.current;
+    const decision = publicationSnapshotDecision({ gate, expectedToken: preparedExport?.authorityToken, currentContent: contentRef.current, expectedContent: preparedExport?.contentSnapshot });
+    if (!decision.allowed) {
+      event.preventDefault();
+      if (preparedExport?.revoke) URL.revokeObjectURL(preparedExport.url);
+      setPreparedExport(null);
+      setExportState("IDLE");
+      setToast("稿件在发布包生成后发生变化，旧下载已作废，请重新生成");
+      return;
+    }
+    setExportState("COMPLETE");
+    setToast(`ZIP 下载已开始：${preparedExport.pageCount} 张 PNG + 文案 + 数据`);
   }
 
   async function loadResearchWorkspace() {
@@ -1314,27 +1613,33 @@ function App() {
 
   function useResearchTopic(item) {
     const nextTopic = [item?.title, item?.angle ? `切入角度：${item.angle}` : "", item?.reason ? `为什么值得写：${item.reason}` : ""].filter(Boolean).join("\n");
-    setTopic(nextTopic); setPillar(inferPillarFromTopic(nextTopic)); setGoal("save"); setTextDraft(null); setTextConfirmed(false); setAssembledDraftId(null);
-    setView("compose"); setCreatorOpen(true); setMobileInspectorOpen(true); setToast("选题已带入 Studio，先生成文字再确认配图");
+    createAuthoringRecord({
+      source: nextTopic,
+      nextPillar: inferPillarFromTopic(nextTopic),
+      nextGoal: "save",
+      successMessage: "选题已带入 Studio，上一稿已保留；先生成文字再确认配图",
+    });
   }
 
-  function saveRealityFeedback(itemId, feedback) {
+  function saveRealityFeedback(draftRecordId, feedback) {
     try {
       const checked = normalizeRealityFeedback(feedback);
-      const nextLibrary = library.map((item) => item.id === itemId ? { ...item, reality_feedback: checked } : item);
-      const nextContent = content.id === itemId ? { ...content, reality_feedback: checked } : content;
-      const persisted = persistWorkspaceState(localStorage, { currentContent: nextContent, library: nextLibrary, profile }, STORAGE_KEYS);
-      if (!persisted.ok) throw new Error(persisted.code);
-      if (content.id === itemId) setContent(nextContent, { record: false });
-      setLibrary(nextLibrary); setStorageIssue(""); setToast("现实反馈已保存");
+      const target = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === draftRecordId);
+      if (!target) throw new TypeError("draft record is missing");
+      const nextContent = { ...target.content_package, reality_feedback: checked };
+      const nextWorkspace = saveDraftRecord(workspaceEnvelopeRef.current, { draftId: draftRecordId, contentPackage: nextContent });
+      if (!persistAndAdoptWorkspace(nextWorkspace)) return;
+      if (workspaceEnvelopeRef.current.active_draft_id === draftRecordId) setContent(nextContent, { record: false });
+      setToast("现实反馈已保存");
     } catch (error) {
       console.warn(error); setToast("现实反馈没有保存，请检查链接或指标");
     }
   }
 
   function openDraft(item) {
-    setRealityFeedbackId(null);
-    resetContent(item); setTopic(item.source_input); setPillar(item.pillar); setGoal(item.goal); setPageIndex(0); setView("compose");
+    const draftId = item.draft_record_id;
+    if (!draftId) { setToast("这份旧资产缺少稿件身份，已阻止混入当前稿"); return; }
+    activateWorkspaceDraft(draftId);
   }
 
   function renderCreatorWorkflow() {
@@ -1344,16 +1649,16 @@ function App() {
 
       <section id="creator-source" className="workbench-section workbench-source">
         <header><div><strong>原文</strong><small>写清素材，再用 AI 扩写</small></div><button className="creator-flow-close" type="button" onClick={() => setCreatorOpen(false)} disabled={isGenerating} title="收起原文" aria-label="收起原文"><X /></button></header>
-        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} value={topic} history={promptMemory.histories.source_topic} rows={5} onChange={(value) => { setTopic(value); setTextConfirmed(false); setAssembledDraftId(null); if (generationState === "FAILED") { setGenerationState("IDLE"); setGenerationError(null); } }} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
+        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} onChange={(value) => { setActivatedAsContentOnly(false); setTopic(value); setTextConfirmed(false); setAssembledDraftId(null); if (generationState === "FAILED") { setGenerationState("IDLE"); setGenerationError(null); } }} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
         <details className="prompt-context-panel creator-requirements-panel">
           <summary><div><strong>补充要求</strong><small>{textRequirements.trim() ? "已填写" : "选填"}</small></div><ChevronDown /></summary>
-          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} onChange={(value) => { setTextRequirements(value); setTextConfirmed(false); setAssembledDraftId(null); }} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
+          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} onChange={(value) => { setActivatedAsContentOnly(false); setTextRequirements(value); setTextConfirmed(false); setAssembledDraftId(null); }} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
         </details>
         <details className="prompt-context-panel">
           <summary><div><strong>口吻与结构</strong><small>9 项</small></div><ChevronDown /></summary>
           <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => { setPillar(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => { setGoal(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
+        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => { setActivatedAsContentOnly(false); setPillar(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => { setActivatedAsContentOnly(false); setGoal(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
         {generationState === "TEXT_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>正在生成文字</strong></div></div>}
         <button className="creator-submit" onClick={generateTextNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
         {generationState === "FAILED" && generationError?.stage !== "image" && <FailureNotice feedback={generationError} onRetry={generateTextNode} />}
@@ -1467,7 +1772,10 @@ function App() {
                 <span>NEW DRAFT</span>
                 <h2>{isFreshDraft ? "从一段原文开始" : "原文已就位"}</h2>
                 <p>{isFreshDraft ? "旧稿已安全留在资产库。先在右侧写下原文或选题，再生成文字。" : "继续在右侧补充要求，或直接生成文字；完成配图后才会进入页面精修与发布包。"}</p>
-                <button type="button" onClick={() => scrollCreatorStage("creator-source")}><Plus />{isFreshDraft ? "填写原文" : "继续创作"}</button>
+                <div className="fresh-draft-actions">
+                  <button type="button" aria-controls="creator-source-input" onClick={() => scrollCreatorStage("creator-source")}><Plus />{isFreshDraft ? "填写原文" : "继续创作"}</button>
+                  {canReturnPrevious && <button type="button" className="is-secondary" onClick={() => activateWorkspaceDraft(previousDraftId)}><RotateCcw />返回上一稿</button>}
+                </div>
               </section> : currentEditorMode === "html" ? <HtmlPageEditor
                 key={`html-${pageIndex}-${layoutRefreshToken}`}
                 page={currentPage}
@@ -1510,19 +1818,24 @@ function App() {
               {creatorOpen ? renderCreatorWorkflow() : <button className="creator-resume" type="button" onClick={() => setCreatorOpen(true)}><Plus />展开完整创作链</button>}
             {!isDraftInputOnly && <section id="creator-design" className="editor-waterfall workbench-section workbench-design" aria-label="编辑栏">
               <header className="editor-waterfall__head"><div><strong>精修当前页</strong><small>{currentEditorMode === "html" ? "双击文字直接改；点图片后移动焦点或缩放，版式会随内容自然回流" : "直接在画布选中对象；拖动、缩放、双击改字，图片拖任意边裁剪"}</small></div><span className="editor-current-layer">{currentEditorMode === "html" ? "HTML Flow" : "Fabric 7"}</span></header>
-              <section id="creator-publish" className="publish-copy">
-                <div className="publish-copy__head"><strong>发布文案</strong><span>标题、正文与标签</span></div>
-                <label><span>发布标题</span><input value={content.selectedTitle} onChange={(event) => setContent((current) => { const nextTitle = event.target.value; return { ...invalidateVisualReview(current), selectedTitle: nextTitle, titles: current.titles.map((title) => title === current.selectedTitle ? nextTitle : title), pages: current.pages.map((page, index) => index === 0 ? { ...page, title: nextTitle } : page) }; }, { group: "publish-title" })} /></label>
-                <label><span>发布正文</span><textarea rows="8" value={content.body} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>
-                <div className="tag-editor"><span>标签</span>{content.tags.map((tag, index) => <input key={index} value={tag} onChange={(event) => setContent((current) => ({ ...current, tags: current.tags.map((item, tagIndex) => tagIndex === index ? event.target.value : item) }), { group: `publish-tag-${index}` })} />)}</div>
-                <button className="copy-publish" onClick={async () => {
-                  try { await copyTextToClipboard(publishCopy(content)); setToast("发布文案已复制"); }
-                  catch { setToast("复制失败，请直接从发布文案框选复制"); }
-                }}><Clipboard />复制完整发布文案</button>
+              <section id="creator-publish" className={`publish-copy ${publicationAuthority.allowed ? "is-authorized" : "is-blocked"}`}>
+                <div className="publish-copy__head"><strong>发布文案</strong><span>{publicationAuthority.allowed ? (publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? "已确认文字的只读投影" : "历史成稿，以已保存内容为准") : "已锁定：当前文字与画布不能证明是同一稿"}</span></div>
+                {!publicationAuthority.allowed ? <div className="publication-authority-alert" role="alert">
+                  <strong>{publicationBlockMessage(publicationAuthority.code)}</strong>
+                  <span>文字稿：{textDraft?.selected_title || "未确认"}</span>
+                  <span>当前画布：{content.selectedTitle || "无成稿"}</span>
+                  <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
+                </div> : <>
+                  <label><span>发布标题</span><input value={content.selectedTitle} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => { const nextTitle = event.target.value; return { ...invalidateVisualReview(current), selectedTitle: nextTitle, titles: current.titles.map((title) => title === current.selectedTitle ? nextTitle : title), pages: current.pages.map((page, index) => index === 0 ? { ...page, title: nextTitle } : page) }; }, { group: "publish-title" })} /></label>
+                  <label><span>发布正文</span><textarea rows="8" value={content.body} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>
+                  <div className="tag-editor"><span>标签</span>{content.tags.map((tag, index) => <input key={index} value={tag} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...current, tags: current.tags.map((item, tagIndex) => tagIndex === index ? event.target.value : item) }), { group: `publish-tag-${index}` })} />)}</div>
+                </>}
+                <button className="copy-publish" aria-disabled={!publicationAuthority.allowed} disabled={!publicationAuthority.allowed} onClick={copyPublicationCopy}><Clipboard />{publicationAuthority.allowed ? "复制完整发布文案" : "发布文案已锁定"}</button>
               </section>
             </section>}
             {!isDraftInputOnly && <section className="workbench-section workbench-export" aria-label="保存与下载">
-              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={preparedExport.url} download={preparedExport.name} onClick={() => { setExportState("COMPLETE"); setToast(`ZIP 下载已开始：${preparedExport.pageCount} 张 PNG + 文案 + 数据`); }}><Download />保存发布包</a> : <button type="button" className="download-final" data-export-state={exportState} onClick={downloadZip} disabled={exportState === "GENERATING"}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{exportState === "GENERATING" ? "正在生成发布包…" : "下载发布包"}</button>}</div>
+              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={preparedExport.url} download={preparedExport.name} onClick={downloadPreparedExport}><Download />保存发布包</a> : <button type="button" className="download-final" data-export-state={exportState} aria-disabled={!publicationAuthority.allowed} onClick={downloadZip} disabled={exportState === "GENERATING" || !publicationAuthority.allowed}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{exportState === "GENERATING" ? "正在生成发布包…" : publicationAuthority.allowed ? "下载发布包" : "发布包已锁定"}</button>}</div>
+              {!publicationAuthority.allowed && <p className="export-inline-note">草稿仍可保存；文字与画布重新对齐前，不会生成或下载发布包。</p>}
               {exportState === "FAILED" && <p className="export-inline-error">下载没有完成；请先处理上方排版提示后重试。</p>}
             </section>}
             </div>
@@ -1545,13 +1858,13 @@ function App() {
           <section className={`library-current ${currentInLibrary ? "is-saved" : "is-unsaved"}`} aria-label="当前工作台保存状态"><div><span>当前工作台 · {visiblePages.length} 页</span><strong>{content.selectedTitle}</strong><small>{currentInLibrary ? "已在资产库，可继续补现实反馈" : "尚未进入资产库；回到工作台点击保存草稿"}</small></div><button type="button" onClick={() => { setView("compose"); setCreatorOpen(false); }}>返回编辑</button></section>
           {library.length === 0 ? <div className="empty-library"><Library /><strong>还没有保存的内容</strong><span>回到工作台保存后，会留在这台 Mac。</span></div> : <>
             {library.length >= 3 && <AssetPageRows library={library} />}
-            {realityFeedbackItem && <RealityFeedbackEditor item={realityFeedbackItem} onSave={(feedback) => saveRealityFeedback(realityFeedbackItem.id, feedback)} onClose={() => setRealityFeedbackId(null)} />}
+            {realityFeedbackItem && <RealityFeedbackEditor item={realityFeedbackItem} onSave={(feedback) => saveRealityFeedback(realityFeedbackItem.draft_record_id, feedback)} onClose={() => setRealityFeedbackId(null)} />}
             <div className="library-section-title"><strong>逐份打开</strong><span>{library.length} 份本机资产 · 发布后可持续补真实数据</span></div>
             <div className="library-grid">{library.map((item) => {
               const status = realityFeedbackStatus(item.reality_feedback);
-              return <article className="library-item" key={item.id}>
+              return <article className="library-item" key={item.draft_record_id}>
                 <button className="library-card" onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
-                <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.id)}>现实反馈</button>
+                <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.draft_record_id)}>现实反馈</button>
               </article>;
             })}</div>
           </>}

@@ -562,6 +562,13 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
 .copy-publish, .creator-submit { border: 0; border-radius: 10px; background: var(--moss); color: white; min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; font-weight: 700; }
 .copy-publish:hover, .creator-submit:hover { background: var(--moss-dark); }
 .copy-publish svg { width: 16px; }
+.copy-publish[aria-disabled="true"], .download-final[aria-disabled="true"] { cursor: not-allowed; color: #7b645a; background: rgba(145,71,46,.10); }
+.copy-publish[aria-disabled="true"]:hover, .download-final[aria-disabled="true"]:hover { background: rgba(145,71,46,.14); }
+.publication-authority-alert { padding: 13px 14px; border: 1px solid rgba(145,71,46,.22); border-radius: 11px; color: #754432; background: rgba(145,71,46,.07); display: grid; gap: 5px; }
+.publication-authority-alert strong { font-size: 11px; line-height: 1.5; }
+.publication-authority-alert span, .publication-authority-alert small { overflow-wrap: anywhere; font-size: 9px; line-height: 1.45; }
+.publication-authority-alert small { color: rgba(117,68,50,.74); }
+.publish-copy input[readonly], .publish-copy textarea[readonly] { color: var(--ink); background: rgba(88,64,46,.035); cursor: default; }
 .object-editor__head { display: flex; align-items: center; justify-content: space-between; }
 .object-editor__head strong, .object-editor__head span { display: block; }
 .object-editor__head strong { font-family: var(--font-serif); font-size: 14px; }
@@ -1239,7 +1246,9 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
 .fresh-draft-empty > span { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .16em; }
 .fresh-draft-empty h2 { margin: 0; font: 700 28px/1.15 var(--font-serif); letter-spacing: -.025em; text-wrap: balance; }
 .fresh-draft-empty p { max-width: 34em; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; text-wrap: pretty; }
+.fresh-draft-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .fresh-draft-empty button { min-height: 42px; padding: 0 16px; border: 0; border-radius: 10px; color: white; background: var(--moss); display: inline-flex; align-items: center; gap: 7px; font: 750 11px/1 var(--font-sans); }
+.fresh-draft-empty button.is-secondary { border: 1px solid rgba(88,64,46,.16); color: var(--ink); background: rgba(255,255,255,.76); }
 .fresh-draft-empty button:hover { filter: brightness(.96); }
 .fresh-draft-empty button:active { transform: scale(.97); }
 .fresh-draft-empty button:focus-visible { outline: 3px solid rgba(85,117,100,.24); outline-offset: 2px; }

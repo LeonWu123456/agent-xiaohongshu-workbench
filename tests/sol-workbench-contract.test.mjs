@@ -18,6 +18,14 @@ test("workbench keeps one journey navigator and removes duplicate summary chrome
   assert.doesNotMatch(source, /className="desk-shortcut"/);
 });
 
+test("blocked publication controls use native disable in addition to the inner lineage guard", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  assert.match(source, /className="copy-publish"[\s\S]*disabled=\{!publicationAuthority\.allowed\}[\s\S]*onClick=\{copyPublicationCopy\}/);
+  assert.match(source, /className="download-final"[\s\S]*disabled=\{exportState === "GENERATING" \|\| !publicationAuthority\.allowed\}/);
+  assert.match(source, /runGuardedPublicationAction/);
+  assert.match(source, /publicationSnapshotDecision/);
+});
+
 test("creator expansion cannot squeeze the desktop canvas again", async () => {
   const css = `${await readFile(cssUrl, "utf8")}\n${await readFile(pageContractCssUrl, "utf8")}`;
   assert.match(css, /\.workbench\.is-creator-open \{ grid-template-columns: minmax\(560px,1fr\) 430px; \}/);

@@ -1,8 +1,8 @@
 {
   "schema": "mesy.living-logic-model.v1",
   "object_id": "xiaoshimei-studio-v2",
-  "object_root": "Projects/Workstreams/Xiaoshimei-Studio-v2",
-  "version": "0.2.0",
+  "object_root": "Products/Xiaoshimei-Studio-v2",
+  "version": "0.3.1",
   "nodes": [
     {
       "id": "CAP-CREATE",
@@ -13,7 +13,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
+          "path": "Products/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
           "kind": "contract"
         }
       ]
@@ -27,7 +27,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
           "kind": "code"
         }
       ]
@@ -41,7 +41,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
           "kind": "code"
         }
       ]
@@ -55,7 +55,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
           "kind": "code"
         }
       ]
@@ -69,7 +69,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/export-image-verification.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/export-image-verification.mjs",
           "kind": "code"
         }
       ]
@@ -83,7 +83,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/reality-feedback.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/reality-feedback.mjs",
           "kind": "code"
         }
       ]
@@ -97,7 +97,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
+          "path": "Products/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
           "kind": "contract"
         }
       ]
@@ -111,7 +111,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/tests/mother-sheet.test.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/tests/mother-sheet.test.mjs",
           "kind": "test"
         }
       ]
@@ -125,7 +125,7 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/tests/export-image-verification.test.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/tests/export-image-verification.test.mjs",
           "kind": "test"
         }
       ]
@@ -139,7 +139,138 @@
       },
       "source_refs": [
         {
-          "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/tests/reality-feedback.test.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/tests/reality-feedback.test.mjs",
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "BLOCK-AUTHORING",
+      "type": "BLOCK",
+      "label": "完整草稿与发布权威",
+      "spec": {
+        "invariant": "content_package 与 generation_session 同属一个 DraftRecord；切稿和发布均不得跨血缘"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
+          "kind": "contract"
+        }
+      ]
+    },
+    {
+      "id": "STORE-WORKSPACE-ENVELOPE",
+      "type": "STORE",
+      "label": "草稿工作区唯一持久化权威",
+      "spec": {
+        "schema": "xiaoshimei.workspace-envelope.v2",
+        "invariant": "任一投影写入失败必须完整回滚，旧 split keys 只作兼容投影"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "ACT-NEW-DRAFT",
+      "type": "ACT",
+      "label": "新创作原子切换并可返回",
+      "spec": {
+        "precondition": "当前 DraftRecord 可完整序列化并持久化",
+        "postcondition": "旧稿仍可回载；新稿为空白；上一稿入口可见",
+        "failure": "页面保持原稿，不清空任一 authoring 字段"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "ACT-FOCUS-SOURCE",
+      "type": "ACT",
+      "label": "填写原文获得真实输入焦点",
+      "spec": {
+        "postcondition": "document.activeElement 为 creator-source-input 且输入值可变"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-PUBLICATION-LINEAGE",
+      "type": "RULE",
+      "label": "当前确认文字是唯一发布权威",
+      "spec": {
+        "rule": "展示、复制、ZIP 与已准备链接共用同一 lineage token；任一字段漂移 fail closed，保存不受阻"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publication-authority.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publication-action-guard.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
+      "type": "RULE",
+      "label": "阻断的发布动作不得产生副作用",
+      "spec": {
+        "rule": "阻断态使用浏览器原生 disabled 与执行函数内 lineage 二次校验；复制、ZIP 和旧下载链接副作用调用数为 0，保存仍可用；允许态恰好执行 1 次"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publication-action-guard.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "EVD-DRAFT-AUTHORITY-TEST",
+      "type": "EVIDENCE",
+      "label": "草稿保全与跨稿隔离消费者测试",
+      "spec": {
+        "suite": "tests/workspace-state-v2.test.mjs + browser new/create/return/reload/focus journey"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/workspace-state-v2.test.mjs",
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "EVD-PUBLICATION-AUTHORITY-TEST",
+      "type": "EVIDENCE",
+      "label": "发布血缘阻断测试",
+      "spec": {
+        "suite": "tests/publication-authority.test.mjs + tests/publication-action-guard.test.mjs + tests/sol-workbench-contract.test.mjs + browser copy/export fail-closed journey"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/publication-authority.test.mjs",
+          "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/publication-action-guard.test.mjs",
+          "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/sol-workbench-contract.test.mjs",
           "kind": "test"
         }
       ]
@@ -160,6 +291,31 @@
       "from": "CAP-CREATE",
       "to": "STATE-REALITY",
       "type": "contains"
+    },
+    {
+      "from": "CAP-CREATE",
+      "to": "BLOCK-AUTHORING",
+      "type": "contains"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "STORE-WORKSPACE-ENVELOPE",
+      "type": "contains"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "ACT-NEW-DRAFT",
+      "type": "contains"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "ACT-FOCUS-SOURCE",
+      "type": "contains"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "RULE-PUBLICATION-LINEAGE",
+      "type": "constrained_by"
     },
     {
       "from": "BLOCK-IMAGE",
@@ -200,6 +356,41 @@
       "from": "STATE-REALITY",
       "to": "EVD-REALITY-TEST",
       "type": "verified_by"
+    },
+    {
+      "from": "STORE-WORKSPACE-ENVELOPE",
+      "to": "EVD-DRAFT-AUTHORITY-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "ACT-NEW-DRAFT",
+      "to": "EVD-DRAFT-AUTHORITY-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "ACT-FOCUS-SOURCE",
+      "to": "EVD-DRAFT-AUTHORITY-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "FLOW-EXPORT",
+      "to": "RULE-PUBLICATION-LINEAGE",
+      "type": "constrained_by"
+    },
+    {
+      "from": "RULE-PUBLICATION-LINEAGE",
+      "to": "EVD-PUBLICATION-AUTHORITY-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "RULE-PUBLICATION-LINEAGE",
+      "to": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
+      "type": "constrained_by"
+    },
+    {
+      "from": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
+      "to": "EVD-PUBLICATION-AUTHORITY-TEST",
+      "type": "verified_by"
     }
   ],
   "problems": [
@@ -212,7 +403,7 @@
       ],
       "probe": {
         "kind": "literal",
-        "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
+        "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
         "pattern": "MOTHER_SHEET_TILE_INSET_RATIO = 0.02",
         "claim_true_when": "present"
       },
@@ -227,7 +418,7 @@
       ],
       "probe": {
         "kind": "literal",
-        "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
+        "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
         "pattern": "verifyExportDataUrl",
         "claim_true_when": "absent"
       },
@@ -242,11 +433,29 @@
       ],
       "probe": {
         "kind": "literal",
-        "path": "Projects/Workstreams/Xiaoshimei-Studio-v2/src/layout-qa.mjs",
+        "path": "Products/Xiaoshimei-Studio-v2/src/layout-qa.mjs",
         "pattern": "reality_feedback",
         "claim_true_when": "absent"
       },
       "solution_ref": null
+    },
+    {
+      "id": "D33",
+      "state": "REPAIR_IN_PROGRESS",
+      "claim": "新创作会丢未组装文字稿，旧 content 与 generation session 可跨稿串联，填写原文无真实焦点后置条件",
+      "target_nodes": [
+        "STORE-WORKSPACE-ENVELOPE",
+        "ACT-NEW-DRAFT",
+        "ACT-FOCUS-SOURCE",
+        "RULE-PUBLICATION-LINEAGE"
+      ],
+      "probe": {
+        "kind": "literal",
+        "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+        "pattern": "derivePublicationAuthority",
+        "claim_true_when": "absent"
+      },
+      "solution_ref": "tests/workspace-state-v2.test.mjs + tests/publication-authority.test.mjs + stable-domain browser readback"
     }
   ]
 }

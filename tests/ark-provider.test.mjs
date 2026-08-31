@@ -221,6 +221,7 @@ test("assembled generated pages keep visual action and image prompt for later pa
   assert.equal(content.pages[0].visual_action, pages[0].visualAction);
   assert.equal(content.pages[0].image_prompt, pages[0].imagePrompt);
   assert.equal(content.generation.production_mode, "smart");
+  assert.equal(content.generation.source_draft_id, draft.draft_id);
 });
 
 test("knowledge infographic mode binds distinct native text boxes to matching illustrations", () => {

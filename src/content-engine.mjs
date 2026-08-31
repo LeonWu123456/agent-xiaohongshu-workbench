@@ -612,6 +612,7 @@ function normalizeGeneration(value) {
     notice: requireString(value.notice, "generation.notice"),
   };
   if (value.run_id != null) generation.run_id = requireString(value.run_id, "generation.run_id").slice(0, 120);
+  if (value.source_draft_id != null) generation.source_draft_id = requireString(value.source_draft_id, "generation.source_draft_id").slice(0, 160);
   if (value.strategy != null) generation.strategy = requireString(value.strategy, "generation.strategy").slice(0, 80);
   for (const [field, max] of Object.entries({
     mother_sheet_count: 64,

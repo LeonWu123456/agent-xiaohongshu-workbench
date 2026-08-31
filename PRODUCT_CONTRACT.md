@@ -112,11 +112,11 @@ GitHub main
 Vercel xiaoshimei-full-workbench
   = 正式在线运行入口；Preview 验收后提升同一制品
 
-Projects/Workstreams/Xiaoshimei-Studio-v2
+Products/Xiaoshimei-Studio-v2
   = Workspace V2 稳定原件
 
-Projects/Views/ByStatus/ACTIVE/Xiaoshimei-Studio-v2
-  -> ../../../Workstreams/Xiaoshimei-Studio-v2
+Generated/PortfolioViews/ByStatus/ACTIVE/Xiaoshimei-Studio-v2
+  -> ../../../../Products/Xiaoshimei-Studio-v2
 
 4184
   -> 直接服务 Xiaoshimei-Studio-v2 的 dist 与 API
@@ -141,3 +141,14 @@ Projects/Views/ByStatus/ACTIVE/Xiaoshimei-Studio-v2
 ## 11｜小红书图文生产标准
 
 封面、正文、KV/插图母版拆分、智能排版、自由编辑、导出和发布前现实验收，统一执行 [`logic/XHS_GRAPHIC_PRODUCTION_STANDARD.md`](logic/XHS_GRAPHIC_PRODUCTION_STANDARD.md)。对应规则绑定到生成区域、切片比例、页面结构、可编辑状态、导出几何与回归测试；不得只修当前一张图或只靠 CSS 覆写。
+
+## 12｜草稿权威与动作验收
+
+- 一篇稿只有一个完整 `DraftRecord`：`content_package` 与 `generation_session` 必须同存、同切换、同备份。旧版检测到成品 A 与文字 B 不一致时，两边分别保全，禁止静默拼成一稿。
+- “新创作”必须先原子保存当前完整稿，再建立空白稿；任一写入失败则页面不切换。新稿界面必须提供可见的“返回上一稿”，并在刷新后仍能从资产库恢复全部文字、确认状态、画布和图片续跑状态。
+- “填写原文”的通过条件不是触发点击，而是原文输入框真实获得焦点并可立即输入；桌面与窄屏都必须用浏览器回读 `activeElement` 与输入值。
+- 有文字会话的稿件，发布标题、正文与标签只能是当前已确认文字的只读投影。标题、正文、标签、原文、pillar、goal、draft lineage 任一不一致，展示、复制、ZIP 生成和已准备下载链接全部 fail closed；保存始终允许，避免二次丢稿。
+- 被血缘门阻断的复制与发布包动作必须同时使用浏览器原生 `disabled` 和执行函数内的 lineage 二次校验；消费者验收以“副作用调用数 = 0”为准。允许态必须恰好执行一次，不能用按钮变灰或点击回调被调用代替结果。
+- 没有文字会话的历史完整稿可作为 `CONTENT_ONLY` 兼容权威继续编辑、保存与导出；一旦进入新文字流程，必须转入同一 `DraftRecord` 的血缘门，不能继续吃历史成品。
+
+本节验收必须绑定同一身份：`task_id + source commit + deployment + origin/profile + draft_id + generation_session_id + artifact hash`。任一身份变化，旧证据自动失效；“按钮点过”“源码里有函数”“旧 Preview 通过”都不能替代本次消费者后置条件。
