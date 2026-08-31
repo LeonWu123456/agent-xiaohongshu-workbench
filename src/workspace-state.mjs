@@ -615,6 +615,40 @@ export function persistWorkspaceEnvelope(storage, value, keys) {
   return atomicStorageWrite(storage, entries, "WORKSPACE_ENVELOPE_SAVED");
 }
 
+export function persistDraftRecordWithReadback(storage, value, keys, {
+  draftId,
+  contentPackage,
+  generationSession,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const next = saveDraftRecord(value, {
+    draftId,
+    contentPackage,
+    generationSession,
+    updatedAt,
+  });
+  const persisted = persistWorkspaceEnvelope(storage, next, keys);
+  if (!persisted.ok) return { ...persisted, workspace: null, draft_record: null };
+  const readback = loadWorkspaceEnvelope(storage, keys.envelope);
+  if (!readback) {
+    return { ok: false, code: "WORKSPACE_READBACK_FAILED", workspace: null, draft_record: null };
+  }
+  if (JSON.stringify(readback) !== JSON.stringify(next)) {
+    return { ok: false, code: "WORKSPACE_READBACK_MISMATCH", workspace: readback, draft_record: null };
+  }
+  const targetId = draftId || readback.active_draft_id;
+  const record = readback.drafts.find((item) => item.draft_id === targetId) || null;
+  if (!record) {
+    return { ok: false, code: "WORKSPACE_DRAFT_READBACK_MISSING", workspace: readback, draft_record: null };
+  }
+  return {
+    ok: true,
+    code: "WORKSPACE_DRAFT_SAVED_AND_VERIFIED",
+    workspace: readback,
+    draft_record: record,
+  };
+}
+
 export function persistWorkspaceState(storage, state, keys) {
   const entries = [
     { key: keys.content, serialized: JSON.stringify(state.currentContent) },

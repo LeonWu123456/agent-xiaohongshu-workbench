@@ -6,7 +6,9 @@ import {
   completePublicImageRun,
   createPublicImageRun,
   failPublicImageJob,
+  markPublicImageBudgetExhausted,
   parsePublicImageRun,
+  PUBLIC_IMAGE_CALL_LIMIT,
   publicImageRunProgress,
   startPublicImageJob,
   unresolvedPublicImageUnitIds,
@@ -52,7 +54,10 @@ test("public image run admits one paid step, preserves good assets, and appends 
     completed_image_steps: 1,
     total_image_steps: 1,
     failed_image_step: null,
+    max_image_calls: 6,
     actual_image_calls: 1,
+    remaining_image_calls: 5,
+    plan_exceeds_remaining_budget: false,
     estimated_image_cost_cny: 0.22,
   });
   run = appendPublicImageJobs(run, { phase: "STANDALONE_REPAIR", jobs: [{ sheet_id: "standalone-page-2", sheet_index: 1, units: [run.illustration_units[1]], job_kind: "standalone" }] });
@@ -83,4 +88,27 @@ test("public image checkpoint rejects lineage drift and duplicate assets", () =>
   assert.equal(parsePublicImageRun(run, { draftId: "draft-1", draftSha256: "d".repeat(64), finalPageCount: 2 }).run_id, run.run_id);
   assert.throws(() => parsePublicImageRun(run, { draftId: "draft-2" }), /DRAFT_ID_MISMATCH/);
   assert.throws(() => parsePublicImageRun({ ...run, assets: [tile("page-1-hero"), tile("page-1-hero")] }), /ASSET_DUPLICATE/);
+});
+
+test("the signed run budget makes a seventh upstream image call impossible", () => {
+  let run = base();
+  assert.equal(run.max_image_calls, PUBLIC_IMAGE_CALL_LIMIT);
+  for (let call = 1; call <= PUBLIC_IMAGE_CALL_LIMIT; call += 1) {
+    run = startPublicImageJob(run);
+    run = failPublicImageJob(run, { code: `TEST_FAILURE_${call}` });
+  }
+  assert.equal(run.actual_image_calls, 6);
+  assert.equal(publicImageRunProgress(run).remaining_image_calls, 0);
+  assert.equal(publicImageRunProgress(run).plan_exceeds_remaining_budget, true);
+  assert.throws(() => startPublicImageJob(run), /IMAGE_CALL_BUDGET_EXHAUSTED/);
+  const exhausted = markPublicImageBudgetExhausted(run);
+  assert.equal(exhausted.status, "PARTIAL_FAILURE_RESUMABLE");
+  assert.equal(exhausted.failure.code, "IMAGE_CALL_BUDGET_EXHAUSTED");
+  assert.equal(exhausted.actual_image_calls, 6);
+});
+
+test("checkpoint parsing rejects a browser-raised or reset image-call budget", () => {
+  const run = base();
+  assert.throws(() => parsePublicImageRun({ ...run, max_image_calls: 60 }), /CALL_LIMIT_INVALID/);
+  assert.throws(() => parsePublicImageRun({ ...run, actual_image_calls: 7 }), /CALL_EVIDENCE_INVALID/);
 });

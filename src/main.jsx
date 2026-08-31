@@ -30,6 +30,7 @@ import {
   loadOrMigrateWorkspaceEnvelope,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
+  persistDraftRecordWithReadback,
   parseWorkspaceBackup,
   persistWorkspaceEnvelope,
   saveDraftRecord,
@@ -582,7 +583,7 @@ function App() {
   contentRef.current = content;
   publicationAuthorityRef.current = publicationAuthority;
 
-  function currentAuthoringSession() {
+  function currentAuthoringSession(imageResumeOverride = imageResume) {
     if (activatedAsContentOnly) return null;
     return normalizeAuthoringSession({
       schema: AUTHORING_SESSION_SCHEMA,
@@ -596,8 +597,32 @@ function App() {
       image_count_mode: imageCountMode,
       custom_image_count: customImageCount,
       production_mode: productionMode,
-      image_resume: imageResume,
+      image_resume: imageResumeOverride,
     });
+  }
+
+  function persistImageResumeBeforeNextRequest(progress) {
+    const result = persistDraftRecordWithReadback(
+      localStorage,
+      workspaceEnvelopeRef.current,
+      STORAGE_KEYS,
+      {
+        contentPackage: contentRef.current,
+        generationSession: currentAuthoringSession(progress),
+      },
+    );
+    if (!result.ok) {
+      setStorageIssue("配图进度未可靠落盘，续跑已暂停；旧稿与已保存资产仍保留。");
+      const error = new Error(`IMAGE_CHECKPOINT_PERSIST_FAILED:${result.code}`);
+      error.code = result.code;
+      throw error;
+    }
+    workspaceEnvelopeRef.current = result.workspace;
+    setWorkspaceEnvelope(result.workspace);
+    setLibrary(libraryContents(result.workspace));
+    setImageResume(result.draft_record.generation_session.image_resume);
+    setStorageIssue("");
+    return result.draft_record.generation_session.image_resume;
   }
 
   useEffect(() => {
@@ -1207,9 +1232,10 @@ function App() {
       const estimatedSheets = estimate.minMotherSheets === estimate.maxMotherSheets ? `${estimate.minMotherSheets}` : `${estimate.minMotherSheets}–${estimate.maxMotherSheets}`;
       setToast(imageResume?.completed_image_steps != null ? `正在从图片步骤 ${imageResume.completed_image_steps + 1} 继续，已回写的插画不会重做` : imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       const draftForImages = { ...textDraft, prompt_context: promptContextForProvider(promptValues) };
-      const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, resume_checkpoint: imageResume?.resume_checkpoint || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote }, (progress) => {
-        setImageResume(progress);
-        setToast(progress.completed_image_steps === 0 ? `配图规划已保存；将分 ${progress.total_image_steps} 个可恢复步骤生成` : `图片步骤 ${progress.completed_image_steps}/${progress.total_image_steps} 已保存；下一步只生成剩余内容`);
+      const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, resume_checkpoint: imageResume?.resume_checkpoint || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote }, async (progress) => {
+        const persistedProgress = persistImageResumeBeforeNextRequest(progress);
+        const remaining = Number.isInteger(persistedProgress.remaining_image_calls) ? `，剩余 ${persistedProgress.remaining_image_calls} 次` : "";
+        setToast(persistedProgress.completed_image_steps === 0 ? `配图规划已保存；将分 ${persistedProgress.total_image_steps} 个可恢复步骤生成${remaining}` : `图片步骤 ${persistedProgress.completed_image_steps}/${persistedProgress.total_image_steps} 已保存${remaining}；下一步只生成剩余内容`);
       })));
       setProviderHealth("ONLINE");
       resetContent(result); setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
@@ -1219,7 +1245,25 @@ function App() {
       setToast(`${productionModeLabel(productionMode)} · ${resolvedCount} 个画板已完成母图切分与排版，向下继续编辑`);
     } catch (error) {
       console.warn(error);
-      setImageResume(error?.providerDetails?.resume_run_id ? error.providerDetails : null);
+      if (error?.providerDetails?.resume_run_id && error?.checkpointPersisted !== true) {
+        try {
+          persistImageResumeBeforeNextRequest(error.providerDetails);
+          error.checkpointPersisted = true;
+        } catch (persistError) {
+          failGeneration(generationFailureFeedback(persistError));
+          return;
+        }
+      }
+      if (error?.providerDetails?.retry_scope === "NO_MORE_PAID_CALLS_IN_THIS_RUN") {
+        const resume = error.providerDetails;
+        failGeneration({
+          code: "IMAGE_CALL_BUDGET_EXHAUSTED",
+          title: "本轮 6 次图片调用已用完",
+          detail: `已可靠保存图片步骤 ${resume.completed_image_steps || 0}/${resume.total_image_steps || 0} 和全部可用资产；服务器不会发起第 7 次图片调用。请调整画面要求后重新开始一轮，或直接编辑现有结果。`,
+          stage: "image",
+        });
+        return;
+      }
       failGeneration(generationFailureFeedback(error));
     }
   }
@@ -1681,7 +1725,7 @@ function App() {
             <span><strong>{mode.label}{mode.id === "smart" && <em>推荐</em>}</strong><small>{mode.fit}</small><b>{mode.result}</b></span>
           </label>)}</div>
         </fieldset>
-        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("AUTO"); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("CUSTOM"); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { setCustomImageCount(Number(event.target.value)); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
+        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("AUTO"); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("CUSTOM"); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { setCustomImageCount(Number(event.target.value)); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
         <section className="action-reference-panel">
           <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />

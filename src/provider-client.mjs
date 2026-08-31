@@ -137,7 +137,17 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     async generateImages(input, onProgress) {
       let next = structuredClone(input);
       for (let step = 0; step < 64; step += 1) {
-        const payload = await post(imageGenerationUrl, buildImageGenerationRequest(next));
+        let payload;
+        try {
+          payload = await post(imageGenerationUrl, buildImageGenerationRequest(next));
+        } catch (error) {
+          const resume = error?.providerDetails;
+          if (resume?.resume_run_id && resume?.resume_checkpoint && typeof onProgress === "function") {
+            await onProgress(structuredClone(resume));
+            error.checkpointPersisted = true;
+          }
+          throw error;
+        }
         if (payload?.schema !== PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA || payload?.status !== "PARTIAL") return payload;
         const resume = payload.resume;
         if (!resume?.resume_run_id || !resume?.resume_checkpoint) throw new TypeError("PUBLIC_IMAGE_STEP_RESPONSE_INVALID");

@@ -1,4 +1,5 @@
 export const PUBLIC_IMAGE_RUN_SCHEMA = "xiaoshimei.public-image-run.v1";
+export const PUBLIC_IMAGE_CALL_LIMIT = 6;
 
 const PHASES = new Set(["PRIMARY", "GROUPED_REPAIR", "STANDALONE_REPAIR", "COMPLETE", "EXHAUSTED"]);
 const STATUSES = new Set(["GENERATING", "IMAGE_CALL_IN_PROGRESS", "PARTIAL_FAILURE_RESUMABLE", "COMPLETE", "EXHAUSTED"]);
@@ -70,8 +71,10 @@ export function parsePublicImageRun(value, expected = {}) {
   if (!assets) throw new TypeError("PUBLIC_IMAGE_ASSETS_INVALID");
   if (new Set(assets.map((asset) => asset.unit_id)).size !== assets.length) throw new TypeError("PUBLIC_IMAGE_ASSET_DUPLICATE");
   if (!Array.isArray(value.job_attempts) || value.job_attempts.length > 64) throw new TypeError("PUBLIC_IMAGE_ATTEMPTS_INVALID");
+  const maxImageCalls = Number(value.max_image_calls);
+  if (maxImageCalls !== PUBLIC_IMAGE_CALL_LIMIT) throw new TypeError("PUBLIC_IMAGE_CALL_LIMIT_INVALID");
   const actualImageCalls = Number(value.actual_image_calls);
-  if (!Number.isInteger(actualImageCalls) || actualImageCalls < 0 || actualImageCalls < value.job_attempts.length) throw new TypeError("PUBLIC_IMAGE_CALL_EVIDENCE_INVALID");
+  if (!Number.isInteger(actualImageCalls) || actualImageCalls < 0 || actualImageCalls > maxImageCalls || actualImageCalls < value.job_attempts.length) throw new TypeError("PUBLIC_IMAGE_CALL_EVIDENCE_INVALID");
   const phase = requiredString(value.phase, "PUBLIC_IMAGE_PHASE_INVALID", 40);
   const status = requiredString(value.status, "PUBLIC_IMAGE_STATUS_INVALID", 48);
   if (!PHASES.has(phase) || !STATUSES.has(status)) throw new TypeError("PUBLIC_IMAGE_STATE_INVALID");
@@ -90,6 +93,7 @@ export function parsePublicImageRun(value, expected = {}) {
     next_job_index: nextJobIndex,
     assets,
     job_attempts: structuredClone(value.job_attempts),
+    max_image_calls: maxImageCalls,
     actual_image_calls: actualImageCalls,
     phase,
     status,
@@ -120,6 +124,7 @@ export function createPublicImageRun({ runId, draftId, draftSha256, productionMo
     next_job_index: 0,
     assets: [],
     job_attempts: [],
+    max_image_calls: PUBLIC_IMAGE_CALL_LIMIT,
     actual_image_calls: 0,
     phase: "PRIMARY",
     status: "GENERATING",
@@ -130,9 +135,24 @@ export function createPublicImageRun({ runId, draftId, draftSha256, productionMo
 export function startPublicImageJob(value) {
   const next = cloneWithoutSignature(parsePublicImageRun(value));
   if (next.next_job_index >= next.jobs.length || next.phase === "COMPLETE" || next.phase === "EXHAUSTED") throw new TypeError("PUBLIC_IMAGE_JOB_NOT_AVAILABLE");
+  if (next.actual_image_calls >= next.max_image_calls) throw new TypeError("IMAGE_CALL_BUDGET_EXHAUSTED");
   next.actual_image_calls += 1;
   next.status = "IMAGE_CALL_IN_PROGRESS";
   next.failure = null;
+  return parsePublicImageRun(next);
+}
+
+export function markPublicImageBudgetExhausted(value) {
+  const next = cloneWithoutSignature(parsePublicImageRun(value));
+  if (next.actual_image_calls < next.max_image_calls || next.phase === "COMPLETE" || next.phase === "EXHAUSTED") {
+    throw new TypeError("PUBLIC_IMAGE_BUDGET_EXHAUSTION_INVALID");
+  }
+  next.status = "PARTIAL_FAILURE_RESUMABLE";
+  next.failure = {
+    failed_job_index: next.next_job_index,
+    code: "IMAGE_CALL_BUDGET_EXHAUSTED",
+    provider_asset_returned: false,
+  };
   return parsePublicImageRun(next);
 }
 
@@ -217,7 +237,10 @@ export function publicImageRunProgress(value, imagePriceCny = 0.22) {
     completed_image_steps: parsed.next_job_index,
     total_image_steps: parsed.jobs.length,
     failed_image_step: parsed.failure?.failed_job_index != null ? parsed.failure.failed_job_index + 1 : null,
+    max_image_calls: parsed.max_image_calls,
     actual_image_calls: parsed.actual_image_calls,
+    remaining_image_calls: parsed.max_image_calls - parsed.actual_image_calls,
+    plan_exceeds_remaining_budget: Math.max(0, parsed.jobs.length - parsed.next_job_index) > parsed.max_image_calls - parsed.actual_image_calls,
     estimated_image_cost_cny: Number((parsed.actual_image_calls * Number(imagePriceCny || 0)).toFixed(2)),
   };
 }

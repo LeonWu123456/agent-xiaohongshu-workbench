@@ -275,6 +275,7 @@ test("two-node provider client keeps text and image requests on separate endpoin
 test("image client follows public step checkpoints until the final content and reports every saved step", async () => {
   const seen = [];
   const progress = [];
+  const events = [];
   const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
   const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-1", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
   const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-abcdef12" };
@@ -284,15 +285,64 @@ test("image client follows public step checkpoints until the final content and r
     fetchImpl: async (url, options) => {
       const request = JSON.parse(options.body);
       seen.push(request);
+      events.push(`fetch${seen.length}`);
       if (seen.length === 1) return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
       return { ok: true, status: 200, json: async () => finalContent };
     },
   });
-  const result = await provider.generateImages({ draft, image_count: 2 }, (value) => progress.push(value));
+  const result = await provider.generateImages({ draft, image_count: 2 }, async (value) => {
+    events.push("persist");
+    await Promise.resolve();
+    events.push("readback");
+    progress.push(value);
+  });
   assert.equal(result.selectedTitle, finalContent.selectedTitle);
   assert.equal(seen.length, 2);
   assert.equal(seen[1].input.resume_run_id, checkpoint.run_id);
   assert.equal(seen[1].input.resume_checkpoint.run_id, checkpoint.run_id);
   assert.equal(progress.length, 1);
   assert.equal(progress[0].completed_image_steps, 1);
+  assert.deepEqual(events, ["fetch1", "persist", "readback", "fetch2"]);
+});
+
+test("a failed checkpoint persist stops the image client before the next server request", async () => {
+  let fetches = 0;
+  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
+  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-persist-fail", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
+  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-deadbeef" };
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => {
+      fetches += 1;
+      return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
+    },
+  });
+  await assert.rejects(
+    () => provider.generateImages({ draft, image_count: 2 }, async () => { throw new Error("READBACK_FAILED"); }),
+    /READBACK_FAILED/,
+  );
+  assert.equal(fetches, 1);
+});
+
+test("a resumable server error checkpoint is persisted before the original error reaches the UI", async () => {
+  const events = [];
+  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
+  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-error", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
+  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-feedface" };
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => {
+      events.push("fetch");
+      return { ok: false, status: 422, json: async () => ({ error: "ARK_PROBE_FAILED", code: "IMAGE_STEP_FAILED", stage: "image", details: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
+    },
+  });
+  await assert.rejects(
+    () => provider.generateImages({ draft, image_count: 2 }, async () => {
+      events.push("persist");
+      await Promise.resolve();
+      events.push("readback");
+    }),
+    (error) => error.providerCode === "IMAGE_STEP_FAILED" && error.checkpointPersisted === true,
+  );
+  assert.deepEqual(events, ["fetch", "persist", "readback"]);
 });

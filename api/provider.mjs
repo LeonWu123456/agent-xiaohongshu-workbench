@@ -31,6 +31,7 @@ import {
   createPublicImageRun,
   exhaustPublicImageRun,
   failPublicImageJob,
+  markPublicImageBudgetExhausted,
   parsePublicImageRun,
   publicImageRunProgress,
   startPublicImageJob,
@@ -469,6 +470,20 @@ function publicImageResumeError(error, checkpoint, settings, { providerAssetRetu
   return error;
 }
 
+function publicImageBudgetError(checkpoint, settings) {
+  const exhausted = markPublicImageBudgetExhausted(checkpoint);
+  const signed = signPublicImageCheckpoint(exhausted, settings.apiKey);
+  const error = new Error("IMAGE_CALL_BUDGET_EXHAUSTED");
+  error.details = {
+    ...publicImageRunProgress(signed, IMAGE_PRICE_CNY),
+    resume_checkpoint: signed,
+    retry_scope: "NO_MORE_PAID_CALLS_IN_THIS_RUN",
+    current_step_may_replay: false,
+    provider_asset_returned: false,
+  };
+  return error;
+}
+
 function advancePublicImageRun(checkpoint) {
   if (checkpoint.next_job_index < checkpoint.jobs.length) return checkpoint;
   const unresolved = unresolvedPublicImageUnitIds(checkpoint);
@@ -598,7 +613,7 @@ function assemblePublicImageContent(checkpoint, input, settings) {
   return parseContentPackage(JSON.stringify(content));
 }
 
-async function generateImages(input, settings) {
+export async function generateImages(input, settings) {
   const pageCount = input.image_count === "AUTO" ? input.draft.recommended_image_count : input.image_count;
   const draftSha256 = sha256Bytes(Buffer.from(JSON.stringify(input.draft)));
   const referenceFingerprint = publicReferenceFingerprint(input);
@@ -613,6 +628,7 @@ async function generateImages(input, settings) {
   }
   if (checkpoint.status === "COMPLETE") return assemblePublicImageContent(checkpoint, input, settings);
   if (checkpoint.status === "EXHAUSTED") throw new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+  if (checkpoint.actual_image_calls >= checkpoint.max_image_calls) throw publicImageBudgetError(checkpoint, settings);
   checkpoint = await executePublicImageJob(checkpoint, input, settings);
   if (checkpoint.status === "EXHAUSTED") {
     const signed = signPublicImageCheckpoint(checkpoint, settings.apiKey);

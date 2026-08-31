@@ -20,6 +20,7 @@ import {
   parseWorkspaceBackup,
   parseWorkspaceBackupV2,
   persistWorkspaceEnvelope,
+  persistDraftRecordWithReadback,
   saveActiveDraft,
 } from "../src/workspace-state.mjs";
 
@@ -270,6 +271,67 @@ test("persist writes the v2 authority and every legacy projection as one rollbac
   assert.equal(JSON.parse(storage.getItem(KEYS.content)).source_input, "秋天先照顾好自己的节奏");
   assert.ok(JSON.parse(storage.getItem(KEYS.library)).some((item) => item.id === "old"));
   assert.equal(JSON.parse(storage.getItem(KEYS.generationSession)).schema, GENERATION_SESSION_SCHEMA);
+});
+
+test("image progress is saved into the active DraftRecord and read back from the same workspace authority before continuation", () => {
+  const storage = memoryStorage();
+  const session = fullSession();
+  const workspace = migrateLegacyWorkspaceState({
+    profile: createProfileV2(),
+    currentContent: assembledContent(session, "active"),
+    generationSession: session,
+    activeDraftId: "active",
+    createdAt: T0,
+  });
+  const progress = {
+    resume_run_id: "images-2026-08-31T060000Z-abcdef12",
+    completed_image_steps: 2,
+    total_image_steps: 4,
+    max_image_calls: 6,
+    actual_image_calls: 2,
+    remaining_image_calls: 4,
+    resume_checkpoint: { signature: "a".repeat(64), max_image_calls: 6, actual_image_calls: 2 },
+  };
+  const result = persistDraftRecordWithReadback(storage, workspace, KEYS, {
+    generationSession: { ...session, image_resume: progress },
+    updatedAt: T1,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "WORKSPACE_DRAFT_SAVED_AND_VERIFIED");
+  assert.deepEqual(result.draft_record.generation_session.image_resume, progress);
+  assert.deepEqual(activeDraftRecord(loadWorkspaceEnvelope(storage, KEYS.envelope)).generation_session.image_resume, progress);
+});
+
+test("image continuation fails closed when same-source readback drifts after a successful write", () => {
+  const storage = memoryStorage();
+  const normalGet = storage.getItem;
+  let distortReadback = false;
+  const normalSet = storage.setItem;
+  storage.setItem = (key, value) => {
+    normalSet(key, value);
+    if (key === KEYS.generationSession) distortReadback = true;
+  };
+  storage.getItem = (key) => {
+    const value = normalGet(key);
+    if (!distortReadback || key !== KEYS.envelope || value == null) return value;
+    const parsed = JSON.parse(value);
+    parsed.updated_at = T0;
+    return JSON.stringify(parsed);
+  };
+  const session = fullSession();
+  const workspace = migrateLegacyWorkspaceState({
+    profile: createProfileV2(),
+    currentContent: assembledContent(session, "active"),
+    generationSession: session,
+    activeDraftId: "active",
+    createdAt: T0,
+  });
+  const result = persistDraftRecordWithReadback(storage, workspace, KEYS, {
+    generationSession: { ...session, image_resume: { ...session.image_resume, completed_mother_sheets: 2 } },
+    updatedAt: T1,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "WORKSPACE_READBACK_MISMATCH");
 });
 
 test("a failure in any projected write restores every preimage, including the old generation session", () => {

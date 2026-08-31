@@ -6,6 +6,7 @@ import {
   assertPublicGenerationResponseBudget,
   buildMissingUnitRepairJobs,
   buildStandaloneRepairPrompt,
+  generateImages,
   publicTileBudgetForResponse,
   signPublicImageCheckpoint,
   sliceStandaloneRepairForUnit,
@@ -14,7 +15,8 @@ import {
 } from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
-import { createPublicImageRun } from "../src/public-image-run.mjs";
+import { sha256Bytes } from "../src/ark-provider-core.mjs";
+import { createPublicImageRun, failPublicImageJob, startPublicImageJob } from "../src/public-image-run.mjs";
 import sharp from "sharp";
 
 function responseProbe() {
@@ -88,6 +90,41 @@ test("public image resume checkpoint is signed and rejects browser tampering", (
   const signed = signPublicImageCheckpoint(run, "test-key-123456");
   assert.equal(verifyPublicImageCheckpoint(signed, "test-key-123456", { draftId: "draft-1" }).run_id, run.run_id);
   assert.throws(() => verifyPublicImageCheckpoint({ ...signed, actual_image_calls: 1 }, "test-key-123456"), /SIGNATURE_INVALID/);
+  assert.throws(() => verifyPublicImageCheckpoint({ ...signed, max_image_calls: 60 }, "test-key-123456"), /CALL_LIMIT_INVALID|SIGNATURE_INVALID/);
+});
+
+test("the server returns a signed resumable budget error before any seventh upstream image call", async () => {
+  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
+  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-budget", created_at: new Date(0).toISOString(), source_input: "配图预算", text_requirements: "", prompt_context: {}, pillar: "wellness", goal: "save", titles: ["配图预算第一种清楚做法", "配图预算第二种清楚做法", "配图预算第三种清楚做法"], selected_title: "配图预算第一种清楚做法", body, tags: ["配图预算", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 1, facts: [], risks: [], generation: {} };
+  const unit = { unit_id: "page-1-hero", page_index: 0, panel_index: null };
+  let run = createPublicImageRun({
+    runId: "images-2026-08-31T08-00-00-000Z-badf00d1",
+    draftId: draft.draft_id,
+    draftSha256: sha256Bytes(Buffer.from(JSON.stringify(draft))),
+    productionMode: "smart",
+    finalPages: [{ title: "第一页" }],
+    illustrationUnits: [unit],
+    referenceFingerprint: sha256Bytes(Buffer.from(JSON.stringify({ references: [], note: "" }))),
+    jobs: [{ sheet_id: "mother-sheet-1", sheet_index: 0, units: [unit], job_kind: "mother_sheet" }],
+  });
+  for (let call = 0; call < 6; call += 1) run = failPublicImageJob(startPublicImageJob(run), { code: `TEST_${call + 1}` });
+  const apiKey = "test-key-123456";
+  const signed = signPublicImageCheckpoint(run, apiKey);
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => generateImages({ draft, production_mode: "smart", image_count: 1, resume_run_id: run.run_id, resume_checkpoint: signed, reference_images: [], reference_note: "" }, { apiKey, textModel: "text", imageModel: "image", credentialMode: "SERVER_MANAGED" }),
+      (error) => error.message === "IMAGE_CALL_BUDGET_EXHAUSTED"
+        && error.details?.resume_checkpoint?.signature
+        && error.details?.remaining_image_calls === 0
+        && error.details?.retry_scope === "NO_MORE_PAID_CALLS_IN_THIS_RUN",
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
 });
 
 test("page candidate contract accepts browser-local generated assets", () => {
