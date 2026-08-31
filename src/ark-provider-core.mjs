@@ -232,6 +232,9 @@ export function pagePlanRetryGuidance(error) {
   if (/XHS_HEADING_TYPO_REPEAT/.test(code)) {
     return `${pageLabel}出现了“养养法”一类相邻重复字。下一版逐字校对眉题、标题和panel标题，删除无语义的叠字，不改动已确认事实。`;
   }
+  if (/XHS_STEP_COUNT_MISMATCH/.test(code)) {
+    return `${pageLabel}标题声称的步骤数和本页实际图文单元数量不一致。下一版让“两步/三步/四步”与panel数量严格相等；若标题不是在概括本页全部panel，就删掉步骤数。`;
+  }
   if (/XHS_PANEL_COPY_BUDGET/.test(code)) {
     return `${pageLabel}的图文单元超过成品容量。下一版每个panel标题最多14字；2格页每格正文最多72字、3格页最多52字、4格页最多36字。宁可把内容分到下一页，也不要缩字或截断。`;
   }

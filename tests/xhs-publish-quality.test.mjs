@@ -39,3 +39,16 @@ test("publish gate rejects repeated section labels, typo repeats and overstuffed
   assert.ok(issues.some((issue) => issue.code === "XHS_HEADING_PREFIX_DUPLICATED"));
   assert.ok(issues.some((issue) => issue.code === "XHS_PANEL_COPY_BUDGET"));
 });
+
+test("publish gate rejects a claimed step count that disagrees with the visible panels", () => {
+  const mismatched = inspectXhsPublishQuality([
+    { page_role: "hook", eyebrow: "雨天日常", title: "初秋整理小书桌", info_panels: [] },
+    { page_role: "method", eyebrow: "桌面第一步清理", title: "两步清空多余杂物", info_panels: [panel(1), panel(2), panel(3)] },
+  ]);
+  assert.ok(mismatched.some((issue) => issue.code === "XHS_STEP_COUNT_MISMATCH"));
+  const corrected = inspectXhsPublishQuality([
+    { page_role: "hook", eyebrow: "雨天日常", title: "初秋整理小书桌", info_panels: [] },
+    { page_role: "method", eyebrow: "桌面第一步清理", title: "三步理顺书桌物品", info_panels: [panel(1), panel(2), panel(3)] },
+  ]);
+  assert.ok(!corrected.some((issue) => issue.code === "XHS_STEP_COUNT_MISMATCH"));
+});

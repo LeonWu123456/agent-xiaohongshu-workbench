@@ -17,6 +17,12 @@ function hasSuspiciousAdjacentRepeat(value) {
   return false;
 }
 
+function declaredStepCounts(page) {
+  const numeral = { "二": 2, "两": 2, "三": 3, "四": 4 };
+  return [page?.eyebrow, page?.title].flatMap((value) => [...String(value || "").matchAll(/(?<!第)([二两三四2-4])步/gu)]
+    .map((match) => numeral[match[1]] || Number(match[1])));
+}
+
 /**
  * A deterministic pre-publish scorecard. It checks information architecture,
  * not taste: the browser geometry and pixel gates remain separate authorities.
@@ -41,6 +47,9 @@ export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "" 
       return;
     }
     if (compact(page?.eyebrow) > 14 || compact(page?.title) > 18) issues.push({ code: "XHS_INNER_TITLE_BUDGET", page: index + 1 });
+    if (panels.length >= 2 && declaredStepCounts(page).some((count) => count !== panels.length)) {
+      issues.push({ code: "XHS_STEP_COUNT_MISMATCH", page: index + 1 });
+    }
     if (["method", "checklist", "pitfall"].includes(role) && (panels.length < 2 || panels.length > 4)) {
       issues.push({ code: "XHS_METHOD_UNITS_REQUIRED", page: index + 1 });
     }

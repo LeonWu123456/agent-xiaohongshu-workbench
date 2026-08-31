@@ -63,7 +63,11 @@ test("page titles keep short semantic phrases together while long phrases remain
     { text: " ", highlight: false, separator: true, keepTogether: false, breakBefore: false },
     { text: "留住松弛周末时光", highlight: false, separator: false, keepTogether: true, breakBefore: false },
   ]);
-  assert.equal(titleTextSegments("这是一个没有空格而且必须允许折行的超长标题", [], 7)[0].keepTogether, false);
+  assert.deepEqual(titleTextSegments("初秋雨天整理小书桌", ["初秋雨天整理小书桌"], 7), [
+    { text: "初秋雨天", highlight: true, separator: false, keepTogether: true, breakBefore: false },
+    { text: "整理小书桌", highlight: true, separator: false, keepTogether: true, breakBefore: true },
+  ]);
+  assert.equal(titleTextSegments("Supercalifragilisticexpialidocious", [], 7)[0].keepTogether, false);
 });
 
 test("HTML image state preserves supporting art by default and clamps manual focal edits", () => {

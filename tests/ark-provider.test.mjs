@@ -350,6 +350,9 @@ test("page-plan retry guidance turns production gate codes into bounded repair i
   assert.match(duplicated, /只保留一次层级编号/);
   const crowded = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_PANEL_COPY_BUDGET"));
   assert.match(crowded, /3格页最多52字/);
+  const mismatchedSteps = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_STEP_COUNT_MISMATCH"));
+  assert.match(mismatchedSteps, /步骤数和本页实际图文单元数量不一致/);
+  assert.match(mismatchedSteps, /panel数量严格相等/);
 });
 
 test("two-node flow generates editable text before any image plan", () => {
