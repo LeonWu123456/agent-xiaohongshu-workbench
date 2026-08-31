@@ -591,6 +591,64 @@ function normalizePage(page, index) {
   };
 }
 
+function optionalGenerationInteger(value, path, max = 100_000_000) {
+  if (value == null) return null;
+  if (!Number.isInteger(value) || value < 0 || value > max) throw new TypeError(`${path} must be a bounded non-negative integer`);
+  return value;
+}
+
+function optionalGenerationHashList(value, path, maxItems = 64) {
+  if (value == null) return null;
+  if (!Array.isArray(value) || value.length > maxItems || value.some((item) => typeof item !== "string" || !/^[0-9a-f]{64}$/.test(item))) throw new TypeError(`${path} must contain sha256 values`);
+  return [...value];
+}
+
+function normalizeGeneration(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { mode: "DEMO_TEMPLATE", provider: null, notice: "演示模板，不是 AI 生成" };
+  const generation = {
+    mode: requireEnum(value.mode, new Set(["DEMO_TEMPLATE", "PROVIDER"]), "generation.mode"),
+    provider: value.provider == null ? null : requireString(value.provider, "generation.provider"),
+    ...(value.production_mode == null ? {} : { production_mode: normalizeProductionMode(value.production_mode, "generation.production_mode") }),
+    notice: requireString(value.notice, "generation.notice"),
+  };
+  if (value.run_id != null) generation.run_id = requireString(value.run_id, "generation.run_id").slice(0, 120);
+  if (value.strategy != null) generation.strategy = requireString(value.strategy, "generation.strategy").slice(0, 80);
+  for (const [field, max] of Object.entries({
+    mother_sheet_count: 64,
+    illustration_unit_count: 64,
+    actual_image_calls: 128,
+    tile_transport_budget_bytes: 4_000_000,
+    repaired_missing_unit_count: 64,
+    repair_mother_sheet_count: 64,
+    standalone_repair_count: 64,
+    response_size_bytes: 8_000_000,
+  })) {
+    const normalized = optionalGenerationInteger(value[field], `generation.${field}`, max);
+    if (normalized != null) generation[field] = normalized;
+  }
+  if (value.estimated_image_cost_cny != null) {
+    const cost = Number(value.estimated_image_cost_cny);
+    if (!Number.isFinite(cost) || cost < 0 || cost > 1000) throw new TypeError("generation.estimated_image_cost_cny must be bounded");
+    generation.estimated_image_cost_cny = Number(cost.toFixed(2));
+  }
+  for (const field of ["mother_sheet_sha256", "tile_sha256", "standalone_repair_sha256"]) {
+    const hashes = optionalGenerationHashList(value[field], `generation.${field}`);
+    if (hashes) generation[field] = hashes;
+  }
+  if (value.page_plan_attempts != null) {
+    if (!Array.isArray(value.page_plan_attempts) || value.page_plan_attempts.length > 3) throw new TypeError("generation.page_plan_attempts must contain at most three attempts");
+    generation.page_plan_attempts = value.page_plan_attempts.map((attempt, index) => {
+      if (!attempt || typeof attempt !== "object" || Array.isArray(attempt) || !Number.isInteger(attempt.attempt) || attempt.attempt !== index + 1 || !new Set(["PASS", "REJECTED"]).has(attempt.status)) throw new TypeError(`generation.page_plan_attempts[${index}] is invalid`);
+      return {
+        attempt: attempt.attempt,
+        status: attempt.status,
+        ...(attempt.rejection_code == null ? {} : { rejection_code: String(attempt.rejection_code).slice(0, 180) }),
+      };
+    });
+  }
+  return generation;
+}
+
 export function parseContentPackage(serialized) {
   let value;
   try {
@@ -666,14 +724,7 @@ export function parseContentPackage(serialized) {
     visible_pages: expectedVisiblePages,
     lineage,
     review,
-    generation: value.generation && typeof value.generation === "object"
-      ? {
-        mode: requireEnum(value.generation.mode, new Set(["DEMO_TEMPLATE", "PROVIDER"]), "generation.mode"),
-        provider: value.generation.provider == null ? null : requireString(value.generation.provider, "generation.provider"),
-        ...(value.generation.production_mode == null ? {} : { production_mode: normalizeProductionMode(value.generation.production_mode, "generation.production_mode") }),
-        notice: requireString(value.generation.notice, "generation.notice"),
-      }
-      : { mode: "DEMO_TEMPLATE", provider: null, notice: "演示模板，不是 AI 生成" },
+    generation: normalizeGeneration(value.generation),
   };
 
   if (value.content_strategy != null) contentPackage.content_strategy = normalizeContentStrategy(value.content_strategy);

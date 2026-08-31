@@ -3,6 +3,7 @@ import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidate
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const CLOUD_SETTINGS_KEY = "xiaoshimei-studio.byok-provider.v1";
 const CLOUD_KEY = "xiaoshimei-studio.byok-api-key.v1";
+const CLOUD_VERIFIED_KEY = "xiaoshimei-studio.byok-verified.v1";
 const CLOUD_DEFAULTS = Object.freeze({
   provider: "volcengine-ark",
   provider_label: "火山方舟",
@@ -30,6 +31,19 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     return { ...CLOUD_DEFAULTS, ...stored, configured: apiKey.trim().length >= 8 };
   };
 
+  const settingsSignature = (settings) => [settings?.provider, settings?.base_url, settings?.text_model, settings?.image_model].join("|");
+  const cloudVerification = (settings) => {
+    if (!settings?.configured) return null;
+    try {
+      const value = JSON.parse(globalThis.sessionStorage?.getItem(CLOUD_VERIFIED_KEY) || "null");
+      return value?.signature === settingsSignature(settings) && value?.verified_at ? value : null;
+    } catch { return null; }
+  };
+  const markCloudVerified = (settings) => {
+    if (!settings?.configured) return;
+    globalThis.sessionStorage?.setItem(CLOUD_VERIFIED_KEY, JSON.stringify({ signature: settingsSignature(settings), verified_at: new Date().toISOString() }));
+  };
+
   const post = async (target, body) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -48,6 +62,7 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         error.providerDetails = payload?.details && typeof payload.details === "object" ? structuredClone(payload.details) : null;
         throw error;
       }
+      if (settings) markCloudVerified(settings);
       return payload;
     } finally { clearTimeout(timer); }
   };
@@ -71,7 +86,15 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         const response = await fetchImpl(healthUrl, { method: "GET", signal: controller.signal, cache: "no-store" });
         const payload = await response.json();
         if (!response?.ok) throw new Error(`provider health failed: HTTP_${response?.status || "UNKNOWN"}`);
-        return isLoopback ? payload : { ...payload, ...cloudSettings() };
+        if (isLoopback) return payload;
+        const settings = cloudSettings();
+        const verified = cloudVerification(settings);
+        return {
+          ...payload,
+          ...settings,
+          status: verified ? "LIVE_VERIFIED" : settings.configured ? "CONFIGURED_UNVERIFIED" : payload.status,
+          last_success_at: verified?.verified_at || null,
+        };
       } finally { clearTimeout(timer); }
     },
     async getSettings() {
@@ -88,9 +111,11 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         const imageModel = String(input?.image_model || "").trim();
         if (!/^[A-Za-z0-9_.:-]{3,120}$/.test(textModel) || !/^[A-Za-z0-9_.:-]{3,120}$/.test(imageModel)) throw new TypeError("请填写有效的文字与图片模型 ID");
         const next = { ...CLOUD_DEFAULTS, provider_label: String(input?.label || "火山方舟").trim().slice(0, 40) || "火山方舟", text_model: textModel, image_model: imageModel };
+        const previous = cloudSettings();
         globalThis.sessionStorage?.setItem(CLOUD_SETTINGS_KEY, JSON.stringify(next));
         const key = String(input?.api_key || "").trim();
         if (key) globalThis.sessionStorage?.setItem(CLOUD_KEY, key);
+        if (key || settingsSignature(previous) !== settingsSignature(next)) globalThis.sessionStorage?.removeItem(CLOUD_VERIFIED_KEY);
         return cloudSettings();
       }
       return post(configUrl, input);

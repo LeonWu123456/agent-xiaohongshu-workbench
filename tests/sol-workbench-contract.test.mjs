@@ -6,6 +6,7 @@ const mainUrl = new URL("../src/main.jsx", import.meta.url);
 const matureEditorUrl = new URL("../src/MaturePageEditor.jsx", import.meta.url);
 const htmlEditorUrl = new URL("../src/HtmlPageEditor.jsx", import.meta.url);
 const cssUrl = new URL("../src/styles.css", import.meta.url);
+const pageContractCssUrl = new URL("../src/xhs-page-contract.css", import.meta.url);
 const arkProviderServerUrl = new URL("../scripts/ark-provider-server.mjs", import.meta.url);
 
 test("workbench keeps one journey navigator and removes duplicate summary chrome", async () => {
@@ -18,7 +19,7 @@ test("workbench keeps one journey navigator and removes duplicate summary chrome
 });
 
 test("creator expansion cannot squeeze the desktop canvas again", async () => {
-  const css = await readFile(cssUrl, "utf8");
+  const css = `${await readFile(cssUrl, "utf8")}\n${await readFile(pageContractCssUrl, "utf8")}`;
   assert.match(css, /\.workbench\.is-creator-open \{ grid-template-columns: minmax\(560px,1fr\) 430px; \}/);
   assert.match(css, /\.slide-frame \{ width: min\(100%, 450px\)/);
   assert.match(css, /\.info-asset-picker/);
@@ -36,7 +37,7 @@ test("one page state can use HTML smart flow and Fabric precision editing withou
   const source = await readFile(mainUrl, "utf8");
   const editor = await readFile(matureEditorUrl, "utf8");
   const htmlEditor = await readFile(htmlEditorUrl, "utf8");
-  const css = await readFile(cssUrl, "utf8");
+  const css = `${await readFile(cssUrl, "utf8")}\n${await readFile(pageContractCssUrl, "utf8")}`;
   const providerServer = await readFile(arkProviderServerUrl, "utf8");
   assert.match(source, /MaturePageEditor, renderMaturePageToPng/);
   assert.match(source, /HtmlPageEditor, renderHtmlPageToPng/);
@@ -85,15 +86,15 @@ test("one page state can use HTML smart flow and Fabric precision editing withou
   assert.match(editor, /exportCanvasAsImageFile/);
   assert.match(css, /\.mature-editor__toolbar/);
   assert.match(css, /\.mature-editor__stage/);
-  assert.match(css, /font-size: 5\.7cqw/);
-  assert.match(css, /border-radius: clamp\(5px, 1\.15cqw, 10px\) !important/);
-  assert.match(css, /aspect-ratio: var\(--image-aspect, 3 \/ 4\) !important/);
-  assert.match(css, /height: auto !important/);
-  assert.match(css, /translate\(var\(--object-x\), var\(--object-y\)\) scale\(var\(--object-scale\)\) !important/);
+  assert.match(css, /font-size: 3\.3cqw/);
+  assert.match(css, /border-radius: 0/);
+  assert.match(css, /aspect-ratio: 3 \/ 4/);
+  assert.match(css, /height: auto/);
+  assert.match(css, /translate\(var\(--object-x\), var\(--object-y\)\) scale\(var\(--object-scale\)\)/);
   assert.match(css, /inset: 0/);
   assert.match(css, /width: 100%/);
   assert.doesNotMatch(css, /inset: -8%/);
-  assert.match(css, /data-page-role="closing"/);
+  assert.match(css, /data-page-role="hook"/);
   assert.doesNotMatch(source, /from "react-moveable"/);
   assert.doesNotMatch(source, /function SelectionMoveable/);
   assert.doesNotMatch(source, /function DirectImageFrame/);
@@ -106,49 +107,45 @@ test("one page state can use HTML smart flow and Fabric precision editing withou
 });
 
 test("published pages use 3:4 white art, opposite-edge copy alignment, orange defaults, and no page number", async () => {
-  const [htmlSource, matureSource, cssSource, contentSource, mainSource] = await Promise.all([
+  const [htmlSource, matureSource, cssSource, legacyCssSource, contentSource, mainSource] = await Promise.all([
     readFile(new URL("../src/HtmlPageEditor.jsx", import.meta.url), "utf8"),
     readFile(new URL("../src/MaturePageEditor.jsx", import.meta.url), "utf8"),
+    readFile(pageContractCssUrl, "utf8"),
     readFile(new URL("../src/styles.css", import.meta.url), "utf8"),
     readFile(new URL("../src/content-engine.mjs", import.meta.url), "utf8"),
     readFile(mainUrl, "utf8"),
   ]);
-  assert.match(cssSource, /aspect-ratio: 3 \/ 4 !important/);
+  assert.match(cssSource, /aspect-ratio: 3 \/ 4/);
   assert.match(cssSource, /background: #ffffff !important/);
   assert.match(cssSource, /nth-child\(2n \+ 1\)[\s\S]*text-align: left/);
   assert.match(cssSource, /nth-child\(2n\)[\s\S]*text-align: right/);
-  assert.match(cssSource, /every copy\/image pair owns one row/);
-  assert.match(cssSource, /data-panel-count="3"[\s\S]*height: 100% !important/);
+  assert.match(cssSource, /single executable geometry authority/);
+  assert.doesNotMatch(legacyCssSource, /^\.html-page/m);
   assert.match(htmlSource, /PANEL_CHILD_ESCAPE/);
   assert.match(htmlSource, /CROSS_PANEL_OVERLAP/);
   assert.match(htmlSource, /ESSAY_TEXT_IMAGE_OVERLAP/);
   assert.match(htmlSource, /COVER_HEADER_LEDE_OVERLAP/);
   assert.match(htmlSource, /COVER_LEDE_IMAGE_OVERLAP/);
   assert.match(htmlSource, /IMAGE_ASPECT_MISMATCH/);
-  assert.match(cssSource, /XHS editorial contract v9/);
-  assert.match(cssSource, /XHS editorial contract v10/);
-  assert.match(cssSource, /XHS editorial contract v11/);
-  assert.match(cssSource, /XHS editorial contract v12/);
-  assert.match(cssSource, /XHS editorial contract v14/);
-  assert.match(cssSource, /XHS editorial contract v15/);
+  assert.match(cssSource, /Xiaoshimei XHS page contract v1/);
   assert.match(cssSource, /height: 33\.333%/);
-  assert.match(cssSource, /height: 66\.667% !important/);
-  assert.match(cssSource, /aspect-ratio: 9 \/ 8 !important/);
+  assert.match(cssSource, /height: 66\.667%/);
+  assert.match(cssSource, /aspect-ratio: 9 \/ 8/);
   assert.match(cssSource, /--xsm-orange-display: #fd8502/);
-  assert.match(cssSource, /grid-template-columns: minmax\(0, 1fr\) auto !important/);
-  assert.match(cssSource, /grid-template-columns: auto minmax\(0, 1fr\) !important/);
-  assert.match(cssSource, /data-title-length="long"[\s\S]*white-space: normal !important/);
-  assert.match(cssSource, /data-layout="cover-poster"[\s\S]*html-page__title-phrase[\s\S]*white-space: normal !important/);
-  assert.match(cssSource, /data-panel-count="3"[\s\S]*width: 21\.75cqw !important; height: 29cqw !important/);
-  assert.match(cssSource, /data-image-edge="left-first"[\s\S]*grid-template-columns: auto minmax\(0, 1fr\) !important/);
+  assert.match(cssSource, /grid-template-columns: minmax\(0, 1fr\) auto/);
+  assert.match(cssSource, /grid-template-columns: auto minmax\(0, 1fr\)/);
+  assert.match(cssSource, /html-page__title-phrase\.is-phrase-kept[\s\S]*white-space: nowrap/);
+  assert.match(cssSource, /html-page__title-phrase\.is-phrase-breakable[\s\S]*white-space: normal/);
+  assert.match(cssSource, /data-panel-count="3"[\s\S]*width: 21\.75cqw/);
+  assert.doesNotMatch(cssSource, /data-panel-count="3"[^\n]*height:/);
+  assert.match(cssSource, /data-image-edge="left-first"[\s\S]*grid-template-columns: auto minmax\(0, 1fr\)/);
   assert.match(htmlSource, /html-page__title-phrase/);
   assert.match(htmlSource, /html-page__title-phrase--plain/);
   assert.match(mainSource, /copyTextToClipboard/);
   assert.match(mainSource, /CLIPBOARD_WRITE_FAILED/);
   assert.match(htmlSource, /\.html-page mark/);
   assert.match(htmlSource, /getClientRects\(\)\.length > 0/);
-  assert.match(cssSource, /data-page-role="closing"\]\[data-layout="cover-poster"\][\s\S]*html-page__cover-lede/);
-  assert.match(cssSource, /\.html-page__footer \{ display: none !important; \}/);
+  assert.match(cssSource, /\.html-page__footer,[\s\S]*display: none !important/);
   assert.doesNotMatch(htmlSource, /<footer className="html-page__footer">/);
   assert.doesNotMatch(matureSource, /\["page_number",/);
   assert.match(matureSource, /removeLegacyPageNumbers/);

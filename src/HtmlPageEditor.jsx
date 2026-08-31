@@ -7,6 +7,7 @@ import {
 import {
   HTML_IMAGE_ZOOM_MAX, bodyParagraphs, editorialPanelMeta, highlightTextSegments, imageEditFor, layoutsForPage, nextHtmlLayout, normalizeHtmlState,
   objectDragEdit, objectEditFor, objectTransformStyle, updateImageEdit, updateObjectEdit,
+  titleTextSegments,
 } from "./html-layout.mjs";
 import { assertRenderedImageRegions, assertRenderedPageContent } from "./export-image-verification.mjs";
 import { rectContainedBy, rectsIntersect } from "./layout-qa.mjs";
@@ -132,6 +133,20 @@ export function inspectHtmlPageLayout(pageElement) {
        at the viewport origin and used to create a false HORIZONTAL_OVERFLOW
        warning even after a successful export. */
     .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
+  const textBlocks = [...pageElement.querySelectorAll(".html-page__eyebrow, .html-page__title, .html-page__panel-copy h2, .html-page__panel-copy p, .html-page__body p")]
+    .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
+  textBlocks.forEach((element) => {
+    const style = getComputedStyle(element);
+    const clipsOwnBox = ((style.overflowX !== "visible" && element.scrollWidth > element.clientWidth + 1)
+      || (style.overflowY !== "visible" && element.scrollHeight > element.clientHeight + 1));
+    const container = element.closest(".html-page__panel-copy, .html-page__header, .html-page__body");
+    const escapesContainer = container && container !== element
+      ? !rectContainedBy(element.getBoundingClientRect(), container.getBoundingClientRect(), 2)
+      : false;
+    if (clipsOwnBox || escapesContainer) {
+      reasons.push(`TEXT_CLIPPED:${element.className || element.tagName}`);
+    }
+  });
   content.forEach((element) => {
     const rect = element.getBoundingClientRect();
     const identity = element.dataset.panelId || element.dataset.imageId || element.className;
@@ -200,13 +215,22 @@ function HighlightedText({ value, phrases = [] }) {
     : <React.Fragment key={`${index}-${segment.text}`}>{segment.text}</React.Fragment>);
 }
 
-function PhraseSafeTitle({ value, phrases = [] }) {
-  return highlightTextSegments(value, phrases).map((segment, index) => segment.highlight
-    ? <span className="html-page__title-phrase" key={`${index}-${segment.text}`}><mark>{segment.text}</mark></span>
-    : <span className="html-page__title-phrase html-page__title-phrase--plain" key={`${index}-${segment.text}`}>{segment.text}</span>);
+function PhraseSafeTitle({ value, phrases = [], maxUnbrokenLength = 10 }) {
+  return titleTextSegments(value, phrases, maxUnbrokenLength).map((segment, index) => {
+    if (segment.separator) return <React.Fragment key={`${index}-space`}>{segment.text}</React.Fragment>;
+    const className = [
+      "html-page__title-phrase",
+      segment.highlight ? "" : "html-page__title-phrase--plain",
+      segment.keepTogether ? "is-phrase-kept" : "is-phrase-breakable",
+    ].filter(Boolean).join(" ");
+    return <React.Fragment key={`${index}-${segment.text}`}>
+      {segment.breakBefore && <wbr />}
+      <span className={className}>{segment.highlight ? <mark>{segment.text}</mark> : segment.text}</span>
+    </React.Fragment>;
+  });
 }
 
-function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, multiline = true, highlightPhrases = [], phraseSafe = false }) {
+function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, multiline = true, highlightPhrases = [], phraseSafe = false, phraseSafeMaxLength = 10 }) {
   return <Tag
     className={className}
     contentEditable
@@ -226,7 +250,7 @@ function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, m
       const next = cleanEditableText(event.currentTarget, phraseSafe);
       if (next && next !== String(value || "").trim()) onCommit(next);
     }}
-  >{phraseSafe ? <PhraseSafeTitle value={value} phrases={highlightPhrases} /> : <HighlightedText value={value} phrases={highlightPhrases} />}</Tag>;
+  >{phraseSafe ? <PhraseSafeTitle value={value} phrases={highlightPhrases} maxUnbrokenLength={phraseSafeMaxLength} /> : <HighlightedText value={value} phrases={highlightPhrases} />}</Tag>;
 }
 
 function cssAspectRatio(value) {
@@ -406,8 +430,8 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
         ? <p className="html-page__eyebrow">{page.eyebrow}</p>
         : <EditableText key={`eyebrow-${page.eyebrow}`} as="p" className="html-page__eyebrow" value={page.eyebrow} multiline={false} onSelect={() => onSelectObject?.("title-block")} onCommit={(eyebrow) => onPagePatch?.({ eyebrow })} />}
       {renderOnly
-        ? <h1 className="html-page__title"><PhraseSafeTitle value={page.title} phrases={page.highlight_phrases} /></h1>
-        : <EditableText key={`title-${page.title}`} as="h1" className="html-page__title" value={page.title} highlightPhrases={page.highlight_phrases} phraseSafe onSelect={() => onSelectObject?.("title-block")} onCommit={(title) => onPagePatch?.({ title })} />}
+        ? <h1 className="html-page__title"><PhraseSafeTitle value={page.title} phrases={page.highlight_phrases} maxUnbrokenLength={isPrimaryCover ? 7 : 10} /></h1>
+        : <EditableText key={`title-${page.title}`} as="h1" className="html-page__title" value={page.title} highlightPhrases={page.highlight_phrases} phraseSafe phraseSafeMaxLength={isPrimaryCover ? 7 : 10} onSelect={() => onSelectObject?.("title-block")} onCommit={(title) => onPagePatch?.({ title })} />}
     </header>
 
     {state.layout_id === "cover-poster" && <div className={`html-page__cover-lede html-editor-object ${selectedObject === "cover-lede" ? "is-object-selected" : ""}`} data-editor-object-id="cover-lede" style={objectTransformStyle(state, "cover-lede")} {...objectMoveHandlers("cover-lede")}>

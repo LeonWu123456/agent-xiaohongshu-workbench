@@ -125,6 +125,51 @@ test("local HTTP provider exposes a bounded health check for visible UI status",
   assert.equal(health.status, "LIVE_VERIFIED");
 });
 
+test("public provider reports configured separately from a verified successful call", async () => {
+  const previousLocation = globalThis.location;
+  const previousSessionStorage = globalThis.sessionStorage;
+  const values = new Map();
+  Object.defineProperty(globalThis, "location", { configurable: true, value: new URL("https://studio.example/") });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  } });
+  try {
+    const provider = createLocalHttpProvider({
+      endpoint: "https://studio.example/api/provider/generate",
+      fetchImpl: async (url) => ({
+        ok: true,
+        status: 200,
+        json: async () => String(url).endsWith("/health")
+          ? { status: "AWAITING_BYOK", configured: false }
+          : generateContentPackage({ topic: "真实成功才算验证" }),
+      }),
+    });
+    await provider.updateSettings({
+      provider: "volcengine-ark",
+      api_key: "test-key-123456",
+      text_model: "doubao-text",
+      image_model: "doubao-image",
+    });
+    assert.equal((await provider.checkHealth()).status, "CONFIGURED_UNVERIFIED");
+    await provider.generate({ topic: "调用成功", profile_contract: { schema: "test" } });
+    const verified = await provider.checkHealth();
+    assert.equal(verified.status, "LIVE_VERIFIED");
+    assert.ok(verified.last_success_at);
+    await provider.updateSettings({
+      provider: "volcengine-ark",
+      api_key: "replacement-key-123456",
+      text_model: "doubao-text",
+      image_model: "doubao-image",
+    });
+    assert.equal((await provider.checkHealth()).status, "CONFIGURED_UNVERIFIED");
+  } finally {
+    Object.defineProperty(globalThis, "location", { configurable: true, value: previousLocation });
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: previousSessionStorage });
+  }
+});
+
 test("page candidate requests stay typed, loopback-only and require exactly three evidenced images", async () => {
   let target;
   const provider = createLocalHttpProvider({

@@ -1,7 +1,7 @@
 import { mediaPolicyFor, panelPreferredAspect } from "./media-role.mjs";
 import { designProgramLayout, normalizeDesignProgram } from "./design-program.mjs";
 
-export const HTML_LAYOUT_STATE_VERSION = 11;
+export const HTML_LAYOUT_STATE_VERSION = 12;
 const HTML_ROLE_LAYOUT_MIGRATION_VERSION = 9;
 export const HTML_IMAGE_FOCAL_MIN = 12;
 export const HTML_IMAGE_FOCAL_MAX = 88;
@@ -94,6 +94,63 @@ export function highlightTextSegments(value, phrases = []) {
     cursor = range.end;
   });
   if (cursor < text.length) segments.push({ text: text.slice(cursor), highlight: false });
+  return segments;
+}
+
+function semanticTitleChunks(value, limit) {
+  const text = String(value || "");
+  const length = [...text].length;
+  if (!text || length <= limit || /\s/u.test(text) || typeof Intl?.Segmenter !== "function") return [text];
+  const words = [...new Intl.Segmenter("zh", { granularity: "word" }).segment(text)]
+    .map((item) => item.segment)
+    .filter(Boolean);
+  if (words.length < 2 || words.some((word) => [...word].length > limit)) return [text];
+  const lineCount = Math.ceil(length / limit);
+  const idealLength = length / lineCount;
+  const states = Array.from({ length: lineCount + 1 }, () => new Map());
+  states[0].set(0, { score: 0, chunks: [] });
+  for (let line = 0; line < lineCount; line += 1) {
+    states[line].forEach((state, start) => {
+      let chunk = "";
+      for (let end = start; end < words.length; end += 1) {
+        chunk += words[end];
+        const chunkLength = [...chunk].length;
+        if (chunkLength > limit) break;
+        const wordsLeft = words.length - end - 1;
+        const linesLeft = lineCount - line - 1;
+        if (wordsLeft < linesLeft) continue;
+        const nextScore = state.score + ((chunkLength - idealLength) ** 2);
+        const previous = states[line + 1].get(end + 1);
+        if (!previous || nextScore < previous.score) {
+          states[line + 1].set(end + 1, { score: nextScore, chunks: [...state.chunks, chunk] });
+        }
+      }
+    });
+  }
+  return states[lineCount].get(words.length)?.chunks || [text];
+}
+
+export function titleTextSegments(value, phrases = [], maxUnbrokenLength = 10) {
+  const limit = Math.max(2, Number(maxUnbrokenLength) || 10);
+  const segments = [];
+  highlightTextSegments(value, phrases).forEach((segment, segmentIndex) => {
+    String(segment.text || "").split(/(\s+)/u).filter(Boolean).forEach((text, pieceIndex) => {
+      const separator = /^\s+$/u.test(text);
+      if (separator) {
+        segments.push({ text, highlight: segment.highlight, separator: true, keepTogether: false, breakBefore: false });
+        return;
+      }
+      semanticTitleChunks(text, limit).forEach((chunk, chunkIndex) => {
+        segments.push({
+          text: chunk,
+          highlight: segment.highlight,
+          separator: false,
+          keepTogether: [...chunk].length <= limit,
+          breakBefore: chunkIndex > 0 || (pieceIndex === 0 && segmentIndex > 0),
+        });
+      });
+    });
+  });
   return segments;
 }
 

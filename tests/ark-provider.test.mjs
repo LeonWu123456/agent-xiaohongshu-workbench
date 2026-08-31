@@ -131,8 +131,11 @@ test("eye-care page plans allow preparation pages without forcing an eye into ev
     { page_role: "closing", eyebrow: "远眺收尾", title: "移开双手再望向远处", body: "约三十秒后缓慢移开双手，站到窗边望向远处；若疼痛、红肿、畏光或视力变化，立即停止并咨询医生。", visual_action: "小师妹站在窗边望向远处的树木", image_prompt: "竖幅三比四中景，小师妹站在木窗边，双手自然垂在身侧，眼睛望向窗外远处的树木，身体放松，低饱和暖光，左侧留白，不出现文字、水印或第二个人。" },
   ];
   assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages }) }] }, 4, { topic: "刷手机后眼睛发紧", pillar: "wellness", goal: "save" }).length, 4);
+  const shortCoverPages = structuredClone(pages);
+  shortCoverPages[0].body = "刷屏后先让视线离开手机一会儿";
+  assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: shortCoverPages }) }] }, 4, { topic: "刷手机后眼睛发紧", pillar: "wellness", goal: "save" })[0].body, shortCoverPages[0].body);
   const request = buildArkPagePlanRequest({ selected_title: "刷手机后先让眼睛休息", body: "正文".repeat(140), tags: ["护眼"], source_input: "眼睛发紧", prompt_context: {} }, 4, "doubao-text");
-  assert.equal(request.tools[0].parameters.properties.pages.items.properties.body.minLength, 35);
+  assert.equal(request.tools[0].parameters.properties.pages.items.properties.body.minLength, 12);
   assert.match(request.input[0].content, /35–160个汉字/);
 });
 
@@ -303,6 +306,31 @@ test("text retry guidance repairs the failure class without echoing the rejected
   const request = buildArkDraftTextRequest({ ...input(), pillar: "wellness", topic: "工作太久眼睛发紧，如何用3分钟离屏恢复状态", text_requirements: "" }, "doubao-text");
   assert.doesNotMatch(request.input[0].content, /不用复杂工具/);
   assert.match(request.input[0].content, /至少3个顺序动作/);
+  assert.match(request.input[0].content, /20个JavaScript字符/);
+  assert.match(request.input[0].content, /不得添加原文没有的具体物品/);
+  assert.match(request.input[0].content, /不写产品汇报腔、AI总结腔或品牌口号/);
+  const fullSource = "初秋下雨的周末，只想从书桌这一小块开始。先把不属于这里的东西放回原位，再留下纸笔、茶杯和一本书；然后擦去浮灰，把线材和零碎小物收进固定位置；最后点暖灯、泡茶、写三行今天想做的事。整理不是为了拍出完美房间，而是让人重新愿意坐下来。";
+  const fullSourceRequest = buildArkDraftTextRequest({ ...input(), topic: fullSource, text_requirements: "忠于原文" }, "doubao-text");
+  assert.match(fullSourceRequest.input[0].content, /主题资料是一段完整原文/);
+  assert.match(fullSourceRequest.input[0].content, /不为凑字数补充新信息/);
+  const longTitles = ["初秋雨天周末从书桌开始轻整理不折腾整个屋子", ...planValue().titles.slice(1)];
+  const longDraft = { ...planValue(), titles: longTitles, selected_title: longTitles[0], recommended_image_count: 3 };
+  delete longDraft.pages;
+  const longResponse = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(longDraft) }] };
+  assert.throws(() => extractArkTextDraft(longResponse, input()), /TEXT_QUALITY_GATE_FAILED:titles:length/);
+  const titleLength = textQualityRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:titles:length"));
+  assert.match(titleLength, /20个JavaScript字符以内/);
+  assert.match(titleLength, /不得.*补写原文没有/);
+  const sludgeDraft = { ...planValue(), body: `${planValue().body}\n\n这套方法适配松弛生活氛围。`, recommended_image_count: 3 };
+  delete sludgeDraft.pages;
+  const sludgeResponse = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(sludgeDraft) }] };
+  assert.throws(() => extractArkTextDraft(sludgeResponse, input()), /TEXT_QUALITY_GATE_FAILED:publish_copy:editorial_sludge/);
+  assert.match(textQualityRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:publish_copy:editorial_sludge:适配松弛生活氛围")), /直接写人、物和动作/);
+  const overExpanded = { ...planValue(), body: planValue().body.repeat(2), recommended_image_count: 3 };
+  delete overExpanded.pages;
+  const overExpandedResponse = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(overExpanded) }] };
+  assert.throws(() => extractArkTextDraft(overExpandedResponse, { ...input(), topic: fullSource }), /TEXT_QUALITY_GATE_FAILED:body:source_expansion/);
+  assert.match(textQualityRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:body:source_expansion:300\/220")), /只做压缩、重组和润色/);
 });
 
 test("page-plan retry guidance turns production gate codes into bounded repair instructions", () => {
@@ -313,7 +341,18 @@ test("page-plan retry guidance turns production gate codes into bounded repair i
   const layout = pagePlanRetryGuidance(new Error("PAGE_PLAN_LAYOUT_BUDGET_FAILED:0:eyebrow=8\/10:title=19\/16:body=70\/160"));
   assert.match(layout, /第1页/);
   assert.match(layout, /封面页眉最多10字、标题最多16字/);
+  assert.match(layout, /内页页眉最多14字、标题最多18字/);
   assert.doesNotMatch(layout, /PAGE_PLAN_LAYOUT_BUDGET_FAILED/);
+  const shortCover = pagePlanRetryGuidance(new Error("PAGE_PLAN_BODY_TOO_SHORT:0"));
+  assert.match(shortCover, /12–60字/);
+  assert.match(shortCover, /不要为凑35字/);
+  const duplicated = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:2:XHS_HEADING_PREFIX_DUPLICATED"));
+  assert.match(duplicated, /只保留一次层级编号/);
+  const crowded = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_PANEL_COPY_BUDGET"));
+  assert.match(crowded, /3格页最多52字/);
+  const mismatchedSteps = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_STEP_COUNT_MISMATCH"));
+  assert.match(mismatchedSteps, /步骤数和本页实际图文单元数量不一致/);
+  assert.match(mismatchedSteps, /panel数量严格相等/);
 });
 
 test("two-node flow generates editable text before any image plan", () => {
