@@ -1,6 +1,6 @@
 # 小师妹 Studio｜GitHub → Vercel 生产手册
 
-更新时间：2026-08-30
+更新时间：2026-08-31
 
 ## 单一权威链
 
@@ -114,3 +114,18 @@
 | Preview URL | `https://xiaoshimei-full-workbench-kodvqmfy3-892350620-5733s-projects.vercel.app/`（Vercel Authentication 保护） |
 | Preview readback | 登录态浏览器实际打开并显示“小师妹 Studio”；新稿、创作阶段、回载入口与 Provider “离线”状态可见；无错误覆盖层 |
 | not yet proven | 尚未向 Preview 上传本地稿；尚未输入 BYOK、产生新母版、复核真实分界、下载 Preview ZIP；不得提升 Production |
+
+## 2026-08-31 根治版 Production 应用
+
+| 字段 | 值 |
+|---|---|
+| source commit | `8ad523b31e72c35b52f2b4ea98050077ad0c83bb`；PR `#3` 合并为 `b1c9af41c4139756c520fc04f54e1c81b5dfb83e`；`main` 与发布源 tree 均为 `07d632ced7599321e7f4cfe82b2f5b14dd9b3840` |
+| GitHub QA | 分支 CI `33358315728` PASS；`main` CI `33359028594` PASS；275/275 tests 与 Vite production build PASS |
+| Preview deployment | `dpl_36WGLvbRwtoAmMnESrk29oXZiSJP` · Ready；`https://xiaoshimei-full-workbench-5zlsj6kqr-892350620-5733s-projects.vercel.app/` |
+| Preview real QA | 真实 BYOK 生成 5 页 / 11 个插图单元；浏览器完成文案修订、编辑与发布包下载；`~/Downloads/小师妹-发布包-2026-08-31T04-49-37-937Z-1.zip` CRC PASS，5 张 PNG 均为 1080×1440，SHA-256 `00ce959ffcbbab63ad0a2a553cae40e875faa285ff33f7977a8954d410d14a67` |
+| Production deployment | `dpl_D4aZhhd2XQqTgZ1NEmamqusxn758` · Ready / Promoted；`originalDeploymentId=dpl_36WGLvbRwtoAmMnESrk29oXZiSJP` |
+| stable-domain readback | `https://xiaoshimei-full-workbench.vercel.app/` HTTP 200；390px 无横向溢出，五阶段、新创作、回载与下载入口可见；health 200 `AWAITING_BYOK`；无 Key 401 `ARK_API_KEY_REQUIRED`；真实 BYOK 文案生成 200，Provider `volcengine-ark`，状态 `TEXT_READY_FOR_USER_CONFIRMATION` |
+| asset identity | Production 与已验收 Preview 核心资源逐字节一致：`index-CFrBYFIi.js` SHA-256 `ebbef1808130c6f56648fbfda8dccb90c7deb485caf7a353e2ecd8f1e442274d`；`index-Dnkbj1z6.css` SHA-256 `0405bf792711bc036e9bdbb543fde89a29bdd4922235c724d700c3536ef45a0c` |
+| rollback deployment | `dpl_Cj8uAE9utVX3oyLf6auJHMi824kj` |
+
+当前边界：正式应用、真实生成链、编辑与发布包制品已经验证；BYOK 仍按使用者当前标签页保存在 `sessionStorage`，未把本地 Keychain 密钥上传为 Vercel 持久 Secret，也未扩大站点访问权限。另一位操作者的独立账号/设备接入，以及实际发布到小红书后的读者效果，仍需各自现实验证。
