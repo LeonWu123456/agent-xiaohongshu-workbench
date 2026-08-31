@@ -7,7 +7,13 @@ import { normalizeProductionMode } from "./production-mode.mjs";
 import { INFO_PANEL_SURFACE_COLOR, normalizeInfoPanels } from "./infographic-panels.mjs";
 import { materializeEditablePanelLayouts, normalizeLayoutIr, normalizeLayoutRecipe } from "./smart-layout.mjs";
 import { normalizeHtmlState } from "./html-layout.mjs";
-import { XIAOSHIMEI_CHARACTER_PRODUCTION_DATA_URL } from "./xiaoshimei-character-production-data.mjs";
+
+// Persist only the stable asset path. Embedding the ~360 KB character data URL
+// in every page made each draft duplicate it into localStorage and could exhaust
+// the browser quota after a single "新创作". The SVG is a text-only deployment
+// asset containing the same reviewed JPEG, so it remains part of the exact
+// Vercel artifact without bloating the draft authority envelope.
+export const DEFAULT_CHARACTER_ASSET = "/assets/xiaoshimei-character-production.svg";
 
 // Reference authority: Desktop/ref. Body emphasis uses the darker reference
 // orange; the cover renderer promotes it to the brighter display orange.
@@ -476,7 +482,7 @@ function normalizeImageStyle(value = {}, path = "image_style", { defaultScale = 
     : null;
   if (crop && (crop.x + crop.width > 1.000001 || crop.y + crop.height > 1.000001)) throw new TypeError(`${path}.crop exceeds the source image`);
   return {
-    src: typeof value.src === "string" && value.src ? value.src : XIAOSHIMEI_CHARACTER_PRODUCTION_DATA_URL,
+    src: typeof value.src === "string" && value.src ? value.src : DEFAULT_CHARACTER_ASSET,
     focalX,
     focalY,
     // A page image is a masked object by default. Upgrade legacy 100%

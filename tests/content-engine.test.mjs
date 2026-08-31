@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { admitProducerWithVerdict, attachIndependentVerdict, buildManifest, deletePage, duplicatePage, expandProbe, generateContentPackage, generateWithProvider, inspectImportContract, invalidateVisualReview, parseContentPackage, publishCopy, reorderPage, visualContentSha256 } from "../src/content-engine.mjs";
+import { DEFAULT_CHARACTER_ASSET, admitProducerWithVerdict, attachIndependentVerdict, buildManifest, deletePage, duplicatePage, expandProbe, generateContentPackage, generateWithProvider, inspectImportContract, invalidateVisualReview, parseContentPackage, publishCopy, reorderPage, visualContentSha256 } from "../src/content-engine.mjs";
 
 async function sha256Text(value) {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -81,10 +81,10 @@ test("unknown route values fall back to safe defaults", () => {
   assert.equal(result.goal, "save");
 });
 
-test("default production character is self-contained instead of depending on a mutable asset URL", () => {
+test("default production character keeps the persisted draft small and deployment-local", () => {
   const result = generateContentPackage({ topic: "生产角色图" });
-  assert.match(result.pages[0].image_style.src, /^data:image\/jpeg;base64,/);
-  assert.ok(result.pages[0].image_style.src.length > 300_000);
+  assert.equal(result.pages[0].image_style.src, DEFAULT_CHARACTER_ASSET);
+  assert.ok(JSON.stringify(result).length < 100_000);
 });
 
 test("10 edited exported packages round-trip without losing design data", () => {
