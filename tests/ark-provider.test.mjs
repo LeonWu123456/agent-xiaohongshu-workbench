@@ -131,8 +131,11 @@ test("eye-care page plans allow preparation pages without forcing an eye into ev
     { page_role: "closing", eyebrow: "远眺收尾", title: "移开双手再望向远处", body: "约三十秒后缓慢移开双手，站到窗边望向远处；若疼痛、红肿、畏光或视力变化，立即停止并咨询医生。", visual_action: "小师妹站在窗边望向远处的树木", image_prompt: "竖幅三比四中景，小师妹站在木窗边，双手自然垂在身侧，眼睛望向窗外远处的树木，身体放松，低饱和暖光，左侧留白，不出现文字、水印或第二个人。" },
   ];
   assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages }) }] }, 4, { topic: "刷手机后眼睛发紧", pillar: "wellness", goal: "save" }).length, 4);
+  const shortCoverPages = structuredClone(pages);
+  shortCoverPages[0].body = "刷屏后先让视线离开手机一会儿";
+  assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: shortCoverPages }) }] }, 4, { topic: "刷手机后眼睛发紧", pillar: "wellness", goal: "save" })[0].body, shortCoverPages[0].body);
   const request = buildArkPagePlanRequest({ selected_title: "刷手机后先让眼睛休息", body: "正文".repeat(140), tags: ["护眼"], source_input: "眼睛发紧", prompt_context: {} }, 4, "doubao-text");
-  assert.equal(request.tools[0].parameters.properties.pages.items.properties.body.minLength, 35);
+  assert.equal(request.tools[0].parameters.properties.pages.items.properties.body.minLength, 12);
   assert.match(request.input[0].content, /35–160个汉字/);
 });
 
@@ -340,6 +343,9 @@ test("page-plan retry guidance turns production gate codes into bounded repair i
   assert.match(layout, /封面页眉最多10字、标题最多16字/);
   assert.match(layout, /内页页眉最多14字、标题最多18字/);
   assert.doesNotMatch(layout, /PAGE_PLAN_LAYOUT_BUDGET_FAILED/);
+  const shortCover = pagePlanRetryGuidance(new Error("PAGE_PLAN_BODY_TOO_SHORT:0"));
+  assert.match(shortCover, /12–60字/);
+  assert.match(shortCover, /不要为凑35字/);
   const duplicated = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:2:XHS_HEADING_PREFIX_DUPLICATED"));
   assert.match(duplicated, /只保留一次层级编号/);
   const crowded = pagePlanRetryGuidance(new Error("XHS_PUBLISH_GATE_FAILED:3:XHS_PANEL_COPY_BUDGET"));

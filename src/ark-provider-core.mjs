@@ -58,7 +58,7 @@ function pagePlanParameters(pageCount) {
         highlight_phrases: { type: "array", maxItems: 3, items: { type: "string", minLength: 2, maxLength: 18 } },
         eyebrow: { type: "string", maxLength: 20 },
         title: { type: "string", maxLength: 26 },
-        body: { type: "string", minLength: 35, maxLength: 160 },
+        body: { type: "string", minLength: 12, maxLength: 160 },
         visual_action: { type: "string", minLength: 8, maxLength: 180, description: "本页必须能被静态图片肉眼验证的单一动作" },
         image_prompt: { type: "string", minLength: 60, maxLength: 500 },
         panels: { type: "array", minItems: 0, maxItems: 4, description: "知识信息页的2–4组原生文字与对应分镜；封面和场景叙事页返回空数组", items: { type: "object", additionalProperties: false, required: ["title", "body", "visual_action", "content_role", "shot_role", "highlight_phrases"], properties: {
@@ -224,7 +224,7 @@ export function textQualityRetryGuidance(error) {
 
 export function pagePlanRetryGuidance(error) {
   const code = String(error?.message || error || "");
-  const pageMatch = code.match(/(?:pages\[|FAILED:)(\d+)/);
+  const pageMatch = code.match(/(?:pages\[|FAILED:|TOO_SHORT:)(\d+)/);
   const pageLabel = pageMatch ? `第${Number(pageMatch[1]) + 1}页` : "命中页面";
   if (/XHS_HEADING_PREFIX_DUPLICATED/.test(code)) {
     return `${pageLabel}的眉题和标题重复使用了“第一步/第一养”等同一层级词。下一版只保留一次层级编号：眉题负责章节，标题直接写具体动作或判断。`;
@@ -251,7 +251,9 @@ export function pagePlanRetryGuidance(error) {
     return `${pageLabel}的信息分镜结构没有通过预算。下一版知识信息页只保留2–4个panel，恰好1个hero；每个panel标题最多14字，正文按2格72字/3格52字/4格36字封顶且不少于12字，只讲一个要点；三个以上panel至少使用两种镜头角色。`;
   }
   if (/BODY_TOO_SHORT/.test(code)) {
-    return `${pageLabel}的读者正文不足35字。下一版补齐一个明确判断、可执行动作或避坑边界，保持短句且不要加入镜头、光线或构图说明。`;
+    return pageMatch && Number(pageMatch[1]) === 0
+      ? "封面正文只作为内容元数据，不承担首屏阅读；保留12–60字的一句真实摘要即可，不要为凑35字重复标题或添加新事实。"
+      : `${pageLabel}的读者正文不足35字。下一版补齐一个明确判断、可执行动作或避坑边界，保持短句且不要加入镜头、光线或构图说明。`;
   }
   return `上一版分镜没有通过质量检查。只修复${pageLabel}命中的结构或动作问题，保留已确认发布文字、事实边界、页数和整套风格；不要复述错误码。`;
 }
@@ -498,7 +500,8 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     if (eyebrowLength > eyebrowLimit || titleLength > titleLimit || bodyLength > 160) {
       throw new TypeError(`PAGE_PLAN_LAYOUT_BUDGET_FAILED:${index}:eyebrow=${eyebrowLength}/${eyebrowLimit}:title=${titleLength}/${titleLimit}:body=${bodyLength}/160`);
     }
-    if (compactLength(normalized.body) < 35) throw new TypeError(`PAGE_PLAN_BODY_TOO_SHORT:${index}`);
+    const bodyMinimum = index === 0 ? 12 : 35;
+    if (compactLength(normalized.body) < bodyMinimum) throw new TypeError(`PAGE_PLAN_BODY_TOO_SHORT:${index}`);
     if (compactLength(normalized.visualAction) < 8) throw new TypeError(`PAGE_PLAN_VISUAL_ACTION_TOO_SHORT:${index}`);
     const panelBodyLimit = normalized.panels.length >= 4 ? 36 : normalized.panels.length === 3 ? 52 : 72;
     if (normalized.panels.some((panel) => compactLength(panel.title) > 14 || compactLength(panel.body) < 12 || compactLength(panel.body) > panelBodyLimit || compactLength(panel.visualAction) < 8)) throw new TypeError(`PAGE_PLAN_PANEL_BUDGET_FAILED:${index}`);
