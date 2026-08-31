@@ -170,6 +170,37 @@ test("public provider reports configured separately from a verified successful c
   }
 });
 
+test("public production provider uses server-managed credentials without sending an authorization header", async () => {
+  const previousLocation = globalThis.location;
+  const previousSessionStorage = globalThis.sessionStorage;
+  const values = new Map();
+  const requests = [];
+  Object.defineProperty(globalThis, "location", { configurable: true, value: new URL("https://studio.example/") });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  } });
+  try {
+    const provider = createLocalHttpProvider({
+      endpoint: "https://studio.example/api/provider/generate",
+      fetchImpl: async (url, options = {}) => {
+        requests.push({ url: String(url), options });
+        if (String(url).endsWith("/health") || String(url).endsWith("/config")) return { ok: true, status: 200, json: async () => ({ status: "CONFIGURED_UNVERIFIED", configured: true, credential_mode: "SERVER_MANAGED", provider: "volcengine-ark", text_model: "server-text", image_model: "server-image" }) };
+        return { ok: true, status: 200, json: async () => generateContentPackage({ topic: "服务端托管成功" }) };
+      },
+    });
+    assert.equal((await provider.checkHealth()).credential_mode, "SERVER_MANAGED");
+    await provider.generate({ topic: "调用成功", profile_contract: { schema: "test" } });
+    const postRequest = requests.find((request) => request.options.method === "POST");
+    assert.equal(postRequest.options.headers.authorization, undefined);
+    assert.equal(values.has("xiaoshimei-studio.byok-api-key.v1"), false);
+  } finally {
+    Object.defineProperty(globalThis, "location", { configurable: true, value: previousLocation });
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: previousSessionStorage });
+  }
+});
+
 test("page candidate requests stay typed, loopback-only and require exactly three evidenced images", async () => {
   let target;
   const provider = createLocalHttpProvider({
@@ -233,10 +264,35 @@ test("two-node provider client keeps text and image requests on separate endpoin
   assert.equal(seen[0].url, "http://127.0.0.1:9909/text-draft");
   assert.equal(seen[1].url, "http://127.0.0.1:9909/generate-images");
   assert.equal(parseTextDraftRequest(buildTextDraftRequest({ topic: "眼睛休息方法", text_requirements: "语气生活化", pillar: "wellness", goal: "save", profile_contract: {} })).text_requirements, "语气生活化");
-  assert.deepEqual(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: "AUTO" })), { draft: parseTextDraftResponse(draft), production_mode: "smart", image_count: "AUTO", resume_run_id: null, reference_images: [], reference_note: "" });
+  assert.deepEqual(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: "AUTO" })), { draft: parseTextDraftResponse(draft), production_mode: "smart", image_count: "AUTO", resume_run_id: null, resume_checkpoint: null, reference_images: [], reference_note: "" });
   assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, production_mode: "infographic", image_count: 4 })).production_mode, "infographic");
   assert.throws(() => buildImageGenerationRequest({ draft, production_mode: "pretty", image_count: 4 }), /IMAGE_GENERATION_PRODUCTION_MODE_INVALID/);
   assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 4, resume_run_id: "images-2026-08-15T00-00-00-000Z-1234abcd" })).resume_run_id, "images-2026-08-15T00-00-00-000Z-1234abcd");
   assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 1, reference_images: [{ name: "拳架", data_url: "data:image/png;base64,AAAA" }], reference_note: "参考手脚关系" })).reference_images[0].name, "拳架");
   assert.throws(() => parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 1, reference_images: [1, 2, 3, 4].map((index) => ({ name: `参考${index}`, data_url: "data:image/png;base64,AAAA" })) })), /IMAGE_GENERATION_REFERENCES_INVALID/);
+});
+
+test("image client follows public step checkpoints until the final content and reports every saved step", async () => {
+  const seen = [];
+  const progress = [];
+  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
+  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-1", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
+  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-abcdef12" };
+  const finalContent = generateContentPackage({ topic: "分步完成" });
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async (url, options) => {
+      const request = JSON.parse(options.body);
+      seen.push(request);
+      if (seen.length === 1) return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
+      return { ok: true, status: 200, json: async () => finalContent };
+    },
+  });
+  const result = await provider.generateImages({ draft, image_count: 2 }, (value) => progress.push(value));
+  assert.equal(result.selectedTitle, finalContent.selectedTitle);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].input.resume_run_id, checkpoint.run_id);
+  assert.equal(seen[1].input.resume_checkpoint.run_id, checkpoint.run_id);
+  assert.equal(progress.length, 1);
+  assert.equal(progress[0].completed_image_steps, 1);
 });

@@ -62,3 +62,14 @@ test("partial mother-sheet failures report paid calls instead of pretending they
   assert.match(feedback.detail, /第 2 张母图/);
   assert.match(feedback.detail, /¥0\.22/);
 });
+
+test("public step failures state exactly what is saved and disclose when the current paid step may replay", () => {
+  const error = new Error("provider request failed: MOTHER_SHEET_2_CALL_FAILED");
+  error.providerStage = "image";
+  error.providerDetails = { resume_run_id: "images-2026-08-31T08-00-00-000Z-abcdef12", completed_pages: 2, total_pages: 4, completed_image_steps: 1, total_image_steps: 3, failed_image_step: 2, actual_image_calls: 2, estimated_image_cost_cny: 0.44, current_step_may_replay: true };
+  const feedback = generationFailureFeedback(error);
+  assert.equal(feedback.code, "IMAGE_PARTIAL_RESULT_PRESERVED");
+  assert.match(feedback.title, /1\/3/);
+  assert.match(feedback.detail, /可能再产生一次图片调用/);
+  assert.match(feedback.detail, /之前步骤不会重做/);
+});

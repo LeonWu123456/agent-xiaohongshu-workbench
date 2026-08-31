@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import sharp from "sharp";
 import {
   ARK_BASE_URL,
@@ -18,11 +18,24 @@ import {
 } from "../src/ark-provider-core.mjs";
 import { parseContentPackage } from "../src/content-engine.mjs";
 import {
+  buildAssetMapFromMotherSheets,
   buildIllustrationUnits,
   buildMotherSheetPrompt,
   groupIllustrationUnits,
   motherSheetRegionForUnit,
 } from "../src/mother-sheet.mjs";
+import {
+  admitPublicImageJob,
+  appendPublicImageJobs,
+  completePublicImageRun,
+  createPublicImageRun,
+  exhaustPublicImageRun,
+  failPublicImageJob,
+  parsePublicImageRun,
+  publicImageRunProgress,
+  startPublicImageJob,
+  unresolvedPublicImageUnitIds,
+} from "../src/public-image-run.mjs";
 import { inspectMotherSheetTileStats } from "../src/mother-sheet-tile-quality.mjs";
 import { inspectMotherSheetTilePixels } from "../src/mother-sheet-tile-quality.mjs";
 import { detectKvTemplateRegions } from "../src/mother-sheet-adaptive-regions.mjs";
@@ -44,7 +57,11 @@ const IMAGE_PRICE_CNY = 0.22;
 const DEFAULT_TEXT_MODEL = "doubao-seed-2-0-lite-260428";
 const DEFAULT_IMAGE_MODEL = "doubao-seedream-5-0-lite-260128";
 export const PUBLIC_GENERATION_RESPONSE_MAX_BYTES = 4_000_000;
-const PUBLIC_TILE_PAYLOAD_BUDGET_BYTES = 2_600_000;
+// Leave enough headroom for base64 expansion, checkpoint metadata, the HMAC
+// wrapper and Vercel's 4 MB response limit. A checkpoint that only fits before
+// wrapping is not resumable in production.
+const PUBLIC_TILE_PAYLOAD_BUDGET_BYTES = 2_300_000;
+const PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA = "xiaoshimei.public-image-step-response.v1";
 
 export function publicTileBudgetForResponse(unitCount) {
   const count = Math.max(1, Number(unitCount) || 1);
@@ -90,13 +107,32 @@ function cleanModel(value, fallback) {
 }
 
 function requestConfig(request) {
+  const serverApiKey = String(process.env.ARK_API_KEY || "").trim();
   const authorization = String(request.headers.authorization || "");
-  const apiKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  const browserApiKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  const apiKey = serverApiKey || browserApiKey;
   if (apiKey.length < 8) throw new TypeError("ARK_API_KEY_REQUIRED");
+  const serverManaged = serverApiKey.length >= 8;
   return {
     apiKey,
-    textModel: cleanModel(request.headers["x-xiaoshimei-text-model"], DEFAULT_TEXT_MODEL),
-    imageModel: cleanModel(request.headers["x-xiaoshimei-image-model"], DEFAULT_IMAGE_MODEL),
+    credentialMode: serverManaged ? "SERVER_MANAGED" : "BROWSER_BYOK",
+    textModel: cleanModel(serverManaged ? process.env.ARK_TEXT_MODEL : request.headers["x-xiaoshimei-text-model"], DEFAULT_TEXT_MODEL),
+    imageModel: cleanModel(serverManaged ? process.env.ARK_IMAGE_MODEL : request.headers["x-xiaoshimei-image-model"], DEFAULT_IMAGE_MODEL),
+  };
+}
+
+function publicProviderConfig() {
+  const configured = String(process.env.ARK_API_KEY || "").trim().length >= 8;
+  return {
+    status: configured ? "CONFIGURED_UNVERIFIED" : "AWAITING_BYOK",
+    configured,
+    provider: "volcengine-ark",
+    provider_label: "火山方舟",
+    base_url: ARK_BASE_URL,
+    text_model: cleanModel(process.env.ARK_TEXT_MODEL, DEFAULT_TEXT_MODEL),
+    image_model: cleanModel(process.env.ARK_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
+    credential_mode: configured ? "SERVER_MANAGED" : "BROWSER_BYOK",
+    key_store: configured ? "Vercel Sensitive Environment Variable" : "当前标签页 sessionStorage",
   };
 }
 
@@ -116,7 +152,7 @@ async function arkPost(path, apiKey, body, stage) {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(240_000),
+      signal: AbortSignal.timeout(210_000),
     });
   } catch (error) {
     throw new Error(`${stage}:NETWORK_FETCH_FAILED:${String(error?.name || "UNKNOWN")}`);
@@ -377,9 +413,88 @@ export async function sliceStandaloneRepairForUnit(bytes, unit, options = {}) {
   };
 }
 
-async function generateImages(input, settings, request) {
-  if (input.resume_run_id) throw new TypeError("PUBLIC_RESUME_NOT_SUPPORTED_RETRY_CURRENT_NODE");
-  const pageCount = input.image_count === "AUTO" ? input.draft.recommended_image_count : input.image_count;
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function checkpointWithoutSignature(value) {
+  const checkpoint = structuredClone(value);
+  delete checkpoint.signature;
+  return checkpoint;
+}
+
+export function signPublicImageCheckpoint(value, apiKey) {
+  const checkpoint = parsePublicImageRun(checkpointWithoutSignature(value));
+  return { ...checkpoint, signature: createHmac("sha256", apiKey).update(canonicalJson(checkpoint)).digest("hex") };
+}
+
+export function verifyPublicImageCheckpoint(value, apiKey, expected) {
+  const parsed = parsePublicImageRun(value, expected);
+  if (!/^[0-9a-f]{64}$/.test(String(parsed.signature || ""))) throw new TypeError("PUBLIC_IMAGE_RESUME_SIGNATURE_INVALID");
+  const expectedSignature = createHmac("sha256", apiKey).update(canonicalJson(checkpointWithoutSignature(parsed))).digest("hex");
+  if (!timingSafeEqual(Buffer.from(parsed.signature), Buffer.from(expectedSignature))) throw new TypeError("PUBLIC_IMAGE_RESUME_SIGNATURE_INVALID");
+  return parsed;
+}
+
+function publicReferenceFingerprint(input) {
+  return sha256Bytes(Buffer.from(JSON.stringify({
+    references: input.reference_images.map((item) => ({ name: item.name, sha256: sha256Bytes(Buffer.from(item.data_url)) })),
+    note: input.reference_note,
+  })));
+}
+
+function publicImageStepResponse(checkpoint, settings) {
+  const signed = signPublicImageCheckpoint(checkpoint, settings.apiKey);
+  const response = {
+    schema: PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA,
+    status: "PARTIAL",
+    resume: { ...publicImageRunProgress(signed, IMAGE_PRICE_CNY), resume_checkpoint: signed },
+  };
+  assertPublicGenerationResponseBudget(response);
+  return response;
+}
+
+function publicImageResumeError(error, checkpoint, settings, { providerAssetReturned = false, providerRequestStarted = false } = {}) {
+  const failed = failPublicImageJob(checkpoint, { code: String(error?.message || error), providerAssetReturned });
+  const signed = signPublicImageCheckpoint(failed, settings.apiKey);
+  error.details = {
+    ...publicImageRunProgress(signed, IMAGE_PRICE_CNY),
+    resume_checkpoint: signed,
+    retry_scope: "CURRENT_IMAGE_STEP_ONLY",
+    current_step_may_replay: providerRequestStarted,
+    provider_asset_returned: providerAssetReturned,
+  };
+  return error;
+}
+
+function advancePublicImageRun(checkpoint) {
+  if (checkpoint.next_job_index < checkpoint.jobs.length) return checkpoint;
+  const unresolved = unresolvedPublicImageUnitIds(checkpoint);
+  if (!unresolved.length) return completePublicImageRun(checkpoint);
+  const units = checkpoint.illustration_units.filter((unit) => unresolved.includes(unit.unit_id));
+  if (checkpoint.phase === "PRIMARY") {
+    const repairJobs = buildMissingUnitRepairJobs(units, checkpoint.jobs.length).map((job) => ({ ...job, job_kind: "mother_sheet" }));
+    return appendPublicImageJobs(checkpoint, { phase: "GROUPED_REPAIR", jobs: repairJobs });
+  }
+  if (checkpoint.phase === "GROUPED_REPAIR") {
+    const repairJobs = units.map((unit, offset) => ({
+      sheet_index: checkpoint.jobs.length + offset,
+      sheet_id: `standalone-repair-${unit.unit_id}`,
+      template: "standalone",
+      kv_unit_index: null,
+      unit_labels: ["补"],
+      units: [structuredClone(unit)],
+      repair: true,
+      job_kind: "standalone",
+    }));
+    return appendPublicImageJobs(checkpoint, { phase: "STANDALONE_REPAIR", jobs: repairJobs });
+  }
+  return exhaustPublicImageRun(checkpoint);
+}
+
+async function createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint) {
   let pages;
   let planError;
   const planAttempts = [];
@@ -403,118 +518,109 @@ async function generateImages(input, settings, request) {
     }
   }
   if (!pages) throw planError || new Error("PAGE_PLAN_REJECTED");
-
   const units = buildIllustrationUnits(pages);
-  const jobs = groupIllustrationUnits(units);
-  const tileBudget = publicTileBudgetForResponse(units.length);
+  const jobs = groupIllustrationUnits(units).map((job) => ({ ...job, job_kind: "mother_sheet" }));
+  return createPublicImageRun({
+    runId: `images-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
+    draftId: input.draft.draft_id,
+    draftSha256,
+    productionMode: input.production_mode,
+    finalPages: pages,
+    illustrationUnits: units,
+    planAttempts,
+    referenceFingerprint,
+    jobs,
+  });
+}
+
+async function executePublicImageJob(checkpoint, input, settings) {
+  let active = checkpoint;
+  const job = active.jobs[active.next_job_index];
+  const tileBudget = publicTileBudgetForResponse(active.illustration_units.length);
   const extraReferences = input.reference_images.map((item) => item.data_url);
-  const sheets = [];
-  const standaloneRepairTiles = [];
-  let actualImageCalls = 0;
-  for (const job of jobs) {
-    const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
-    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_${job.sheet_index + 1}_CALL_FAILED`);
-    actualImageCalls += 1;
-    const sheet = { job, ...(await imagePayload(payload)) };
-    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget, allowMissing: true });
-    sheets.push(sheet);
-  }
-
-  const missingUnitIds = new Set(sheets.flatMap((sheet) => sheet.tiles.filter((tile) => tile.missing).map((tile) => tile.unit_id)));
-  const repairJobs = buildMissingUnitRepairJobs(units.filter((unit) => missingUnitIds.has(unit.unit_id)), sheets.length);
-  const groupedRepairJobs = repairJobs.filter((job) => job.units.length > 1);
-  for (const job of groupedRepairJobs) {
-    const prompt = buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
-    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `MOTHER_SHEET_REPAIR_${job.sheet_index + 1}_CALL_FAILED`);
-    actualImageCalls += 1;
-    const sheet = { job, ...(await imagePayload(payload)) };
-    sheet.tiles = await splitMotherSheetForUnits(sheet.bytes, job, { maxBytes: tileBudget, allowMissing: true });
-    sheets.push(sheet);
-  }
-
-  const repairedUnitIds = new Set(sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.unit_id)));
-  const standaloneRepairUnits = units.filter((unit) => missingUnitIds.has(unit.unit_id) && !repairedUnitIds.has(unit.unit_id));
-  for (const unit of standaloneRepairUnits) {
-    const prompt = buildStandaloneRepairPrompt(unit, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
-    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `STANDALONE_REPAIR_${unit.unit_id}_CALL_FAILED`);
-    actualImageCalls += 1;
+  let providerAssetReturned = false;
+  let providerRequestStarted = false;
+  try {
+    const prompt = job.job_kind === "standalone"
+      ? buildStandaloneRepairPrompt(job.units[0], { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context })
+      : buildMotherSheetPrompt(job, { styleLock: input.draft.style_lock, imageContext: input.draft.prompt_context });
+    active = startPublicImageJob(active);
+    providerRequestStarted = true;
+    const payload = await arkPost("/images/generations", settings.apiKey, buildArkImageRequest({ model: settings.imageModel, prompt, referenceImageDataUrl: XIAOSHIMEI_AVATAR_DATA_URL, actionReferenceImageDataUrls: extraReferences, actionReferenceNote: input.reference_note }), `${job.job_kind === "standalone" ? "STANDALONE_REPAIR" : "MOTHER_SHEET"}_${active.next_job_index + 1}_CALL_FAILED`);
+    providerAssetReturned = true;
     const image = await imagePayload(payload);
-    standaloneRepairTiles.push(await sliceStandaloneRepairForUnit(image.bytes, unit, { maxBytes: tileBudget, allowMissing: true }));
+    const tiles = job.job_kind === "standalone"
+      ? [await sliceStandaloneRepairForUnit(image.bytes, job.units[0], { maxBytes: tileBudget, allowMissing: true })]
+      : await splitMotherSheetForUnits(image.bytes, job, { maxBytes: tileBudget, allowMissing: true });
+    active = admitPublicImageJob(active, {
+      assets: tiles.filter((tile) => !tile.missing),
+      attempt: {
+        image_sha256: image.sha256,
+        image_size_bytes: image.bytes.length,
+        missing_unit_ids: tiles.filter((tile) => tile.missing).map((tile) => tile.unit_id),
+      },
+    });
+    return advancePublicImageRun(active);
+  } catch (error) {
+    if (!providerRequestStarted) throw error;
+    throw publicImageResumeError(error, active, settings, { providerAssetReturned, providerRequestStarted });
   }
+}
 
-  const unresolvedUnitIds = standaloneRepairTiles.filter((tile) => tile.missing).map((tile) => tile.unit_id);
-  if (unresolvedUnitIds.length) {
-    const error = new Error(`MOTHER_SHEET_REPAIR_EXHAUSTED:${unresolvedUnitIds.join(",")}`);
-    error.details = {
-      completed_units: units.length - unresolvedUnitIds.length,
-      total_units: units.length,
-      missing_unit_ids: unresolvedUnitIds,
-      actual_image_calls: actualImageCalls,
-      estimated_image_cost_cny: Number((actualImageCalls * IMAGE_PRICE_CNY).toFixed(2)),
-      retry_scope: "MISSING_UNITS_ONLY_NOT_YET_IMPLEMENTED_ON_PUBLIC_RUNTIME",
-    };
-    throw error;
-  }
-
-  const assetByUnit = new Map();
-  for (const sheet of sheets) {
-    sheet.tiles.filter((tile) => !tile.missing).forEach((tile) => assetByUnit.set(tile.unit_id, {
-      src: tile.src,
-      sha256: tile.sha256,
-      size_bytes: tile.size_bytes,
-      sheet_index: sheet.job.sheet_index,
-      slot_index: tile.mother_sheet_slot - 1,
-    }));
-  }
-  standaloneRepairTiles.filter((tile) => !tile.missing).forEach((tile) => assetByUnit.set(tile.unit_id, {
-    src: tile.src,
-    sha256: tile.sha256,
-    size_bytes: tile.size_bytes,
-    sheet_index: null,
-    slot_index: 0,
-  }));
-  const pageAssets = pages.map((page, pageIndex) => (page.panels || []).length
-    ? undefined
-    : assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null)?.unit_id)?.src);
-  const panelAssetsByPage = pages.map((page, pageIndex) => (page.panels || []).map((_panel, panelIndex) => assetByUnit.get(units.find((unit) => unit.page_index === pageIndex && unit.panel_index === panelIndex)?.unit_id)?.src));
-  let content = assembleArkContentFromDraft(input.draft, pages, { pageAssets, panelAssetsByPage }, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: sheets.length, illustrationUnitCount: units.length, enforcePublishQuality: true }, input.production_mode);
+function assemblePublicImageContent(checkpoint, input, settings) {
+  const assetMap = buildAssetMapFromMotherSheets(checkpoint.final_pages, checkpoint.illustration_units, [{ tiles: checkpoint.assets }]);
+  const successfulMotherSheets = checkpoint.job_attempts.filter((attempt) => attempt.job_kind === "mother_sheet" && attempt.decision !== "FAILED_RESUMABLE").length;
+  const initialMissing = new Set(checkpoint.job_attempts.filter((attempt) => attempt.job_index < groupIllustrationUnits(checkpoint.illustration_units).length).flatMap((attempt) => attempt.missing_unit_ids || []));
+  let content = assembleArkContentFromDraft(input.draft, checkpoint.final_pages, assetMap, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: successfulMotherSheets, illustrationUnitCount: checkpoint.illustration_units.length, enforcePublishQuality: true }, input.production_mode);
   content = {
     ...content,
-    pages: content.pages.map((page, pageIndex) => {
-      const pageUnit = units.find((unit) => unit.page_index === pageIndex && unit.panel_index == null);
-      const pageAsset = assetByUnit.get(pageUnit?.unit_id);
-      return {
-        ...page,
-        image_style: pageAsset ? { ...page.image_style, src: pageAsset.src, crop: { x: 0, y: 0, width: 1, height: 1 } } : page.image_style,
-        info_panels: (page.info_panels || []).map((panel, panelIndex) => {
-          const unit = units.find((candidate) => candidate.page_index === pageIndex && candidate.panel_index === panelIndex);
-          const asset = assetByUnit.get(unit?.unit_id);
-          return asset ? { ...panel, image_style: { ...panel.image_style, src: asset.src, crop: { x: 0, y: 0, width: 1, height: 1 } } } : panel;
-        }),
-      };
-    }),
     generation: {
       ...content.generation,
-      run_id: `images-web-${Date.now()}-${randomUUID().slice(0, 8)}`,
-      strategy: "3x3_mother_sheet_server_tiles",
-      mother_sheet_count: sheets.length,
-      illustration_unit_count: units.length,
-      actual_image_calls: actualImageCalls,
-      estimated_image_cost_cny: Number((actualImageCalls * IMAGE_PRICE_CNY).toFixed(2)),
-      page_plan_attempts: planAttempts,
-      mother_sheet_sha256: sheets.map((sheet) => sheet.sha256),
-      tile_sha256: [...sheets.flatMap((sheet) => sheet.tiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)), ...standaloneRepairTiles.filter((tile) => !tile.missing).map((tile) => tile.sha256)],
-      tile_transport_budget_bytes: tileBudget,
-      repaired_missing_unit_count: missingUnitIds.size,
-      repair_mother_sheet_count: groupedRepairJobs.length,
-      standalone_repair_count: standaloneRepairTiles.length,
-      standalone_repair_sha256: standaloneRepairTiles.filter((tile) => !tile.missing).map((tile) => tile.sha256),
+      run_id: checkpoint.run_id,
+      strategy: "resumable_public_image_steps_v1",
+      credential_mode: settings.credentialMode,
+      mother_sheet_count: successfulMotherSheets,
+      illustration_unit_count: checkpoint.illustration_units.length,
+      actual_image_calls: checkpoint.actual_image_calls,
+      estimated_image_cost_cny: Number((checkpoint.actual_image_calls * IMAGE_PRICE_CNY).toFixed(2)),
+      page_plan_attempts: checkpoint.plan_attempts,
+      image_step_attempts: checkpoint.job_attempts,
+      tile_sha256: checkpoint.assets.map((asset) => asset.sha256),
+      tile_transport_budget_bytes: publicTileBudgetForResponse(checkpoint.illustration_units.length),
+      repaired_missing_unit_count: [...initialMissing].filter((unitId) => checkpoint.assets.some((asset) => asset.unit_id === unitId)).length,
+      repair_mother_sheet_count: checkpoint.jobs.filter((job) => job.repair && job.job_kind === "mother_sheet").length,
+      standalone_repair_count: checkpoint.jobs.filter((job) => job.job_kind === "standalone").length,
     },
   };
   const responseSizeBytes = assertPublicGenerationResponseBudget(content);
   content.generation.response_size_bytes = responseSizeBytes;
   assertPublicGenerationResponseBudget(content);
   return parseContentPackage(JSON.stringify(content));
+}
+
+async function generateImages(input, settings) {
+  const pageCount = input.image_count === "AUTO" ? input.draft.recommended_image_count : input.image_count;
+  const draftSha256 = sha256Bytes(Buffer.from(JSON.stringify(input.draft)));
+  const referenceFingerprint = publicReferenceFingerprint(input);
+  let checkpoint;
+  if (input.resume_checkpoint) {
+    checkpoint = verifyPublicImageCheckpoint(input.resume_checkpoint, settings.apiKey, { draftId: input.draft.draft_id, draftSha256, productionMode: input.production_mode, finalPageCount: pageCount, referenceFingerprint });
+    if (input.resume_run_id !== checkpoint.run_id) throw new TypeError("PUBLIC_IMAGE_RESUME_ID_MISMATCH");
+  } else {
+    if (input.resume_run_id) throw new TypeError("PUBLIC_IMAGE_RESUME_CHECKPOINT_REQUIRED");
+    checkpoint = await createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint);
+    return publicImageStepResponse(checkpoint, settings);
+  }
+  if (checkpoint.status === "COMPLETE") return assemblePublicImageContent(checkpoint, input, settings);
+  if (checkpoint.status === "EXHAUSTED") throw new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+  checkpoint = await executePublicImageJob(checkpoint, input, settings);
+  if (checkpoint.status === "EXHAUSTED") {
+    const signed = signPublicImageCheckpoint(checkpoint, settings.apiKey);
+    const error = new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+    error.details = { ...publicImageRunProgress(signed, IMAGE_PRICE_CNY), resume_checkpoint: signed, retry_scope: "CHANGE_VISUAL_INPUTS_THEN_RESTART", unresolved_unit_ids: checkpoint.failure?.unresolved_unit_ids || [] };
+    throw error;
+  }
+  return checkpoint.status === "COMPLETE" ? assemblePublicImageContent(checkpoint, input, settings) : publicImageStepResponse(checkpoint, settings);
 }
 
 async function generatePageCandidates(input, settings) {
@@ -529,13 +635,13 @@ async function generatePageCandidates(input, settings) {
 
 export default async function handler(request, response) {
   const route = routeName(request);
-  if (request.method === "GET" && route === "health") return send(response, 200, { status: "AWAITING_BYOK", configured: false, provider: "volcengine-ark", provider_label: "火山方舟", key_store: "当前标签页 sessionStorage" });
-  if (request.method === "GET" && route === "config") return send(response, 200, { configured: false, provider: "volcengine-ark", provider_label: "火山方舟", base_url: ARK_BASE_URL, text_model: DEFAULT_TEXT_MODEL, image_model: DEFAULT_IMAGE_MODEL, key_store: "当前标签页 sessionStorage" });
+  if (request.method === "GET" && route === "health") return send(response, 200, publicProviderConfig());
+  if (request.method === "GET" && route === "config") return send(response, 200, publicProviderConfig());
   if (request.method !== "POST") return send(response, 405, { error: "METHOD_NOT_ALLOWED" });
   try {
     const settings = requestConfig(request);
     if (route === "text-draft") return send(response, 200, await generateTextDraft(parseTextDraftRequest(request.body), settings));
-    if (route === "generate-images") return send(response, 200, await generateImages(parseImageGenerationRequest(request.body), settings, request));
+    if (route === "generate-images") return send(response, 200, await generateImages(parseImageGenerationRequest(request.body), settings));
     if (route === "page-candidates") return send(response, 200, await generatePageCandidates(parsePageCandidateRequest(request.body), settings, request));
     return send(response, 404, { error: "ROUTE_NOT_FOUND" });
   } catch (error) {

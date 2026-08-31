@@ -69,8 +69,13 @@ function imageGenerationInput(input) {
   const productionMode = normalizeProductionMode(input.production_mode, "IMAGE_GENERATION_PRODUCTION_MODE_INVALID");
   const imageCount = input.image_count === "AUTO" ? "AUTO" : Number(input.image_count);
   if (imageCount !== "AUTO" && (!Number.isInteger(imageCount) || imageCount < 1 || imageCount > 8)) throw new TypeError("IMAGE_GENERATION_COUNT_INVALID");
-  const resumeRunId = input.resume_run_id == null || input.resume_run_id === "" ? null : requiredString(input.resume_run_id, "IMAGE_GENERATION_RESUME_ID_INVALID", 120);
+  const resumeCheckpoint = input.resume_checkpoint == null ? null : input.resume_checkpoint;
+  if (resumeCheckpoint != null && (!resumeCheckpoint || typeof resumeCheckpoint !== "object" || Array.isArray(resumeCheckpoint) || resumeCheckpoint.schema !== "xiaoshimei.public-image-run.v1")) throw new TypeError("IMAGE_GENERATION_RESUME_CHECKPOINT_INVALID");
+  if (resumeCheckpoint != null && JSON.stringify(resumeCheckpoint).length > 3_800_000) throw new TypeError("IMAGE_GENERATION_RESUME_CHECKPOINT_TOO_LARGE");
+  const checkpointRunId = resumeCheckpoint == null ? null : requiredString(resumeCheckpoint.run_id, "IMAGE_GENERATION_RESUME_ID_INVALID", 120);
+  const resumeRunId = input.resume_run_id == null || input.resume_run_id === "" ? checkpointRunId : requiredString(input.resume_run_id, "IMAGE_GENERATION_RESUME_ID_INVALID", 120);
   if (resumeRunId && !/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(resumeRunId)) throw new TypeError("IMAGE_GENERATION_RESUME_ID_INVALID");
+  if (checkpointRunId && resumeRunId !== checkpointRunId) throw new TypeError("IMAGE_GENERATION_RESUME_ID_MISMATCH");
   const sourceReferences = input.reference_images == null ? [] : input.reference_images;
   if (!Array.isArray(sourceReferences) || sourceReferences.length > 3) throw new TypeError("IMAGE_GENERATION_REFERENCES_INVALID");
   const referenceImages = sourceReferences.map((item, index) => {
@@ -81,7 +86,7 @@ function imageGenerationInput(input) {
     return { name, data_url: dataUrl };
   });
   const referenceNote = typeof input.reference_note === "string" ? input.reference_note.trim().slice(0, 1000) : "";
-  return { draft, production_mode: productionMode, image_count: imageCount, resume_run_id: resumeRunId, reference_images: referenceImages, reference_note: referenceNote };
+  return { draft, production_mode: productionMode, image_count: imageCount, resume_run_id: resumeRunId, resume_checkpoint: resumeCheckpoint == null ? null : structuredClone(resumeCheckpoint), reference_images: referenceImages, reference_note: referenceNote };
 }
 
 export function buildImageGenerationRequest(input) {

@@ -32,10 +32,14 @@ flowchart LR
 
 ## 2026-08-31 未确认文字草稿丢失事故：最小可执行 Map Slice
 
-本切片绑定当前用户明确指令形成的短生命周期 E1/E2 Task 边界：`object_ref=Products/Xiaoshimei-Studio-v2`，`goal=修复草稿保全、入口反馈与发布血缘`，`effect=本地可逆源码/合同/测试`。`TSK-260827-1821 / AIGC-D20` 的 object/goal/effect 不匹配，明确 hard reject，不能借它取得 Preview 或生产权限；生产提升必须另有同对象正式 Task、Authority 与 Writer 回读。
+本切片绑定当前用户明确指令形成的短生命周期 E1/E2 Task 边界：`object_ref=Products/Xiaoshimei-Studio-v2`，`goal=修复草稿保全、唯一文案权威、生产凭据与公网配图恢复`，`effect=本地可逆源码/合同/测试`。`TSK-260827-1821 / AIGC-D20` 的 object/goal/effect 不匹配，明确 hard reject，不能借它取得 Preview 或生产权限；生产提升必须另有同对象正式 Task、Authority 与 Writer 回读。
 
-- `one_next_experiment`：本地同一候选 commit 已完成“未组装文字 → 新创作 → 返回 → 刷新”、真实焦点输入、390px 窄屏、跨稿发布双锁、旧成稿复制与 ZIP 实物回读；下一实验只能是在同一 commit 的 Preview 原样重放，再提升同一制品到稳定域名，禁止换 commit 后继承旧 PASS。
-- `stop`：持久化未成功就切到空白稿、任一字段丢失、旧稿状态串入新稿、按钮无聚焦反馈、发布文案与确认文字不等、证据身份不全，或 Map 源 Hash 漂移。任一项发生就不得提升生产。
+- `one_next_experiment`：在当前唯一候选源码上先重放本地“未组装文字 → 新创作 → 返回 → 刷新 + 单一文案编辑面”，再把完全相同的 commit 部署到 Preview，验证 fresh tab 无 Key、确认文字前图片调用数为 0、每次最多 1 个付费图片步骤、刷新后从已保存 checkpoint 续跑；通过后才允许提升同一 deployment 到稳定域名。
+- `target_nodes`：`STORE-WORKSPACE-ENVELOPE / ACT-NEW-DRAFT / RULE-AUTHORING-SNAPSHOT-NO-CANVAS / RULE-PUBLICATION-LINEAGE / UI-PUBLISH-PACKAGE-SUMMARY / FLOW-PUBLIC-IMAGE-STEPS / STORE-IMAGE-RUN-CHECKPOINT / RULE-SERVER-MANAGED-CREDENTIAL`。
+- `affected_nodes`：资产库、备份恢复、Provider health、复制、ZIP 与旧 `CONTENT_ONLY` 稿件兼容入口。
+- `required_rules`：新建不丢稿；未组装草稿恢复后仍只显示原文输入、不得显露占位画布；确认前图片调用数为 0；新文字流程只有一份可编辑文案；每个公网请求最多 1 次图片调用；已完成资产先保存再继续；生产 Key 不进入浏览器或 DraftRecord。
+- `required_tests`：全量回归、production build、桌面与窄屏本地浏览器、Preview 中断恢复、稳定域名 fresh-tab 与完整发布包回读。
+- `stop`：持久化未成功就切到空白稿、任一字段丢失、出现第二份可编辑文案、旧稿状态串入新稿、按钮无聚焦反馈、确认前发生图片调用、单请求发起超过 1 次图片调用、checkpoint 漂移/验签失败、浏览器仍索要生产 Key、证据身份不全，或 Map 源 Hash 漂移。任一项发生就不得提升生产。
 
 ### 本次事故的当前生产事实
 
@@ -45,8 +49,10 @@ flowchart LR
 | 资产库能重开旧 5 页 `content` | `PARTIAL_RECOVERY_ONLY` | 完整 authoring session 已保存 |
 | 空白态“填写原文”未给出可见聚焦/光标反馈 | `FAIL_CURRENT_PRODUCTION` | 按钮已可用 |
 | 同一轮用户回读中，“文字草稿”与“发布文案”语义发生独立改写 | `FAIL_CURRENT_PRODUCTION` | 发布文案已是确认文字的投影 |
-| 本地候选完成新创作/返回/刷新、真实聚焦、跨稿副作用 0、旧稿 1.9 MB ZIP CRC 回读 | `PASS_LOCAL_FOR_FIX` | Preview、正式域名或用户现实结果已修复 |
-| 本次修复的 Preview/正式域名同身份重放 | `NOT_RUN / NOT_APPLIED` | 旧部署或旧 dogfood 可代替新修复验收 |
+| 旧候选曾完成新创作/返回/刷新、真实聚焦与旧稿 ZIP 回读；本轮新增源码后旧浏览器证据身份已失效 | `STALE_FOR_CURRENT_CANDIDATE` | 可以继承到新源码 |
+| 当前候选在浏览器首次重放时发现 authoring-only 稿恢复后显露占位画布；修复后同一草稿刷新回读只剩原文输入 | `SOLUTION_ERROR → PASS_LOCAL_BROWSER_AFTER_FIX` | 预先的 308 个测试已经覆盖真实旅程 |
+| 当前候选真实按钮完成新建、返回、刷新、填写原文聚焦后直接输入；唯一文案量测为最终标题编辑器 1、旧发布标题编辑器 0；390px 发布包摘要可见 | `PASS_LOCAL_BROWSER` | Preview、稳定域名或生产 Provider 已通过 |
+| 当前候选全量测试、production build、Preview 与正式域名同身份重放 | `RECHECK_REQUIRED / NOT_APPLIED` | 旧部署或旧 dogfood可代替新修复验收 |
 
 ```mermaid
 flowchart TB
@@ -58,6 +64,9 @@ flowchart TB
     FLOW_BLANK --> UI_RETURN["UI-RETURN-PREVIOUS<br/>可见返回上一稿"] --> FLOW_RESTORE["FLOW-RETURN-PREVIOUS<br/>原子恢复同一 snapshot"] --> UI_CURRENT
     RULE_ATOMIC["RULE-ATOMIC-DRAFT-SWITCH<br/>无成功持久化即无界面切换"] --> ACT_NEW
     RULE_ATOMIC --> FLOW_RESTORE
+    FLOW_RESTORE --> SOURCE_ONLY{"存在已确认 Provider 内容<br/>或显式 CONTENT_ONLY 成稿？"}
+    SOURCE_ONLY -->|否| RULE_NO_CANVAS["RULE-AUTHORING-SNAPSHOT-NO-CANVAS<br/>saved_at 不得把占位页升级成成稿"] --> UI_CURRENT
+    SOURCE_ONLY -->|是| UI_CANVAS["UI-CANVAS + 发布包"]
   end
 
   subgraph SOURCECTA["原文入口反馈"]
@@ -66,11 +75,22 @@ flowchart TB
 
   subgraph CONTENTAUTH["文字与发布的单一内容权威"]
     ACT_CONFIRM["ACT-CONFIRM-TEXT"] --> STORE_CONFIRMED["STORE-CONFIRMED-TEXT<br/>draft_id + session_id + text_version/hash"]
-    STORE_CONFIRMED --> RULE_CONTENT["RULE-SINGLE-CONTENT-AUTHORITY<br/>发布标题/正文/标签只投影当前已确认文字"] --> UI_PUBLISH["UI-PUBLISH-COPY"]
+    STORE_CONFIRMED --> RULE_CONTENT["RULE-SINGLE-CONTENT-AUTHORITY<br/>全流程只编辑这一份标题/正文/标签"] --> UI_PUBLISH["UI-PUBLISH-PACKAGE-SUMMARY<br/>第五步只读投影 + 复制/下载"]
     RULE_LINEAGE["RULE-LINEAGE-GATE"] --> LINEAGE_MATCH{"当前 draft/session/text_version 相等？"}
     LINEAGE_MATCH -->|是| RULE_CONTENT
     LINEAGE_MATCH -->|否| BLOCK_PUBLISH["BLOCK-PUBLISH<br/>跨稿串状态"] --> RULE_ACTION["RULE-ZERO-SIDE-EFFECT<br/>原生 disabled + 执行函数二次校验<br/>复制/ZIP/旧链接调用数=0；保存仍可用"]
     ACT_EDIT_AFTER["ACT-EDIT-AFTER-CONFIRM"] -->|"显式 diff + 撤销确认态"| ACT_CONFIRM
+  end
+
+  subgraph PUBLICIMAGE["公网配图逐步生成与恢复"]
+    ACT_CONFIRM --> PLAN_ZERO["FLOW-IMAGE-PREFLIGHT<br/>只规划；图片调用数=0"]
+    PLAN_ZERO --> STORE_CHECKPOINT["STORE-IMAGE-RUN-CHECKPOINT<br/>draft hash / mode / pages / jobs / assets<br/>服务端 HMAC 签名"]
+    STORE_CHECKPOINT --> ONE_CALL["ACT-ONE-PAID-IMAGE-STEP<br/>单个请求最多 1 次图片调用"]
+    ONE_CALL --> ADMIT_ASSET{"图片与切片 QA 通过？"}
+    ADMIT_ASSET -->|是：先保存资产与下一步| STORE_CHECKPOINT
+    ADMIT_ASSET -->|否：保存失败步与已有资产| RESUME_ONE["UI-RESUME-CURRENT-STEP<br/>只重试当前步；提示可能重复计费"] --> ONE_CALL
+    STORE_CHECKPOINT -->|全部 unit 完成| CONTENT_PACKAGE["CONTENT PACKAGE"]
+    SERVER_KEY["RULE-SERVER-MANAGED-CREDENTIAL<br/>Vercel Sensitive Env；浏览器无 Key"] --> ONE_CALL
   end
 
   subgraph EVIDENCE["证据与模型身份"]
@@ -88,9 +108,11 @@ flowchart TB
 
 | 节点组 | `source_ref` | 必须运行的消费者证据 | 当前状态 |
 |---|---|---|---|
-| `ACT-NEW-DRAFT / STORE-AUTHORING-SESSION / FLOW-RETURN-PREVIOUS` | `src/main.jsx` + `src/workspace-state.mjs` | `TEST-UNASSEMBLED-DRAFT-SURVIVES` + `TEST-RETURN-PREVIOUS` + 持久化失败不切换 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
-| `UI-SOURCE-CTA / ACT-FOCUS-SOURCE / UI-SOURCE-INPUT` | `src/main.jsx` + `src/styles.css` | 真实点击后断言 panel 可见、`document.activeElement` 与可见 focus ring；源码正则不计 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
-| `STORE-CONFIRMED-TEXT / RULE-SINGLE-CONTENT-AUTHORITY / RULE-LINEAGE-GATE` | `src/content-engine.mjs` + `src/publication-authority.mjs` + `src/publication-action-guard.mjs` + `src/main.jsx` | `TEST-NO-CROSS-DRAFT-STATE` + `TEST-PUBLISH-PROJECTION` + 阻断态原生禁用与副作用调用数 0；允许态恰好 1 次 | `PASS_LOCAL_FOR_FIX / FAIL_CURRENT_PRODUCTION` |
+| `ACT-NEW-DRAFT / STORE-AUTHORING-SESSION / FLOW-RETURN-PREVIOUS / RULE-AUTHORING-SNAPSHOT-NO-CANVAS` | `src/main.jsx` + `src/workspace-state.mjs` + `src/creator-journey.mjs` | `TEST-UNASSEMBLED-DRAFT-SURVIVES` + `TEST-RETURN-PREVIOUS` + authoring-only saved snapshot 不得渲染 placeholder canvas + 持久化失败不切换 | `PASS_LOCAL_BROWSER_AFTER_FIX / FAIL_CURRENT_PRODUCTION` |
+| `UI-SOURCE-CTA / ACT-FOCUS-SOURCE / UI-SOURCE-INPUT` | `src/main.jsx` + `src/styles.css` | 真实点击后断言 panel 可见、`document.activeElement` 与可见 focus ring，并在不二次点击输入框时直接键入成功；源码正则不计 | `PASS_LOCAL_BROWSER / FAIL_CURRENT_PRODUCTION` |
+| `STORE-CONFIRMED-TEXT / RULE-SINGLE-CONTENT-AUTHORITY / UI-PUBLISH-PACKAGE-SUMMARY / RULE-LINEAGE-GATE` | `src/content-engine.mjs` + `src/publication-authority.mjs` + `src/publication-action-guard.mjs` + `src/main.jsx` | `TEST-NO-CROSS-DRAFT-STATE` + 单一编辑面合同测试 + 浏览器量测最终标题编辑器 1/旧发布标题 0 + 390px 摘要可见 + 阻断态副作用 0 | `PASS_LOCAL_BROWSER / FAIL_CURRENT_PRODUCTION` |
+| `FLOW-PUBLIC-IMAGE-STEPS / STORE-IMAGE-RUN-CHECKPOINT` | `src/public-image-run.mjs` + `api/provider.mjs` + `src/provider-contract.mjs` + `src/provider-client.mjs` + `src/main.jsx` | 规划 0 调图、逐请求最多 1 次调图、HMAC 防篡改、好图保留、缺图有界补绘、失败步可续跑、4 MB 回执预算 | `PASS_MECHANISM_LOCAL / BROWSER_NOT_RUN / FAIL_CURRENT_PRODUCTION` |
+| `RULE-SERVER-MANAGED-CREDENTIAL` | `api/provider.mjs` + `src/provider-client.mjs` + `src/main.jsx` | health/config 返回 server-managed；浏览器无 Authorization/Key 字段；fresh tab 不重填 Key；服务端环境无 Key 时 fail closed | `PASS_MECHANISM_LOCAL / PRODUCTION_ENV_UNKNOWN / FAIL_CURRENT_PRODUCTION` |
 | `RULE-EVIDENCE-IDENTITY / RULE-MAP-SOURCE-INTEGRITY` | 本地图 + `logic/logic-model.json` + `logic/reality-status.json` + `deployment/PRODUCTION_RUNBOOK.md` | 同一 identity 的 mechanism/Preview/桌面/窄屏/正式域名回读；逐个 `source_ref` SHA-256 与当前字节一致 | `NOT_RUN`；不得写 `ALIGNED` |
 
 `STORE-AUTHORING-SESSION` 的最小完整载荷是 `schema_version / saved_at / draft_id / generation_session_id / source_topic / pillar / goal / text_requirements / title_candidates / selected_title / body / tags / text_confirmed / assembled_draft_id / image_plan / image_count / image_call_count / image_resume / content`；BYOK Key 不得进入该快照。旧 `content-only` 完整稿必须以显式 `CONTENT_ONLY` 模式打开并清空不相干 generation state，可继续编辑、保存与导出；一旦进入新文字流程，就必须在同一 `DraftRecord` 建立 confirmed lineage，禁止暗中沿用上一稿的 session。

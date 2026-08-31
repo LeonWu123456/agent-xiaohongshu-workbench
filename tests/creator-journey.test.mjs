@@ -1,6 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveCreatorJourney } from "../src/creator-journey.mjs";
+import { generateContentPackage } from "../src/content-engine.mjs";
+import { contentHasRenderableCanvas, deriveCreatorJourney } from "../src/creator-journey.mjs";
+
+test("a recoverable source-only snapshot cannot expose placeholder pages from another authoring state", () => {
+  const placeholder = {
+    ...generateContentPackage({ topic: "只有原文，还没有生成文字" }),
+    id: "source-only-draft",
+    saved_at: "2026-08-31T08:00:00.000Z",
+  };
+  assert.equal(contentHasRenderableCanvas(placeholder, { activatedAsContentOnly: false }), false);
+  assert.equal(contentHasRenderableCanvas(placeholder, { activatedAsContentOnly: true }), true);
+  assert.equal(contentHasRenderableCanvas({ ...placeholder, saved_at: undefined, generation: { ...placeholder.generation, mode: "PROVIDER" } }), true);
+});
 
 test("starts at source and text generation", () => {
   const result = deriveCreatorJourney({ topic: "一个选题" });

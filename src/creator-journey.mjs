@@ -6,6 +6,27 @@ const STEPS = [
   { step: 5, label: "发布包", target: "creator-publish" },
 ];
 
+export function contentHasRenderableCanvas(content, { activatedAsContentOnly = false } = {}) {
+  if (!content || typeof content !== "object") return false;
+  // `beginNewDraft` timestamps an authoring-only snapshot so it is recoverable.
+  // That timestamp is not proof that its generated placeholder pages are a real
+  // content package. Only provider output, or an explicitly opened legacy
+  // content-only asset, may make those pages visible and publishable.
+  const hasContentProvenance = content.generation?.mode === "PROVIDER"
+    || (activatedAsContentOnly && Boolean(content.saved_at));
+  const visibleCount = Math.max(0, Number(content.visible_pages) || 0);
+  const visiblePages = Array.isArray(content.pages) ? content.pages.slice(0, visibleCount) : [];
+  return Boolean(
+    hasContentProvenance
+    && String(content.selectedTitle || "").trim()
+    && String(content.body || "").trim()
+    && Array.isArray(content.tags)
+    && content.tags.length === 5
+    && visiblePages.length > 0
+    && visiblePages.every((page) => String(page?.title || "").trim() && String(page?.body || "").trim())
+  );
+}
+
 export function deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfirmedContent = false, generatedImageCount = 0, requiredImageCount = 0, layoutIssueCount = 0, exportState = "IDLE" }) {
   const hasTopic = Boolean(String(topic || "").trim());
   const hasTextDraft = Boolean(textDraft || hasConfirmedContent);
@@ -18,7 +39,7 @@ export function deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfi
   if (hasTextDraft) { currentStep = 2; nextAction = "修改标题、正文与标签，然后确认文字"; }
   if (hasTextDraft && hasConfirmedText) { currentStep = 3; nextAction = required > 0 ? `生成与当前文字一致的配图（${Math.min(generated, required)}/${required}）` : "生成与当前文字一致的配图"; }
   if (imageSetComplete) { currentStep = 4; nextAction = layoutIssueCount ? `处理 ${layoutIssueCount} 处排版问题` : "检查排版与每页图文关系"; }
-  if (imageSetComplete && layoutIssueCount === 0) { currentStep = 5; nextAction = "检查发布文案，然后下载发布包"; }
+  if (imageSetComplete && layoutIssueCount === 0) { currentStep = 5; nextAction = "确认唯一文案与画布一致，然后下载发布包"; }
   if (exportState === "COMPLETE") { currentStep = 5; nextAction = "发布包已生成；发布后回资产库补现实反馈"; }
 
   const steps = STEPS.map((item) => ({ ...item, state: item.step < currentStep ? "done" : item.step === currentStep ? "current" : "pending" }));

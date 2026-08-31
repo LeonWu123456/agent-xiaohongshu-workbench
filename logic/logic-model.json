@@ -2,7 +2,7 @@
   "schema": "mesy.living-logic-model.v1",
   "object_id": "xiaoshimei-studio-v2",
   "object_root": "Products/Xiaoshimei-Studio-v2",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "nodes": [
     {
       "id": "CAP-CREATE",
@@ -274,6 +274,122 @@
           "kind": "test"
         }
       ]
+    },
+    {
+      "id": "UI-PUBLISH-PACKAGE-SUMMARY",
+      "type": "UI",
+      "label": "发布包只读摘要",
+      "spec": {
+        "invariant": "新文字流程全程只有一份可编辑标题、正文与标签；第五步只投影已确认文字并提供复制、下载，不得出现第二套编辑表单"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
+      "type": "RULE",
+      "label": "未组装草稿不得显露占位画布",
+      "spec": {
+        "rule": "authoring-only DraftRecord 即使为了可恢复而带 saved_at，也不能把 DEMO_TEMPLATE 占位页判成真实成稿；只有 Provider 内容或显式打开的 CONTENT_ONLY 历史成稿可显示画布与发布区"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/creator-journey.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "FLOW-PUBLIC-IMAGE-STEPS",
+      "type": "FLOW",
+      "label": "公网配图逐步生成与恢复",
+      "spec": {
+        "preflight": "确认文字后先规划，图片调用数为 0",
+        "invariant": "每个公网请求最多发起 1 次付费图片调用；已验收资产和下一步作业写入签名 checkpoint 后才继续",
+        "failure": "保留已完成资产与当前作业；只重试当前步，并明确提示当前失败步可能被 Provider 重复计费"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "STORE-IMAGE-RUN-CHECKPOINT",
+      "type": "STORE",
+      "label": "配图断点随 DraftRecord 持久化",
+      "spec": {
+        "schema": "xiaoshimei.public-image-run.v1",
+        "invariant": "checkpoint 绑定 draft hash、模式、页数与 run id；服务端 HMAC 验签；API Key 永不进入 DraftRecord、备份或浏览器持久化"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-SERVER-MANAGED-CREDENTIAL",
+      "type": "RULE",
+      "label": "生产 Provider 凭据只在服务端",
+      "spec": {
+        "rule": "稳定域名优先使用 Vercel Sensitive Environment Variable；浏览器不接收、不发送、不持久化 Key，也不要求每个标签页重填；BYOK 只保留为兼容模式"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
+      "type": "EVIDENCE",
+      "label": "唯一文案、服务端凭据与断点恢复闭环证据",
+      "spec": {
+        "suite": "tests/public-image-run.test.mjs + tests/cloud-provider.test.mjs + tests/foundation.test.mjs + tests/generation-feedback.test.mjs + tests/sol-workbench-contract.test.mjs + same-deployment browser journey",
+        "release_rule": "本地测试与构建只证明 mechanism/package；Preview 与稳定域名同 identity 浏览器旅程未通过时，不得判 production/reality PASS"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/public-image-run.test.mjs",
+          "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/cloud-provider.test.mjs",
+          "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/sol-workbench-contract.test.mjs",
+          "kind": "test"
+        }
+      ]
     }
   ],
   "relations": [
@@ -391,6 +507,61 @@
       "from": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
       "to": "EVD-PUBLICATION-AUTHORITY-TEST",
       "type": "verified_by"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "UI-PUBLISH-PACKAGE-SUMMARY",
+      "type": "contains"
+    },
+    {
+      "from": "UI-PUBLISH-PACKAGE-SUMMARY",
+      "to": "RULE-PUBLICATION-LINEAGE",
+      "type": "constrained_by"
+    },
+    {
+      "from": "UI-PUBLISH-PACKAGE-SUMMARY",
+      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "BLOCK-AUTHORING",
+      "to": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
+      "type": "constrained_by"
+    },
+    {
+      "from": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
+      "to": "EVD-DRAFT-AUTHORITY-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "BLOCK-IMAGE",
+      "to": "FLOW-PUBLIC-IMAGE-STEPS",
+      "type": "contains"
+    },
+    {
+      "from": "FLOW-PUBLIC-IMAGE-STEPS",
+      "to": "STORE-IMAGE-RUN-CHECKPOINT",
+      "type": "writes"
+    },
+    {
+      "from": "FLOW-PUBLIC-IMAGE-STEPS",
+      "to": "RULE-SERVER-MANAGED-CREDENTIAL",
+      "type": "constrained_by"
+    },
+    {
+      "from": "FLOW-PUBLIC-IMAGE-STEPS",
+      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "STORE-IMAGE-RUN-CHECKPOINT",
+      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
+      "type": "verified_by"
+    },
+    {
+      "from": "RULE-SERVER-MANAGED-CREDENTIAL",
+      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
+      "type": "verified_by"
     }
   ],
   "problems": [
@@ -442,12 +613,13 @@
     {
       "id": "D33",
       "state": "REPAIR_IN_PROGRESS",
-      "claim": "新创作会丢未组装文字稿，旧 content 与 generation session 可跨稿串联，填写原文无真实焦点后置条件",
+      "claim": "新创作会丢未组装文字稿，恢复 authoring-only 稿会把占位画布误判成成稿，旧 content 与 generation session 可跨稿串联，填写原文无真实焦点后置条件",
       "target_nodes": [
         "STORE-WORKSPACE-ENVELOPE",
         "ACT-NEW-DRAFT",
         "ACT-FOCUS-SOURCE",
-        "RULE-PUBLICATION-LINEAGE"
+        "RULE-PUBLICATION-LINEAGE",
+        "RULE-AUTHORING-SNAPSHOT-NO-CANVAS"
       ],
       "probe": {
         "kind": "literal",
@@ -455,7 +627,54 @@
         "pattern": "derivePublicationAuthority",
         "claim_true_when": "absent"
       },
-      "solution_ref": "tests/workspace-state-v2.test.mjs + tests/publication-authority.test.mjs + stable-domain browser readback"
+      "solution_ref": "tests/workspace-state-v2.test.mjs + tests/creator-journey.test.mjs + tests/publication-authority.test.mjs + stable-domain browser readback"
+    },
+    {
+      "id": "D34",
+      "state": "REPAIR_IN_PROGRESS",
+      "claim": "文字草稿与发布文案同时提供独立编辑面，导致同一作品存在两份内容权威",
+      "target_nodes": [
+        "RULE-PUBLICATION-LINEAGE",
+        "UI-PUBLISH-PACKAGE-SUMMARY"
+      ],
+      "probe": {
+        "kind": "literal",
+        "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+        "pattern": "confirmed authoring exposes one editable copy",
+        "claim_true_when": "absent"
+      },
+      "solution_ref": "tests/sol-workbench-contract.test.mjs + same-deployment browser journey"
+    },
+    {
+      "id": "D35",
+      "state": "REPAIR_IN_PROGRESS",
+      "claim": "公网配图单请求可能运行到 300 秒超时，浏览器显示可恢复但 API 不接受恢复 checkpoint，已完成图片无法安全续跑",
+      "target_nodes": [
+        "FLOW-PUBLIC-IMAGE-STEPS",
+        "STORE-IMAGE-RUN-CHECKPOINT"
+      ],
+      "probe": {
+        "kind": "literal",
+        "path": "Products/Xiaoshimei-Studio-v2/src/provider-contract.mjs",
+        "pattern": "resume_checkpoint",
+        "claim_true_when": "absent"
+      },
+      "solution_ref": "tests/public-image-run.test.mjs + tests/cloud-provider.test.mjs + stable-domain interrupted-generation readback"
+    },
+    {
+      "id": "D36",
+      "state": "REPAIR_IN_PROGRESS",
+      "claim": "稳定入口把生产 Key 放在标签页内存，刷新或换标签页就要求重新填写，浏览器承担了不该拥有的生产凭据",
+      "target_nodes": [
+        "RULE-SERVER-MANAGED-CREDENTIAL"
+      ],
+      "probe": {
+        "kind": "literal",
+        "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
+        "pattern": "process.env.ARK_API_KEY",
+        "claim_true_when": "absent"
+      },
+      "solution_ref": "tests/cloud-provider.test.mjs + tests/foundation.test.mjs + stable-domain fresh-tab health/readback"
     }
   ]
 }

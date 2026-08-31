@@ -175,11 +175,20 @@ test("creator journey is bound to the current confirmed draft and required image
   assert.doesNotMatch(source, /fetch\("\/api\/local-export"/);
 });
 
-test("generation UI distinguishes canvases, illustration units, mother sheets, and paid calls", async () => {
+test("generation UI distinguishes canvases, illustration units, mother sheets, and resumable paid steps", async () => {
   const source = await readFile(mainUrl, "utf8");
   assert.match(source, /个画板/);
   assert.match(source, /个插画单元/);
   assert.match(source, /3:4 母版图（首张含 9:8 高清 KV，后续按需续页）/);
-  assert.match(source, /生成 .*张母图并自动排版/);
+  assert.match(source, /每完成一步都会先保存/);
+  assert.match(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
+  assert.match(source, /继续图片步骤/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
+});
+
+test("confirmed authoring exposes one editable copy and a compact publish package instead of a second copy editor", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  assert.match(source, /className="publish-package-summary"/);
+  assert.match(source, /不再维护第二份文案/);
+  assert.doesNotMatch(source, /<strong>发布文案<\/strong>/);
 });

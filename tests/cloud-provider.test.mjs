@@ -7,11 +7,14 @@ import {
   buildMissingUnitRepairJobs,
   buildStandaloneRepairPrompt,
   publicTileBudgetForResponse,
+  signPublicImageCheckpoint,
   sliceStandaloneRepairForUnit,
   splitMotherSheetForUnits,
+  verifyPublicImageCheckpoint,
 } from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
+import { createPublicImageRun } from "../src/public-image-run.mjs";
 import sharp from "sharp";
 
 function responseProbe() {
@@ -26,18 +29,65 @@ function responseProbe() {
 }
 
 test("cloud provider health is public but never claims a stored key", async () => {
+  const previous = process.env.ARK_API_KEY;
+  delete process.env.ARK_API_KEY;
   const response = responseProbe();
-  await handler({ method: "GET", query: { route: "health" }, headers: {} }, response);
-  assert.equal(response.statusCode, 200);
-  assert.equal(response.body.configured, false);
-  assert.equal(response.body.key_store, "当前标签页 sessionStorage");
+  try {
+    await handler({ method: "GET", query: { route: "health" }, headers: {} }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.configured, false);
+    assert.equal(response.body.key_store, "当前标签页 sessionStorage");
+  } finally {
+    if (previous == null) delete process.env.ARK_API_KEY;
+    else process.env.ARK_API_KEY = previous;
+  }
 });
 
 test("cloud provider fails closed before an upstream call when BYOK is absent", async () => {
+  const previous = process.env.ARK_API_KEY;
+  delete process.env.ARK_API_KEY;
   const response = responseProbe();
-  await handler({ method: "POST", query: { route: "text-draft" }, headers: {}, body: {} }, response);
-  assert.equal(response.statusCode, 401);
-  assert.equal(response.body.code, "ARK_API_KEY_REQUIRED");
+  try {
+    await handler({ method: "POST", query: { route: "text-draft" }, headers: {}, body: {} }, response);
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.body.code, "ARK_API_KEY_REQUIRED");
+  } finally {
+    if (previous == null) delete process.env.ARK_API_KEY;
+    else process.env.ARK_API_KEY = previous;
+  }
+});
+
+test("cloud provider can use one server-managed production key without exposing it to the browser", async () => {
+  const previous = process.env.ARK_API_KEY;
+  process.env.ARK_API_KEY = "server-secret-test-key";
+  const response = responseProbe();
+  try {
+    await handler({ method: "GET", query: { route: "config" }, headers: {} }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.configured, true);
+    assert.equal(response.body.credential_mode, "SERVER_MANAGED");
+    assert.equal(response.body.key_store, "Vercel Sensitive Environment Variable");
+    assert.equal(JSON.stringify(response.body).includes("server-secret-test-key"), false);
+  } finally {
+    if (previous == null) delete process.env.ARK_API_KEY;
+    else process.env.ARK_API_KEY = previous;
+  }
+});
+
+test("public image resume checkpoint is signed and rejects browser tampering", () => {
+  const run = createPublicImageRun({
+    runId: "images-2026-08-31T08-00-00-000Z-abcdef12",
+    draftId: "draft-1",
+    draftSha256: "d".repeat(64),
+    productionMode: "smart",
+    finalPages: [{ title: "第一页" }],
+    illustrationUnits: [{ unit_id: "page-1-hero", page_index: 0, panel_index: null }],
+    referenceFingerprint: "f".repeat(64),
+    jobs: [{ sheet_id: "mother-sheet-1", sheet_index: 0, units: [{ unit_id: "page-1-hero", page_index: 0, panel_index: null }], job_kind: "mother_sheet" }],
+  });
+  const signed = signPublicImageCheckpoint(run, "test-key-123456");
+  assert.equal(verifyPublicImageCheckpoint(signed, "test-key-123456", { draftId: "draft-1" }).run_id, run.run_id);
+  assert.throws(() => verifyPublicImageCheckpoint({ ...signed, actual_image_calls: 1 }, "test-key-123456"), /SIGNATURE_INVALID/);
 });
 
 test("page candidate contract accepts browser-local generated assets", () => {
@@ -163,4 +213,5 @@ test("cloud response budget fails closed before a browser receives an oversized 
     /PUBLIC_RESPONSE_BUDGET_EXCEEDED/,
   );
   assert.ok(publicTileBudgetForResponse(24) < publicTileBudgetForResponse(4));
+  assert.ok(publicTileBudgetForResponse(24) * 24 <= 2_300_000);
 });

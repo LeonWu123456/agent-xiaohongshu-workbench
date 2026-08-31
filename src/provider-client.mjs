@@ -4,6 +4,7 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const CLOUD_SETTINGS_KEY = "xiaoshimei-studio.byok-provider.v1";
 const CLOUD_KEY = "xiaoshimei-studio.byok-api-key.v1";
 const CLOUD_VERIFIED_KEY = "xiaoshimei-studio.byok-verified.v1";
+const PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA = "xiaoshimei.public-image-step-response.v1";
 const CLOUD_DEFAULTS = Object.freeze({
   provider: "volcengine-ark",
   provider_label: "火山方舟",
@@ -23,15 +24,18 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
   if (typeof fetchImpl !== "function") throw new TypeError("provider fetch implementation is required");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300000) throw new TypeError("provider timeout is invalid");
 
+  let publicServerSettings = null;
   const cloudSettings = () => {
     if (isLoopback) return null;
     let stored = {};
     try { stored = JSON.parse(globalThis.sessionStorage?.getItem(CLOUD_SETTINGS_KEY) || "{}"); } catch { stored = {}; }
     const apiKey = globalThis.sessionStorage?.getItem(CLOUD_KEY) || "";
-    return { ...CLOUD_DEFAULTS, ...stored, configured: apiKey.trim().length >= 8 };
+    const serverManaged = publicServerSettings?.credential_mode === "SERVER_MANAGED" && publicServerSettings?.configured === true;
+    if (serverManaged) return { ...CLOUD_DEFAULTS, ...stored, ...publicServerSettings, configured: true, credential_mode: "SERVER_MANAGED" };
+    return { ...CLOUD_DEFAULTS, ...publicServerSettings, ...stored, configured: apiKey.trim().length >= 8, credential_mode: "BROWSER_BYOK", key_store: "当前标签页 sessionStorage" };
   };
 
-  const settingsSignature = (settings) => [settings?.provider, settings?.base_url, settings?.text_model, settings?.image_model].join("|");
+  const settingsSignature = (settings) => [settings?.provider, settings?.base_url, settings?.text_model, settings?.image_model, settings?.credential_mode].join("|");
   const cloudVerification = (settings) => {
     if (!settings?.configured) return null;
     try {
@@ -50,7 +54,8 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     try {
       const settings = cloudSettings();
       const apiKey = settings ? globalThis.sessionStorage?.getItem(CLOUD_KEY) || "" : "";
-      const response = await fetchImpl(target, { method: "POST", headers: { "content-type": "application/json", ...(settings ? { authorization: `Bearer ${apiKey}`, "x-xiaoshimei-text-model": settings.text_model, "x-xiaoshimei-image-model": settings.image_model } : {}) }, body: JSON.stringify(body), signal: controller.signal });
+      const browserByok = settings && settings.credential_mode !== "SERVER_MANAGED";
+      const response = await fetchImpl(target, { method: "POST", headers: { "content-type": "application/json", ...(browserByok ? { authorization: `Bearer ${apiKey}`, "x-xiaoshimei-text-model": settings.text_model, "x-xiaoshimei-image-model": settings.image_model } : {}) }, body: JSON.stringify(body), signal: controller.signal });
       const payload = await response.json();
       if (!response?.ok) {
         const providerCode = String(payload?.code || payload?.error || `HTTP_${response?.status || "UNKNOWN"}`);
@@ -87,6 +92,7 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         const payload = await response.json();
         if (!response?.ok) throw new Error(`provider health failed: HTTP_${response?.status || "UNKNOWN"}`);
         if (isLoopback) return payload;
+        publicServerSettings = payload && typeof payload === "object" ? structuredClone(payload) : null;
         const settings = cloudSettings();
         const verified = cloudVerification(settings);
         return {
@@ -98,14 +104,16 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
       } finally { clearTimeout(timer); }
     },
     async getSettings() {
-      if (!isLoopback) return cloudSettings();
       const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store" });
       const payload = await response.json();
       if (!response?.ok) throw new Error(`provider config failed: HTTP_${response?.status || "UNKNOWN"}`);
-      return payload;
+      if (isLoopback) return payload;
+      publicServerSettings = payload && typeof payload === "object" ? structuredClone(payload) : null;
+      return cloudSettings();
     },
     async updateSettings(input) {
       if (!isLoopback) {
+        if (cloudSettings()?.credential_mode === "SERVER_MANAGED") return cloudSettings();
         if (input?.provider !== "volcengine-ark") throw new TypeError("公网体验当前只开放火山方舟");
         const textModel = String(input?.text_model || "").trim();
         const imageModel = String(input?.image_model || "").trim();
@@ -126,8 +134,17 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     async generateTextDraft(input) {
       return parseTextDraftResponse(await post(textDraftUrl, buildTextDraftRequest(input)));
     },
-    async generateImages(input) {
-      return post(imageGenerationUrl, buildImageGenerationRequest(input));
+    async generateImages(input, onProgress) {
+      let next = structuredClone(input);
+      for (let step = 0; step < 64; step += 1) {
+        const payload = await post(imageGenerationUrl, buildImageGenerationRequest(next));
+        if (payload?.schema !== PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA || payload?.status !== "PARTIAL") return payload;
+        const resume = payload.resume;
+        if (!resume?.resume_run_id || !resume?.resume_checkpoint) throw new TypeError("PUBLIC_IMAGE_STEP_RESPONSE_INVALID");
+        if (typeof onProgress === "function") await onProgress(structuredClone(resume));
+        next = { ...input, resume_run_id: resume.resume_run_id, resume_checkpoint: resume.resume_checkpoint };
+      }
+      throw new Error("PUBLIC_IMAGE_STEP_LIMIT_EXCEEDED");
     },
     async generatePageCandidates(input) {
       return parsePageCandidateResponse(await post(candidateUrl, buildPageCandidateRequest(input)));

@@ -15,6 +15,13 @@ export function generationFailureFeedback(error) {
   const inferredStage = error?.providerStage || (/IMAGE_|PAGE_PLAN|image/i.test(technicalCode) ? "image" : "text");
   const meta = { technical_code: technicalCode, stage: inferredStage, failure_id: error?.failureId || null, failed_at: new Date().toISOString() };
   const resume = error?.providerDetails;
+  if (resume?.retry_scope === "CHANGE_VISUAL_INPUTS_THEN_RESTART") {
+    return { ...meta, stage: "image", code: "IMAGE_REPAIR_EXHAUSTED", title: "剩余插画连续未过切片校验", detail: `已保存 ${resume.completed_pages || 0}/${resume.total_pages || 0} 页可用结果；本轮约发生 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。继续点重试不会盲目重复扣费，请先调整画面要求或动作参考，再重新开始配图。` };
+  }
+  if (resume?.resume_run_id && Number.isInteger(resume.completed_image_steps) && Number.isInteger(resume.total_image_steps)) {
+    const replayWarning = resume.current_step_may_replay ? "当前失败步骤已收到 Provider 图片但没完成回写；重试这一小步可能再产生一次图片调用，之前步骤不会重做。" : "重试只会执行当前图片步骤，之前步骤不会重做。";
+    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保存图片步骤 ${resume.completed_image_steps}/${resume.total_image_steps}`, detail: `停在第 ${resume.failed_image_step || resume.completed_image_steps + 1} 步；本轮约发生 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。${replayWarning}` };
+  }
   if (resume?.resume_run_id && Number.isInteger(resume.completed_mother_sheets) && Number.isInteger(resume.total_mother_sheets)) {
     return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保留 ${resume.completed_mother_sheets}/${resume.total_mother_sheets} 张母图`, detail: `停在第 ${resume.failed_mother_sheet || resume.completed_mother_sheets + 1} 张母图；已发生约 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。继续时会从母图断点恢复，已切好的插画单元不会重做。` };
   }

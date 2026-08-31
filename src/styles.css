@@ -175,7 +175,13 @@ main { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
 .provider-settings-card label > span { font-size: 10px; font-weight: 750; }
 .provider-settings-card input, .provider-settings-card select { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: white; padding: 0 10px; font: 11px/1.2 var(--font-sans); }
 .provider-settings-card > p { margin: 0; padding: 9px 10px; border-radius: 9px; background: rgba(85,117,100,.06); }
+.provider-managed-card { display: grid; gap: 6px; padding: 16px; border: 1px solid rgba(85,117,100,.22); border-radius: 13px; background: rgba(85,117,100,.07); }
+.provider-managed-card strong { color: var(--moss); font-size: 13px; }
+.provider-managed-card span { color: var(--ink); font-size: 12px; font-weight: 800; }
+.provider-managed-card small { color: var(--muted); font-size: 10px; }
+.provider-managed-card p { margin: 5px 0 0; color: #53655a; font-size: 10px; line-height: 1.55; }
 .provider-settings-card > footer { display: grid; grid-template-columns: .8fr 1.2fr; gap: 8px; padding-top: 2px; }
+.provider-managed-card + footer { grid-template-columns: 1fr; }
 .provider-settings-card > footer button { min-height: 40px; border-radius: 9px; font-size: 10px; font-weight: 750; }
 .provider-settings-cancel { border: 1px solid var(--line); background: transparent; }
 .provider-settings-save { border: 0; color: white; background: var(--moss); }
@@ -551,6 +557,10 @@ main { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
 .publish-copy__head { display: grid; gap: 3px; }
 .publish-copy__head strong { font: 700 14px/1.2 var(--font-serif); }
 .publish-copy__head span { color: var(--muted); font-size: 10px; }
+.publish-package-summary { display: grid; gap: 6px; padding: 14px; border: 1px solid rgba(88,64,46,.12); border-radius: 12px; background: rgba(250,247,241,.72); }
+.publish-package-summary strong { font: 700 14px/1.35 var(--font-serif); color: var(--ink); }
+.publish-package-summary span { color: #7a4533; font-size: 11px; font-weight: 800; }
+.publish-package-summary small { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .publish-copy label, .object-editor label, .tag-editor { display: grid; gap: 5px; }
 .publish-copy label > span, .object-editor label > span, .tag-editor > span { color: #59655f; font-size: 11px; font-weight: 700; }
 input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 12px; background: white; padding: 9px 10px; font-size: 13px; resize: vertical; }

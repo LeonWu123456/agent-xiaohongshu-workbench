@@ -38,7 +38,7 @@ import {
 import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
 import { derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
-import { deriveCreatorJourney } from "./creator-journey.mjs";
+import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
 import { REALITY_METRICS, REALITY_WINDOWS, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
 import {
   COMPOSITION_MODES, DESIGN_PRESETS, applyCompositionMode, applyDesignPreset,
@@ -548,19 +548,13 @@ function App() {
   const isGenerating = generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
   const providerCanAttempt = providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED";
   const providerStatusLabel = providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
+  const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
   const reusableImageAssets = useMemo(() => collectReusableImageAssets(content, library), [content, library]);
   const resolvedPageCount = textDraft ? (imageCountMode === "AUTO" ? textDraft.recommended_image_count : Number(customImageCount)) : 0;
   const motherSheetEstimate = textDraft && resolvedPageCount ? estimateMotherSheetPlan(resolvedPageCount, productionMode) : null;
   const motherSheetRange = motherSheetEstimate ? (motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? `${motherSheetEstimate.minMotherSheets}` : `${motherSheetEstimate.minMotherSheets}–${motherSheetEstimate.maxMotherSheets}`) : "0";
   const illustrationUnitRange = motherSheetEstimate ? (motherSheetEstimate.minIllustrationUnits === motherSheetEstimate.maxIllustrationUnits ? `${motherSheetEstimate.minIllustrationUnits}` : `${motherSheetEstimate.minIllustrationUnits}–${motherSheetEstimate.maxIllustrationUnits}`) : "0";
-  const hasConfirmedContent = Boolean(
-    (content.generation?.mode === "PROVIDER" || content.saved_at)
-    && content.selectedTitle?.trim()
-    && content.body?.trim()
-    && content.tags?.length === 5
-    && visiblePages.length > 0
-    && visiblePages.every((page) => page.title?.trim() && page.body?.trim())
-  );
+  const hasConfirmedContent = contentHasRenderableCanvas(content, { activatedAsContentOnly });
   const isDraftInputOnly = !hasConfirmedContent;
   const isFreshDraft = isDraftInputOnly && !String(topic || "").trim() && !textDraft;
   const requiredImageCount = textConfirmed
@@ -702,7 +696,7 @@ function App() {
       setProviderSettingsForm((current) => ({ ...current, api_key: "" }));
       setProviderHealth(settings.configured ? "UNVERIFIED" : "OFFLINE");
       setProviderSettingsOpen(false);
-      setToast(IS_PUBLIC_RUNTIME ? "设置已保存；首次成功生成后会显示连接已验证。API Key 只保存在当前标签页" : "生成服务已切换；API Key 只保存在本机钥匙串");
+      setToast(settings.credential_mode === "SERVER_MANAGED" ? "生产生成服务已接好；密钥仍由服务端保管" : IS_PUBLIC_RUNTIME ? "设置已保存；首次成功生成后会显示连接已验证。API Key 只保存在当前标签页" : "生成服务已切换；API Key 只保存在本机钥匙串");
     } catch (error) {
       setToast(`生成服务设置未保存：${String(error?.providerCode || error?.message || "UNKNOWN")}`);
     } finally {
@@ -754,7 +748,7 @@ function App() {
       catch { if (active) setProviderHealth("OFFLINE"); }
     };
     check();
-    const timer = setInterval(check, 5000);
+    const timer = setInterval(check, 30000);
     return () => { active = false; clearInterval(timer); };
   }, [provider]);
 
@@ -1211,9 +1205,12 @@ function App() {
       const resolvedCount = count === "AUTO" ? textDraft.recommended_image_count : count;
       const estimate = estimateMotherSheetPlan(resolvedCount, productionMode);
       const estimatedSheets = estimate.minMotherSheets === estimate.maxMotherSheets ? `${estimate.minMotherSheets}` : `${estimate.minMotherSheets}–${estimate.maxMotherSheets}`;
-      setToast(imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
+      setToast(imageResume?.completed_image_steps != null ? `正在从图片步骤 ${imageResume.completed_image_steps + 1} 继续，已回写的插画不会重做` : imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       const draftForImages = { ...textDraft, prompt_context: promptContextForProvider(promptValues) };
-      const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote })));
+      const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, resume_checkpoint: imageResume?.resume_checkpoint || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote }, (progress) => {
+        setImageResume(progress);
+        setToast(progress.completed_image_steps === 0 ? `配图规划已保存；将分 ${progress.total_image_steps} 个可恢复步骤生成` : `图片步骤 ${progress.completed_image_steps}/${progress.total_image_steps} 已保存；下一步只生成剩余内容`);
+      })));
       setProviderHealth("ONLINE");
       resetContent(result); setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
       setAssembledDraftId(textDraft.draft_id);
@@ -1484,9 +1481,9 @@ function App() {
         setToast(publicationBlockMessage(gate?.code));
         return;
       }
-      setToast("发布文案已复制");
+      setToast("完整发布文字已复制");
     } catch {
-      setToast("复制失败，请直接从发布文案框选复制");
+      setToast("浏览器没有允许复制；当前稿未改变，可改用下载发布包");
     }
   }
 
@@ -1684,7 +1681,7 @@ function App() {
             <span><strong>{mode.label}{mode.id === "smart" && <em>推荐</em>}</strong><small>{mode.fit}</small><b>{mode.result}</b></span>
           </label>)}</div>
         </fieldset>
-        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("AUTO"); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("CUSTOM"); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { setCustomImageCount(Number(event.target.value)); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
+        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("AUTO"); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("CUSTOM"); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { setCustomImageCount(Number(event.target.value)); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
         <section className="action-reference-panel">
           <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
@@ -1696,8 +1693,8 @@ function App() {
           <summary><div><strong>画面设置</strong><small>人物、动作、场景、风格与构图 8 项</small></div><ChevronDown /></summary>
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>正在生成 {motherSheetRange} 张母图并切分为独立插画</strong></div></div>}
-        <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中 · ${motherSheetRange} 张母图` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成 ${motherSheetRange} 张母图并自动排版 ${resolvedPageCount} 页`}</button>
+        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
+        <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中` : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={generationError} onRetry={generateImageNode} />}
       </section>}
     </>;
@@ -1731,8 +1728,8 @@ function App() {
 
         {providerSettingsOpen && <div className="provider-settings-layer" role="presentation" onClick={() => setProviderSettingsOpen(false)}>
           <section className="provider-settings-card" role="dialog" aria-modal="true" aria-label="生成服务设置" onClick={(event) => event.stopPropagation()}>
-            <header><div><strong>生成服务</strong><span>{IS_PUBLIC_RUNTIME ? "API Key 只保存在当前标签页；关闭标签页即清除，不进入草稿或发布包。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
-            <label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
+            <header><div><strong>生成服务</strong><span>{providerServerManaged ? "生产服务已接好；密钥由服务端保管，不进入浏览器、草稿或发布包。" : IS_PUBLIC_RUNTIME ? "个人体验密钥只保存在当前标签页；关闭标签页即清除。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
+            {providerServerManaged ? <div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key。</p></div> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
               const nextProvider = event.target.value;
               setProviderSettingsForm((current) => ({
                 ...current,
@@ -1746,7 +1743,8 @@ function App() {
             <div className="control-grid"><label><span>文字模型</span><input value={providerSettingsForm.text_model} onChange={(event) => setProviderSettingsForm((current) => ({ ...current, text_model: event.target.value }))} /></label><label><span>图片模型</span><input value={providerSettingsForm.image_model} onChange={(event) => setProviderSettingsForm((current) => ({ ...current, image_model: event.target.value }))} /></label></div>
             <label><span>API Key</span><input type="password" autoComplete="new-password" placeholder={providerMeta?.configured ? (IS_PUBLIC_RUNTIME ? "留空则继续使用当前标签页中的密钥" : "留空则继续使用钥匙串中的密钥") : (IS_PUBLIC_RUNTIME ? "输入后仅保存到当前标签页" : "输入后保存到本机钥匙串")} value={providerSettingsForm.api_key} onChange={(event) => setProviderSettingsForm((current) => ({ ...current, api_key: event.target.value }))} /></label>
             <p>{IS_PUBLIC_RUNTIME ? "公网体验当前使用火山方舟 Responses 与 Images Generations；服务端只转发本次调用，不落库、不回显 API Key。" : "兼容服务需同时支持 OpenAI Responses 与 Images Generations 接口；工作台不会把 Key 写进浏览器存储或导出包。"}</p>
-            <footer><button type="button" className="provider-settings-cancel" onClick={() => setProviderSettingsOpen(false)}>取消</button><button type="button" className="provider-settings-save" disabled={providerSettingsSaving} onClick={saveProviderSettings}>{providerSettingsSaving ? "保存中…" : "保存并切换"}</button></footer>
+            </>}
+            <footer>{providerServerManaged ? <button type="button" className="provider-settings-save" onClick={() => setProviderSettingsOpen(false)}>知道了</button> : <><button type="button" className="provider-settings-cancel" onClick={() => setProviderSettingsOpen(false)}>取消</button><button type="button" className="provider-settings-save" disabled={providerSettingsSaving} onClick={saveProviderSettings}>{providerSettingsSaving ? "保存中…" : "保存并切换"}</button></>}</footer>
           </section>
         </div>}
 
@@ -1819,12 +1817,16 @@ function App() {
             {!isDraftInputOnly && <section id="creator-design" className="editor-waterfall workbench-section workbench-design" aria-label="编辑栏">
               <header className="editor-waterfall__head"><div><strong>精修当前页</strong><small>{currentEditorMode === "html" ? "双击文字直接改；点图片后移动焦点或缩放，版式会随内容自然回流" : "直接在画布选中对象；拖动、缩放、双击改字，图片拖任意边裁剪"}</small></div><span className="editor-current-layer">{currentEditorMode === "html" ? "HTML Flow" : "Fabric 7"}</span></header>
               <section id="creator-publish" className={`publish-copy ${publicationAuthority.allowed ? "is-authorized" : "is-blocked"}`}>
-                <div className="publish-copy__head"><strong>发布文案</strong><span>{publicationAuthority.allowed ? (publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? "已确认文字的只读投影" : "历史成稿，以已保存内容为准") : "已锁定：当前文字与画布不能证明是同一稿"}</span></div>
+                <div className="publish-copy__head"><strong>{publicationAuthority.mode === "CONTENT_ONLY" ? "历史成稿" : "发布包"}</strong><span>{publicationAuthority.allowed ? (publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? "直接使用上方唯一一份已确认文字，不再维护第二份文案" : "旧资产没有并行文字稿，在这里继续编辑") : "已锁定：当前文字与画布不能证明是同一稿"}</span></div>
                 {!publicationAuthority.allowed ? <div className="publication-authority-alert" role="alert">
                   <strong>{publicationBlockMessage(publicationAuthority.code)}</strong>
                   <span>文字稿：{textDraft?.selected_title || "未确认"}</span>
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
+                </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
+                  <strong>{content.selectedTitle}</strong>
+                  <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>
+                  <small>标题、正文和标签均来自“文字草稿”里已确认的同一份内容；需要改字就回到上方修改并重新确认。</small>
                 </div> : <>
                   <label><span>发布标题</span><input value={content.selectedTitle} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => { const nextTitle = event.target.value; return { ...invalidateVisualReview(current), selectedTitle: nextTitle, titles: current.titles.map((title) => title === current.selectedTitle ? nextTitle : title), pages: current.pages.map((page, index) => index === 0 ? { ...page, title: nextTitle } : page) }; }, { group: "publish-title" })} /></label>
                   <label><span>发布正文</span><textarea rows="8" value={content.body} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>
