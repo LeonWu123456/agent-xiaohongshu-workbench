@@ -101,6 +101,35 @@ test("10 edited exported packages round-trip without losing design data", () => 
   }
 });
 
+test("provider generation receipts survive save and reload", () => {
+  const draft = generateContentPackage({ topic: "真实生成回执" });
+  draft.generation = {
+    mode: "PROVIDER",
+    provider: "volcengine-ark",
+    production_mode: "smart",
+    notice: "真实母图已切分，仍待人工验收",
+    run_id: "images-web-1788150000000-deadbeef",
+    strategy: "3x3_mother_sheet_server_tiles",
+    mother_sheet_count: 2,
+    illustration_unit_count: 11,
+    actual_image_calls: 2,
+    estimated_image_cost_cny: 0.44,
+    page_plan_attempts: [{ attempt: 1, status: "REJECTED", rejection_code: "PAGE_PLAN_BODY_TOO_SHORT:0" }, { attempt: 2, status: "PASS" }],
+    mother_sheet_sha256: ["a".repeat(64), "b".repeat(64)],
+    tile_sha256: ["c".repeat(64)],
+    tile_transport_budget_bytes: 160000,
+    repaired_missing_unit_count: 0,
+    repair_mother_sheet_count: 0,
+    standalone_repair_count: 0,
+    standalone_repair_sha256: [],
+    response_size_bytes: 768748,
+  };
+  const restored = parseContentPackage(JSON.stringify(draft));
+  assert.deepEqual(restored.generation, draft.generation);
+  draft.generation.tile_sha256 = ["not-a-hash"];
+  assert.throws(() => parseContentPackage(JSON.stringify(draft)), /generation.tile_sha256/);
+});
+
 test("invalid or unsupported content packages are rejected", () => {
   assert.throws(() => parseContentPackage("not-json"), /valid JSON/);
   assert.throws(
