@@ -81,6 +81,12 @@ test("unknown route values fall back to safe defaults", () => {
   assert.equal(result.goal, "save");
 });
 
+test("default production character is self-contained instead of depending on a mutable asset URL", () => {
+  const result = generateContentPackage({ topic: "生产角色图" });
+  assert.match(result.pages[0].image_style.src, /^data:image\/jpeg;base64,/);
+  assert.ok(result.pages[0].image_style.src.length > 300_000);
+});
+
 test("10 edited exported packages round-trip without losing design data", () => {
   const pillars = ["wellness", "academy", "daoism", "identity"];
   const goals = ["save", "consult", "visit"];

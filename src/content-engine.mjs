@@ -7,6 +7,7 @@ import { normalizeProductionMode } from "./production-mode.mjs";
 import { INFO_PANEL_SURFACE_COLOR, normalizeInfoPanels } from "./infographic-panels.mjs";
 import { materializeEditablePanelLayouts, normalizeLayoutIr, normalizeLayoutRecipe } from "./smart-layout.mjs";
 import { normalizeHtmlState } from "./html-layout.mjs";
+import { XIAOSHIMEI_CHARACTER_PRODUCTION_DATA_URL } from "./xiaoshimei-character-production-data.mjs";
 
 // Reference authority: Desktop/ref. Body emphasis uses the darker reference
 // orange; the cover renderer promotes it to the brighter display orange.
@@ -475,7 +476,7 @@ function normalizeImageStyle(value = {}, path = "image_style", { defaultScale = 
     : null;
   if (crop && (crop.x + crop.width > 1.000001 || crop.y + crop.height > 1.000001)) throw new TypeError(`${path}.crop exceeds the source image`);
   return {
-    src: typeof value.src === "string" && value.src ? value.src : "/assets/xiaoshimei-character.png",
+    src: typeof value.src === "string" && value.src ? value.src : XIAOSHIMEI_CHARACTER_PRODUCTION_DATA_URL,
     focalX,
     focalY,
     // A page image is a masked object by default. Upgrade legacy 100%
