@@ -97,6 +97,24 @@ export function highlightTextSegments(value, phrases = []) {
   return segments;
 }
 
+export function titleTextSegments(value, phrases = [], maxUnbrokenLength = 10) {
+  const limit = Math.max(2, Number(maxUnbrokenLength) || 10);
+  const segments = [];
+  highlightTextSegments(value, phrases).forEach((segment, segmentIndex) => {
+    String(segment.text || "").split(/(\s+)/u).filter(Boolean).forEach((text, pieceIndex) => {
+      const separator = /^\s+$/u.test(text);
+      segments.push({
+        text,
+        highlight: segment.highlight,
+        separator,
+        keepTogether: !separator && [...text].length <= limit,
+        breakBefore: !separator && pieceIndex === 0 && segmentIndex > 0,
+      });
+    });
+  });
+  return segments;
+}
+
 export function layoutsForPage(page) {
   const panelCount = Array.isArray(page?.info_panels) ? page.info_panels.length : 0;
   const eligibleIds = panelCount >= 2

@@ -87,7 +87,9 @@
 }
 .html-page__title-phrase,
 .html-page__title-phrase--plain,
-.html-page__title mark { display: inline; white-space: normal !important; }
+.html-page__title mark { display: inline; }
+.html-page__title-phrase.is-phrase-kept { display: inline-block; white-space: nowrap; }
+.html-page__title-phrase.is-phrase-breakable { display: inline; white-space: normal; }
 .html-page mark {
   color: var(--page-accent, var(--xsm-orange));
   background: linear-gradient(transparent 60%, rgba(253, 133, 2, .2) 60% 92%, transparent 92%);

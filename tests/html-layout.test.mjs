@@ -4,6 +4,7 @@ import { generateContentPackage, parseContentPackage } from "../src/content-engi
 import {
   HTML_LAYOUT_STATE_VERSION, editorialPanelMeta, editorModeForPage, highlightTextSegments, imageEditFor, layoutsForPage, nextHtmlLayout,
   normalizeHtmlState, objectDragEdit, objectEditFor, objectTransformStyle, recommendHtmlDensity, recommendHtmlLayout, updateImageEdit, updateObjectEdit,
+  titleTextSegments,
 } from "../src/html-layout.mjs";
 
 test("HTML planner chooses page-role-driven layouts instead of one equal grid", () => {
@@ -49,6 +50,20 @@ test("explicit highlight phrases segment copy without guessing the first clause"
     { text: "一点", highlight: false },
   ]);
   assert.deepEqual(highlightTextSegments("没有匹配", ["别的词"]), [{ text: "没有匹配", highlight: false }]);
+});
+
+test("page titles keep short semantic phrases together while long phrases remain breakable", () => {
+  assert.deepEqual(titleTextSegments("别硬撑空台面 累了就随时停下", [], 10), [
+    { text: "别硬撑空台面", highlight: false, separator: false, keepTogether: true, breakBefore: false },
+    { text: " ", highlight: false, separator: true, keepTogether: false, breakBefore: false },
+    { text: "累了就随时停下", highlight: false, separator: false, keepTogether: true, breakBefore: false },
+  ]);
+  assert.deepEqual(titleTextSegments("点一盏暖灯 留住松弛周末时光", ["点一盏暖灯"], 10), [
+    { text: "点一盏暖灯", highlight: true, separator: false, keepTogether: true, breakBefore: false },
+    { text: " ", highlight: false, separator: true, keepTogether: false, breakBefore: false },
+    { text: "留住松弛周末时光", highlight: false, separator: false, keepTogether: true, breakBefore: false },
+  ]);
+  assert.equal(titleTextSegments("这是一个没有空格而且必须允许折行的超长标题", [], 7)[0].keepTogether, false);
 });
 
 test("HTML image state preserves supporting art by default and clamps manual focal edits", () => {

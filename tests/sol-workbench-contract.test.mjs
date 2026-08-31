@@ -134,7 +134,8 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /--xsm-orange-display: #fd8502/);
   assert.match(cssSource, /grid-template-columns: minmax\(0, 1fr\) auto/);
   assert.match(cssSource, /grid-template-columns: auto minmax\(0, 1fr\)/);
-  assert.match(cssSource, /html-page__title-phrase[\s\S]*white-space: normal !important/);
+  assert.match(cssSource, /html-page__title-phrase\.is-phrase-kept[\s\S]*white-space: nowrap/);
+  assert.match(cssSource, /html-page__title-phrase\.is-phrase-breakable[\s\S]*white-space: normal/);
   assert.match(cssSource, /data-panel-count="3"[\s\S]*width: 21\.75cqw/);
   assert.doesNotMatch(cssSource, /data-panel-count="3"[^\n]*height:/);
   assert.match(cssSource, /data-image-edge="left-first"[\s\S]*grid-template-columns: auto minmax\(0, 1fr\)/);
