@@ -2599,7 +2599,7 @@ export function createWorkspaceV3Coordinator({
       const replacement = normalizeDraftRecordV3(candidate, "replacement_draft");
       if (replacement.draft_id !== targetId) throw new TypeError("replacement draft identity cannot change");
       if (replacement.created_at !== target.created_at) throw new TypeError("replacement draft creation time cannot change");
-      if (draftRecordToken(replacement) === expectedDraftToken) {
+      if (JSON.stringify(replacement) === JSON.stringify(target)) {
         return v3TransactionReceipt({ ok: true, code: "WORKSPACE_DRAFT_ALREADY_CURRENT", disposition: "NOOP_ALREADY_APPLIED", snapshot: latest, targetDraftId: targetId, reason });
       }
       const drafts = [...latest.workspace.drafts];

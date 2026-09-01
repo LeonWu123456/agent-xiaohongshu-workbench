@@ -1352,6 +1352,45 @@ test("v3 previous_draft_id survives reload and supports direct return without be
   assert.throws(() => parseWorkspaceEnvelopeV3({ ...profiled, previous_draft_id: "missing-draft" }), /different existing v3 draft/);
 });
 
+test("v3 explicit save persists id and saved_at even when the semantic draft token is unchanged", async () => {
+  const record = createDraftRecordV3({
+    draftId: "bookkeeping-save",
+    contentPackage: generateContentPackage({ topic: "保存后必须出现在资产库", pillar: "culture", goal: "save" }),
+    createdAt: T0,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: record.draft_id,
+    drafts: [record],
+    legacy_v2_source: null,
+  });
+  const keys = { ...KEYS, envelopeV3: "workspace-v3" };
+  const storage = memoryStorage({ [keys.envelopeV3]: JSON.stringify(workspace) });
+  const coordinator = createWorkspaceV3Coordinator({ storage, keys, lockManager: exclusiveLocks() });
+  const desiredWorkspace = saveDraftRecordV3(workspace, {
+    contentPackage: { ...record.content_package, id: "saved-entry", saved_at: T1 },
+    updatedAt: T1,
+  });
+  const desiredRecord = activeDraftRecordV3(desiredWorkspace);
+  assert.equal(draftRecordToken(desiredRecord), draftRecordToken(record), "bookkeeping fields intentionally stay outside the semantic CAS token");
+
+  const receipt = await coordinator.mergeDraftCas({
+    draftId: record.draft_id,
+    expectedDraftToken: draftRecordToken(record),
+    replacementDraft: desiredRecord,
+    requireActiveDraftId: record.draft_id,
+    reason: "SAVE_ACTIVE_DRAFT_V3",
+  });
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.disposition, "COMMITTED");
+  assert.equal(receipt.target_draft.content_package.saved_at, T1);
+  assert.equal(receipt.target_draft.content_package.id, "saved-entry");
+  assert.deepEqual(libraryContentsV3(receipt.workspace).map((item) => item.draft_record_id), [record.draft_id]);
+});
+
 test("authoring action references persist as an ordered ref-only manifest through save, backup, restore and hydration", async () => {
   const bytes = Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
