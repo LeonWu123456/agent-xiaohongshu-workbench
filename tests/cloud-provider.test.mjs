@@ -2315,6 +2315,26 @@ function accessEnv(code = "open-sesame") {
   };
 }
 
+test("Preview access binds to the exact generated deployment URL while Production keeps the stable origin", () => {
+  const env = accessEnv();
+  const preview = inspectServerAccessConfig({
+    ...env,
+    VERCEL_ENV: "preview",
+    VERCEL_URL: "xiaoshimei-full-workbench-preview-123.vercel.app",
+  });
+  assert.equal(preview.appOrigin, "https://xiaoshimei-full-workbench-preview-123.vercel.app");
+  assert.equal(inspectServerAccessConfig({
+    ...env,
+    VERCEL_ENV: "production",
+    VERCEL_URL: "attacker.vercel.app",
+  }).appOrigin, env.XIAOSHIMEI_APP_ORIGIN);
+  assert.equal(inspectServerAccessConfig({
+    ...env,
+    VERCEL_ENV: "preview",
+    VERCEL_URL: "attacker.example",
+  }).appOrigin, env.XIAOSHIMEI_APP_ORIGIN);
+});
+
 function sameOriginHeaders(env, extra = {}) {
   const origin = new URL(env.XIAOSHIMEI_APP_ORIGIN);
   return {
@@ -2425,6 +2445,46 @@ test("server-managed access login mints a canonical token-bound __Host slot afte
   const authenticated = responseProbe();
   await accessHandler({ method: "GET", query: { route: "config" }, headers: { cookie } }, authenticated);
   assert.equal(authenticated.body.authenticated, true);
+});
+
+test("Preview login admits only the deployment-specific VERCEL_URL origin", async () => {
+  const deploymentOrigin = "https://xiaoshimei-full-workbench-preview-123.vercel.app";
+  const env = {
+    ...accessEnv(),
+    VERCEL_ENV: "preview",
+    VERCEL_URL: new URL(deploymentOrigin).host,
+  };
+  const accessHandler = createProviderHandler({ env, sessionId: "preview-session-for-test" });
+
+  const staleConfiguredOrigin = responseProbe();
+  await accessHandler({
+    method: "POST",
+    query: { route: "access-session" },
+    headers: sameOriginHeaders(accessEnv()),
+    body: { code: "open-sesame" },
+  }, staleConfiguredOrigin);
+  assert.equal(staleConfiguredOrigin.statusCode, 403);
+  assert.equal(staleConfiguredOrigin.body.error, "ORIGIN_FORBIDDEN");
+
+  const wrongCode = responseProbe();
+  await accessHandler({
+    method: "POST",
+    query: { route: "access-session" },
+    headers: sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin }),
+    body: { code: "wrong" },
+  }, wrongCode);
+  assert.equal(wrongCode.statusCode, 401);
+  assert.equal(wrongCode.body.error, "ACCESS_DENIED");
+
+  const accepted = responseProbe();
+  await accessHandler({
+    method: "POST",
+    query: { route: "access-session" },
+    headers: sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin }),
+    body: { code: "open-sesame" },
+  }, accepted);
+  assert.equal(accepted.statusCode, 200);
+  assert.equal(accepted.body.authenticated, true);
 });
 
 test("access tokens are canonical, app/origin bound, name bound, and header order independent", async () => {

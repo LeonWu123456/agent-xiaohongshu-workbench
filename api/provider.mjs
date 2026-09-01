@@ -152,10 +152,17 @@ function configuredOrigin(value) {
   }
 }
 
+function configuredPreviewOrigin(env = process.env) {
+  if (String(env?.VERCEL_ENV || "").trim() !== "preview") return "";
+  const hostname = String(env?.VERCEL_URL || "").trim().toLowerCase();
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.vercel\.app$/.test(hostname)) return "";
+  return configuredOrigin(`https://${hostname}`);
+}
+
 export function inspectServerAccessConfig(env = process.env) {
   const accessCodeSha256 = String(env?.XIAOSHIMEI_ACCESS_CODE_SHA256 || "").trim().toLowerCase();
   const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
-  const appOrigin = configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
+  const appOrigin = configuredPreviewOrigin(env) || configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
   const ready = /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
   const appScope = appOrigin ? `xiaoshimei-studio:${createHash("sha256").update(appOrigin).digest("hex").slice(0, 32)}` : "";
   return { ready, accessCodeSha256, sessionSecret, appOrigin, appScope };
