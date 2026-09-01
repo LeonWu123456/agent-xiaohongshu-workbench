@@ -114,6 +114,7 @@ const EDITORIAL_SLUDGE_PATTERNS = [
 ];
 const ACTION_PATTERNS = /闭眼|眺望|望向|转动眼球|揉搓|摩擦|搓手|搓热|轻覆|覆在|覆住|盖住|捂住|轻按|轻搭|举起|抬手|抬向|抬到|移动|放下|放到|倒扣|扣在|扣放|屏幕朝下|洗手|擦干|伸展|转颈|梳头|叩齿|踮脚|握拳|拍肩|推开|翻阅|书写|练功|端起|整理|行走|坐下|起身|呼气|吸气/;
 const GENERIC_PORTRAIT_PATTERN = /站着微笑|坐着微笑|看向镜头|人物肖像|静态摆拍|双手合十|双手交握/;
+const EYE_CARE_TOPIC_PATTERN = /护眼|视疲劳|眼(?:睛|部|眶|球|睑|周|酸|涩|胀|干|痛|累|疲|紧)|干眼|用眼|眨眼|离屏|盯屏|远眺/;
 const EYE_CARE_PREPARATION_PATTERN = /洗手|冲洗.{0,6}(双手|手指)|摘.{0,8}隐形|隐形眼镜.{0,8}(镜盒|放好)|放下.{0,8}手机|手机.{0,8}(倒扣|扣放|屏幕朝下|平放)/;
 const SAFETY_PATTERN = /不适|疼痛|刺痛|酸涩加重|视力异常|停止|停下|停做|就医|医生|专业帮助|专业人士|专业医护|咨询|不能替代|不代替|仅作日常/;
 const PROCEDURE_PATTERN = /第[一二三四五六七八九十0-9]+步|先.{0,16}(再|然后)|①|②|1[.、]|步骤|做法/;
@@ -267,14 +268,14 @@ function assertImagePrompt(prompt, path, context, visualAction = "") {
     throw new TypeError(`TEXT_QUALITY_GATE_FAILED:${path}:action_not_visually_demonstrated`);
   }
   if (!/小师妹/.test(prompt)) throw new TypeError(`PAGE_PLAN_VISUAL_SUBJECT_MISSING:${path}`);
-  if (context?.pillar === "wellness" && /眼|护眼|视疲劳/.test(String(context.topic || "")) && !/眼|眼睑|眼球|视线|放下.{0,8}手机|手机.{0,8}(倒扣|扣|屏幕朝下)|屏幕朝下|远离.{0,8}屏幕/.test(`${visualAction}\n${prompt}`) && !EYE_CARE_PREPARATION_PATTERN.test(`${visualAction}\n${prompt}`)) {
+  if (context?.pillar === "wellness" && EYE_CARE_TOPIC_PATTERN.test(String(context.topic || "")) && !/眼|眼睑|眼球|视线|放下.{0,8}手机|手机.{0,8}(倒扣|扣|屏幕朝下)|屏幕朝下|远离.{0,8}屏幕/.test(`${visualAction}\n${prompt}`) && !EYE_CARE_PREPARATION_PATTERN.test(`${visualAction}\n${prompt}`)) {
     throw new TypeError(`TEXT_QUALITY_GATE_FAILED:${path}:eye_care_action_not_visible`);
   }
 }
 
 function repairEyeCareImagePrompt(prompt, visualAction, context) {
   const evidence = `${visualAction}\n${prompt}`;
-  const isEyeCare = context?.pillar === "wellness" && /眼|护眼|视疲劳/.test(String(context.topic || ""));
+  const isEyeCare = context?.pillar === "wellness" && EYE_CARE_TOPIC_PATTERN.test(String(context.topic || ""));
   const hasEyeEvidence = /眼|眼睑|眼球|视线|放下.{0,8}手机|手机.{0,8}(倒扣|扣|屏幕朝下)|屏幕朝下|远离.{0,8}屏幕/.test(evidence) || EYE_CARE_PREPARATION_PATTERN.test(evidence);
   if (!context?.repairEyeCareEvidence || !isEyeCare || hasEyeEvidence) return prompt;
   return `${prompt.replace(/[。；;\s]+$/g, "")}。小师妹在完成上述动作时身体保持远离屏幕，视线望向窗外远处并自然眨眼，眼部状态清楚可见。`;

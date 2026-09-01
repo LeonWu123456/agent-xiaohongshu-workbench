@@ -97,9 +97,16 @@ test("Ark quality gate stops short copy, cheap hooks and generic portraits befor
 });
 
 test("wellness plans require a visible procedure, safety boundary and topic-linked eye action", () => {
-  const wellnessInput = { ...input(), topic: "工作太久眼睛发紧，如何日常舒缓？", pillar: "wellness" };
   const value = structuredClone(planValue());
-  assert.throws(() => extractArkPlan({ output: [{ type: "function_call", name: "return_xiaoshimei_plan", arguments: JSON.stringify(value) }] }, wellnessInput), /eye_care_action_not_visible/);
+  for (const topic of ["工作太久眼睛发紧，如何日常舒缓？", "日常护眼动作", "视疲劳如何休息", "连续盯屏后的放松步骤"]) {
+    assert.throws(() => extractArkPlan({ output: [{ type: "function_call", name: "return_xiaoshimei_plan", arguments: JSON.stringify(value) }] }, { ...input(), topic, pillar: "wellness" }), /eye_care_action_not_visible/);
+  }
+});
+
+test("wellness food topics containing longan do not activate the eye-care action gate", () => {
+  const response = { output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: planValue().pages }) }] };
+  const pages = extractArkPagePlan(response, 2, { topic: "白露食白清单包括龙眼、甜杏仁和白果", pillar: "wellness", goal: "save" });
+  assert.equal(pages.length, 2);
 });
 
 test("wellness page plans accept concrete natural-language hand and eye actions", () => {
