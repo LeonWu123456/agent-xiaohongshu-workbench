@@ -720,6 +720,7 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
     calibration: new Map(),
     calibrationUsage: 1_400_000,
     commands: [],
+    developerRequests: [],
   };
   const env = {
     UPSTASH_DATABASE_ID: databaseId,
@@ -738,6 +739,7 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
   const fetchImpl = async (url, options = {}) => {
     const parsed = new URL(url);
     if (parsed.origin === "https://api.upstash.com") {
+      state.developerRequests.push(parsed.pathname);
       if (parsed.pathname.includes("/redis/database/")) return { ok: true, json: async () => structuredClone(state.database) };
       if (parsed.pathname.includes("/redis/stats/")) return { ok: true, json: async () => structuredClone(state.stats) };
       if (parsed.pathname.endsWith("/auditlogs")) return { ok: true, json: async () => structuredClone(state.audits) };
@@ -929,6 +931,67 @@ test("D36 attestor binds the retained audit slice, signs exact control facts, an
   assert.equal(second.envelope.payload.capacity_generation, firstCapacityGeneration, "fresh random calibration bytes with the same measured result must not rotate live capacity identity");
   assert.notEqual(second.envelope.payload.attestation_generation, firstAttestationGeneration);
   assert.equal(fixture.state.capacity.reserved_bytes, 0);
+});
+
+test("D36 scheduled attestor verifies the signed exact binding and exits not-due before Developer API or calibration writes", async () => {
+  const fixture = attestorFixture();
+  const installed = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+  fixture.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  fixture.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+
+  const result = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(result.status, "ATTESTATION_NOT_DUE");
+  assert.equal(result.attestation_generation, installed.envelope.payload.attestation_generation);
+  assert.equal(result.capacity_generation, installed.envelope.payload.capacity_generation);
+  assert.equal(fixture.state.developerRequests.length, 0);
+  assert.deepEqual(fixture.state.commands.map((body) => body[0]), ["TIME", "GET"]);
+  assert.equal(fixture.state.calibration.size, 0);
+});
+
+test("D36 scheduled attestor renews inside the lead window but rejects signature or binding drift before Developer API", async () => {
+  const due = attestorFixture();
+  await buildAndInstallAttestation({ env: due.env, fetchImpl: due.fetchImpl });
+  due.state.nowMs += 5 * 24 * 60 * 60 * 1000;
+  due.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  due.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+  due.state.commands.length = 0;
+  due.state.developerRequests.length = 0;
+  const renewed = await buildAndInstallAttestation({ env: due.env, fetchImpl: due.fetchImpl });
+  assert.equal(renewed.envelope.payload.signed_at_ms, due.state.nowMs);
+  assert.equal(due.state.developerRequests.length, 3);
+  assert.equal(due.state.commands.some((body) => body[0] === "SET"), true);
+
+  const wrongBinding = attestorFixture();
+  await buildAndInstallAttestation({ env: wrongBinding.env, fetchImpl: wrongBinding.fetchImpl });
+  wrongBinding.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  wrongBinding.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+  wrongBinding.env.XIAOSHIMEI_CANDIDATE_COMMIT = "f".repeat(40);
+  wrongBinding.state.commands.length = 0;
+  wrongBinding.state.developerRequests.length = 0;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: wrongBinding.env, fetchImpl: wrongBinding.fetchImpl }),
+    /ATTESTATION_PRIOR_BINDING_MISMATCH:candidate_commit/,
+  );
+  assert.equal(wrongBinding.state.developerRequests.length, 0);
+  assert.deepEqual(wrongBinding.state.commands.map((body) => body[0]), ["TIME", "GET"]);
+
+  const badSignature = attestorFixture();
+  await buildAndInstallAttestation({ env: badSignature.env, fetchImpl: badSignature.fetchImpl });
+  const envelope = JSON.parse(badSignature.state.readiness);
+  envelope.signature = Buffer.alloc(64, 7).toString("base64");
+  badSignature.state.readiness = JSON.stringify(envelope);
+  badSignature.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  badSignature.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+  badSignature.state.commands.length = 0;
+  badSignature.state.developerRequests.length = 0;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: badSignature.env, fetchImpl: badSignature.fetchImpl }),
+    /ATTESTATION_PRIOR_SIGNATURE_INVALID/,
+  );
+  assert.equal(badSignature.state.developerRequests.length, 0);
+  assert.deepEqual(badSignature.state.commands.map((body) => body[0]), ["TIME", "GET"]);
 });
 
 test("D36 attestor refuses missing audit continuity and changed capacity while reservations remain", async () => {

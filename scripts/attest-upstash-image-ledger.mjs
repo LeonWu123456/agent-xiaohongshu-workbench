@@ -63,6 +63,13 @@ function integerEnv(env, name) {
   return value;
 }
 
+function enabledEnv(env, name) {
+  const value = String(env?.[name] || "").trim().toLowerCase();
+  if (!value || ["0", "false", "off", "no"].includes(value)) return false;
+  if (["1", "true", "on", "yes"].includes(value)) return true;
+  throw new Error(`ATTESTATION_ENV_INVALID:${name}`);
+}
+
 function booleanFalse(value, code) {
   if (value === false || value === 0 || value === "0" || value === "false" || value === "off" || value === "noeviction") return false;
   throw new Error(code);
@@ -144,6 +151,31 @@ function verifyPriorEnvelope(value, publicKey) {
   const signature = Buffer.from(value.signature, "base64");
   if (signature.length !== 64 || !verify(null, Buffer.from(canonicalJson(value.payload)), publicKey, signature)) throw new Error("ATTESTATION_PRIOR_SIGNATURE_INVALID");
   return value.payload;
+}
+
+function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit }) {
+  if (payload?.schema !== ATTESTATION_SCHEMA) throw new Error("ATTESTATION_PRIOR_SCHEMA_INVALID");
+  const expected = {
+    database_id_sha256: sha256(Buffer.from(databaseId)),
+    rest_origin: new URL(redisUrl).origin,
+    app_scope: appScope,
+    vercel_project_id: projectId,
+    vercel_environment: environment,
+    candidate_commit: candidateCommit,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (payload[field] !== value) throw new Error(`ATTESTATION_PRIOR_BINDING_MISMATCH:${field}`);
+  }
+  const signedAtMs = Number(payload.signed_at_ms);
+  const renewAtMs = Number(payload.renew_at_ms);
+  const hardExpiryMs = Number(payload.hard_expiry_ms);
+  if (![signedAtMs, renewAtMs, hardExpiryMs].every((value) => Number.isSafeInteger(value) && value > 0)
+    || renewAtMs <= signedAtMs
+    || hardExpiryMs <= renewAtMs
+    || renewAtMs - signedAtMs > RENEW_MAX_MS
+    || hardExpiryMs - signedAtMs > HARD_EXPIRY_MAX_MS) {
+    throw new Error("ATTESTATION_PRIOR_WINDOW_INVALID");
+  }
 }
 
 async function redisCommand(endpoint, token, args, fetchImpl) {
@@ -230,6 +262,42 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const privateKey = createPrivateKey(required(env, "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY"));
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("ATTESTATION_PRIVATE_KEY_INVALID");
   const publicKey = createPublicKey(privateKey);
+  const redis = { command: (args) => redisCommand(redisUrl, redisToken, args, fetchImpl) };
+  const signedAtMs = await redisTimeMs(redis);
+  const root = appRoot(appScope);
+  const readinessKey = `${root}:readiness`;
+  const capacityKey = `${root}:capacity`;
+  const priorRaw = await redis.command(["GET", readinessKey]);
+  let priorEnvelope = null;
+  if (typeof priorRaw === "string") {
+    try { priorEnvelope = JSON.parse(priorRaw); } catch { throw new Error("ATTESTATION_PRIOR_INVALID"); }
+  } else if (priorRaw != null) {
+    throw new Error("ATTESTATION_PRIOR_INVALID");
+  }
+  const prior = verifyPriorEnvelope(priorEnvelope, publicKey);
+  if (prior) assertPriorBinding(prior, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit });
+
+  if (enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE") && prior) {
+    const renewLeadMs = integerEnv(env, "XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS");
+    if (renewLeadMs > RENEW_MAX_MS) throw new Error("ATTESTATION_RENEW_LEAD_INVALID");
+    if (signedAtMs >= prior.hard_expiry_ms) throw new Error("ATTESTATION_PRIOR_EXPIRED");
+    const dueAtMs = prior.renew_at_ms - renewLeadMs;
+    if (signedAtMs < dueAtMs) {
+      return {
+        status: "ATTESTATION_NOT_DUE",
+        public_key_spki_base64: publicKeyDerBase64(privateKey),
+        readiness_key: readinessKey,
+        capacity_key: capacityKey,
+        attestation_generation: prior.attestation_generation,
+        capacity_generation: prior.capacity_generation,
+        now_ms: signedAtMs,
+        due_at_ms: dueAtMs,
+        renew_at_ms: prior.renew_at_ms,
+        hard_expiry_ms: prior.hard_expiry_ms,
+      };
+    }
+  }
+
   const developerBase = String(env.UPSTASH_DEVELOPER_API_BASE || "https://api.upstash.com/v2").replace(/\/$/, "");
   const headers = developerHeaders(env);
   const [database, stats, auditLogs] = await Promise.all([
@@ -239,19 +307,8 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   ]);
   const control = controlConfig(database, stats, databaseId);
   const allAudits = canonicalRelevantAuditSet(auditLogs, databaseId);
-  const redis = { command: (args) => redisCommand(redisUrl, redisToken, args, fetchImpl) };
-  const signedAtMs = await redisTimeMs(redis);
   const audits = allAudits.filter((entry) => entry.timestamp_ms >= signedAtMs - HARD_EXPIRY_MAX_MS && entry.timestamp_ms <= signedAtMs);
   if (!audits.length) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
-  const root = appRoot(appScope);
-  const readinessKey = `${root}:readiness`;
-  const capacityKey = `${root}:capacity`;
-  const priorRaw = await redis.command(["GET", readinessKey]);
-  let priorEnvelope = null;
-  if (typeof priorRaw === "string") {
-    try { priorEnvelope = JSON.parse(priorRaw); } catch { throw new Error("ATTESTATION_PRIOR_INVALID"); }
-  }
-  const prior = verifyPriorEnvelope(priorEnvelope, publicKey);
   if (prior) {
     const priorFound = allAudits.some((entry) => entry.log_id === prior.audit_high_water.log_id && entry.timestamp_ms === prior.audit_high_water.timestamp_ms);
     if (!priorFound || signedAtMs - prior.audit_fetch_at_ms > HARD_EXPIRY_MAX_MS) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
@@ -360,6 +417,10 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
 
 async function main() {
   const result = await buildAndInstallAttestation();
+  if (result.status === "ATTESTATION_NOT_DUE") {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   process.stdout.write(`${JSON.stringify({
     status: "ATTESTATION_INSTALLED",
     public_key_spki_base64: result.public_key_spki_base64,

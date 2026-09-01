@@ -68,14 +68,17 @@
 ### 触发与失败语义
 
 - 立即重签：deploy/rollback、Vercel env、Redis resource/config/token/public key、签名 key、协议/key schema、校准或 capacity 变化之前，以及 audit log 出现相关新 entry 时。
-- 周期刷新：无变化时最迟第 6 天由 Runtime 外 Intel/CI 短进程运行，留一天重试缓冲；这不是 Runtime 内常驻自签。
+- 周期刷新：`.github/workflows/xiaoshimei-ledger-attestation.yml` 在默认分支每 6 小时错峰检查一次。schedule 固定读取仓库变量中的 Production commit/app scope；脚本先用 Redis TIME 验签当前 sentinel 和 database/origin/app/project/environment/commit 精确绑定，未进入 `renew_at - 24h` 窗口即返回 `ATTESTATION_NOT_DUE`，Developer API、校准和签名写入均为 0。进入窗口后才执行完整控制面复核与续签，留出最多一天和多次运行的重试缓冲。
+- 受控变更：`workflow_dispatch` 必须显式填写 environment、40 位 candidate commit 和 app scope，并绕过“尚未到期”门，供 Preview、部署、回滚、Secret/resource/config 变化前重签。不得用 `github.sha` 猜测目标部署身份。
+- Runner Secrets 只允许六项：`UPSTASH_DEVELOPER_EMAIL`、`UPSTASH_DEVELOPER_API_KEY`、`XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY`、`UPSTASH_DATABASE_ID`、`UPSTASH_REDIS_REST_URL`、`UPSTASH_REDIS_REST_TOKEN`。仓库变量为 `XIAOSHIMEI_VERCEL_PROJECT_ID`、`XIAOSHIMEI_WORST_CASE_RUN_BYTES`、`XIAOSHIMEI_PRODUCTION_COMMIT`、`XIAOSHIMEI_PRODUCTION_APP_SCOPE`。这些配置只有在本 Task 的新增 Human Gate 获批后才能安装。
+- GitHub schedule 可能延迟或丢失，公开仓库连续 60 天无活动还会自动停用 scheduled workflow。因此它不是单独的 Runtime Authority：MeSy/Codex 只读 watchdog 只检查 workflow 是否 enabled、最近一次成功是否仍在续签缓冲内，失败才通知；watchdog 不持秘密、不签名、不写 Redis。发现停用或超龄后先手动恢复/dispatch，并回读新 receipt，不能把“workflow 文件存在”当运行成功。
 - 第 7 天 receipt 过期：只关闭 paid START/STEP，Provider 调用必须为 0；登录、`GET /config`、DISCOVER 与已认证 raw asset recovery 不连坐。
 - Provider 已产生图片副作用但首次 durable commit 前死亡：标记 `UNKNOWN`，不得自动重试；没有官方 attempt-id 查询证据时，结果恢复保持未证明。
 - Developer API、audit continuity、签名、SCAN/DBSIZE、foreign key、generation、capacity 或校准任一 UNKNOWN：fail closed，不签发、不减计、不调用 Provider。
 
 ### 部署前与回滚
 
-只有本地 fake Developer API/Redis 正负矩阵、完整测试、production build、同一制品 Preview 实际路径与消费者回读全绿后，才可请求上述 Human Gate。外部启用失败时撤销新增 Vercel D36 env 并关闭 paid 图片 Lane；不得删除浏览器 IndexedDB 稿件/媒体，不得用不兼容的旧 receipt 恢复 STEP。只有旧、新 deployment 绑定同一 `capacity_generation` 与兼容协议时，才可沿用未完成 reservation；否则保持 fail closed，等待七天 finalizer 清零后再切换。
+只有本地 fake Developer API/Redis 正负矩阵、workflow contract、完整测试、production build、同一制品 Preview 实际路径与消费者回读全绿后，才可请求上述 Human Gate。外部启用失败时先禁用 attestation workflow、撤销新增 Vercel D36 env 并关闭 paid 图片 Lane；再移除 GitHub Secrets/Variables、unlink existing resource，必要时删除 app-exclusive Free database。不得删除浏览器 IndexedDB 稿件/媒体，不得用不兼容的旧 receipt 恢复 STEP。只有旧、新 deployment 绑定同一 `capacity_generation` 与兼容协议时，才可沿用未完成 reservation；否则保持 fail closed，等待七天 finalizer 清零后再切换。
 
 ## 每次发布必须记录
 

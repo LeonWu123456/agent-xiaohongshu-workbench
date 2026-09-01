@@ -1,0 +1,71 @@
+name: Xiaoshimei ledger attestation
+
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      vercel_environment:
+        description: Exact Vercel environment to attest
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+      candidate_commit:
+        description: Exact 40-character deployment commit
+        required: true
+        type: string
+      app_scope:
+        description: Exact Xiaoshimei app scope from the target runtime
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xiaoshimei-ledger-attestation
+  cancel-in-progress: false
+
+jobs:
+  attest:
+    name: Verify and renew the signed image-ledger receipt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      UPSTASH_DEVELOPER_EMAIL: ${{ secrets.UPSTASH_DEVELOPER_EMAIL }}
+      UPSTASH_DEVELOPER_API_KEY: ${{ secrets.UPSTASH_DEVELOPER_API_KEY }}
+      XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY: ${{ secrets.XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY }}
+      UPSTASH_DATABASE_ID: ${{ secrets.UPSTASH_DATABASE_ID }}
+      UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+      UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+      XIAOSHIMEI_VERCEL_PROJECT_ID: ${{ vars.XIAOSHIMEI_VERCEL_PROJECT_ID }}
+      XIAOSHIMEI_WORST_CASE_RUN_BYTES: ${{ vars.XIAOSHIMEI_WORST_CASE_RUN_BYTES }}
+      VERCEL_ENV: ${{ github.event_name == 'schedule' && 'production' || inputs.vercel_environment }}
+      XIAOSHIMEI_CANDIDATE_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_COMMIT || inputs.candidate_commit }}
+      XIAOSHIMEI_APP_SCOPE: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_APP_SCOPE || inputs.app_scope }}
+      XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+      XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS: "86400000"
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify the explicit binding inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VERCEL_ENV" = "preview" || test "$VERCEL_ENV" = "production"
+          test "${#XIAOSHIMEI_CANDIDATE_COMMIT}" -eq 40
+          case "$XIAOSHIMEI_CANDIDATE_COMMIT" in (*[!0-9a-fA-F]*) exit 1;; esac
+          test -n "$XIAOSHIMEI_APP_SCOPE"
+
+      - name: Verify or renew the signed receipt
+        run: node scripts/attest-upstash-image-ledger.mjs
