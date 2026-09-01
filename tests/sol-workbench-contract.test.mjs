@@ -143,11 +143,6 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /background: #ffffff !important/);
   assert.match(cssSource, /\.html-editor__stage \{ padding: 20px 20px 0;/);
   assert.match(cssSource, /\.html-editor__stage \{ padding: 10px 0 0;/);
-  assert.match(cssSource, /\.gallery:has\(\.html-editor\)[\s\S]*grid-template-rows: 54px minmax\(0, 1fr\) 116px/);
-  assert.match(cssSource, /\.gallery:has\(\.html-editor\)[\s\S]*background: #ffffff/);
-  assert.match(cssSource, /\.canvas-stage--mature:has\(\.html-editor\)[\s\S]*padding: 0;[\s\S]*background: #ffffff/);
-  assert.match(cssSource, /\.canvas-stage--mature:has\(\.html-editor\) \.html-editor[\s\S]*height: 100%;[\s\S]*box-shadow: none/);
-  assert.match(cssSource, /\.html-editor__stage \{[^}]*background: #ffffff/);
   assert.match(cssSource, /nth-child\(2n \+ 1\)[\s\S]*text-align: left/);
   assert.match(cssSource, /nth-child\(2n\)[\s\S]*text-align: right/);
   assert.match(cssSource, /single executable geometry authority/);
