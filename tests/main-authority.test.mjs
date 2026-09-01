@@ -341,6 +341,9 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.match(imageSource, /const discoveryOnly = imageRecoveryClickMode\s*\(/);
   assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP" \};[\s\S]*nextImageStepRequest/);
   assert.match(imageSource, /零调用查询已完成/);
+  assert.match(imageSource, /const observedRequestModes = \[initialRequest\.mode\]/);
+  assert.match(imageSource, /upstream_calls: Number\(response\.upstream_calls \?\? response\.progress\?\.upstream_calls \?\? 0\)/);
+  assert.ok(imageSource.indexOf("if (discoveryOnly)") < imageSource.indexOf("observedRequestModes.push(nextRequest.mode)"), "a discovery-only response must stop before STEP enters the observed request sequence");
   assert.match(mainSource, /确认付费：继续图片步骤/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
@@ -356,6 +359,9 @@ test("a visible-canvas lineage split has one explicit zero-provider repair that 
   assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
   assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
   assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
+  assert.match(mainSource, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
+  assert.match(mainSource, /data-last-image-response-status=\{imageOperationReadback\?\.response_status \|\| ""\}/);
+  assert.match(mainSource, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {

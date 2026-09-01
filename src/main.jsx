@@ -934,6 +934,7 @@ function App() {
   const [productionMode, setProductionMode] = useState(initialGenerationSession?.production_mode || "smart");
   const [imageResume, setImageResume] = useState(initialGenerationSession?.image_resume || null);
   const [recoveryDiscoveryReceipt, setRecoveryDiscoveryReceipt] = useState(null);
+  const [imageOperationReadback, setImageOperationReadback] = useState(null);
   const [actionReferences, setActionReferences] = useState(initialGenerationSession?.action_reference_manifest || []);
   const [actionReferencePreviewUrls, setActionReferencePreviewUrls] = useState({});
   const actionReferenceHydrationsRef = useRef(new Map());
@@ -2432,10 +2433,19 @@ function App() {
         setToast(baseRecord.pending_image_operation ? "正在发现并恢复同一次配图操作；查询不会产生新图片调用" : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       });
       activeImageOperationRef.current = imageOperation;
+      const observedRequestModes = [initialRequest.mode];
 
       const consumeImageResponse = async (response) => {
         const currentOperation = activeImageOperationRef.current;
         if (!currentOperation || currentOperation.operation_id !== imageOperation.operation_id) return { action: "STOP" };
+        mainAuthority.commit(mainOperation, () => setImageOperationReadback({
+          active_draft_id: currentOperation.draft_id,
+          operation_nonce: currentOperation.operation_id,
+          run_id: response.run_id || null,
+          request_modes: [...observedRequestModes],
+          response_status: response.status || "UNKNOWN",
+          upstream_calls: Number(response.upstream_calls ?? response.progress?.upstream_calls ?? 0),
+        }));
         if (!mainAuthority.isCurrent(mainOperation) && workspaceEnvelopeRef.current.active_draft_id === currentOperation.draft_id) {
           setGenerationState("IDLE");
           setToast("当前稿在配图期间发生变化；已停止后续调用并保留同一次恢复入口");
@@ -2533,7 +2543,9 @@ function App() {
           });
           return { action: "STOP" };
         }
-        return { action: "CONTINUE", request: nextImageStepRequest(response, attemptNonce) };
+        const nextRequest = nextImageStepRequest(response, attemptNonce);
+        observedRequestModes.push(nextRequest.mode);
+        return { action: "CONTINUE", request: nextRequest };
       };
 
       let providerResult = await provider.generateImages(initialRequest, consumeImageResponse);
@@ -3250,7 +3262,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-visible-page-count={visiblePages.length}>
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-visible-page-count={visiblePages.length} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>

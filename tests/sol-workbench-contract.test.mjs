@@ -218,6 +218,8 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /data-pending-run-id=\{pendingImageOperation\?\.run_id \|\| ""\}/);
   assert.match(source, /data-publication-authority-code=\{publicationAuthority\.code\}/);
   assert.match(source, /data-visible-page-count=\{visiblePages\.length\}/);
+  assert.match(source, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
+  assert.match(source, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
   assert.doesNotMatch(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
 });
