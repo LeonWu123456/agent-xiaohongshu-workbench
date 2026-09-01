@@ -70,6 +70,18 @@ test("an exact current canvas remains publishable while a separate image recover
   assert.equal(result.code, "CONFIRMED_TEXT_AUTHORITY_WITH_PENDING_RECOVERY");
   assert.equal(result.recovery_pending, true);
   assert.equal(result.resolved_assembled_draft_id, draftId);
+  assert.equal(derivePublicationAuthority({
+    ...pair,
+    content: { ...pair.content, visible_pages: 0 },
+    assembledDraftId: "stale-assembled-draft",
+    activeDraftId,
+    pendingImageOperation: {
+      operation_nonce: "a".repeat(64),
+      run_id: "images-pending-six-pages",
+      protocol_state: "PARTIAL",
+      operation_snapshot: { draft_record_id: activeDraftId, confirmed_draft: { draft_id: draftId } },
+    },
+  }).allowed, true, "the real pages array, not a stale display count, proves that a visible canvas exists");
 });
 
 test("pending recovery never bypasses exact draft, copy, or visible-canvas gates", () => {
@@ -86,7 +98,7 @@ test("pending recovery never bypasses exact draft, copy, or visible-canvas gates
   assert.equal(derivePublicationAuthority({ ...base, activeDraftId: "another-draft" }).code, "TEXT_NOT_ASSEMBLED");
   assert.equal(derivePublicationAuthority({ ...base, pendingImageOperation: { ...pending, operation_snapshot: { ...pending.operation_snapshot, draft_record_id: "another-draft" } } }).code, "TEXT_NOT_ASSEMBLED");
   assert.equal(derivePublicationAuthority({ ...base, pendingImageOperation: { ...pending, operation_snapshot: { ...pending.operation_snapshot, confirmed_draft: { draft_id: "another-text" } } } }).code, "TEXT_NOT_ASSEMBLED");
-  assert.equal(derivePublicationAuthority({ ...base, content: { ...pair.content, visible_pages: 0 } }).code, "TEXT_NOT_ASSEMBLED");
+  assert.equal(derivePublicationAuthority({ ...base, content: { ...pair.content, pages: [] } }).code, "TEXT_NOT_ASSEMBLED");
   assert.equal(derivePublicationAuthority({ ...base, content: { ...pair.content, body: "另一份正文" } }).code, "PUBLICATION_COPY_MISMATCH");
 });
 

@@ -648,10 +648,12 @@ export function authoringInputLockReason({ workspaceReady, workspaceReadOnly, pe
   return null;
 }
 
-export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscoveryOnly = false } = {}) {
-  return requestedDiscoveryOnly || pendingImageOperation?.protocol_state === "UNKNOWN"
-    ? "DISCOVER_ONLY"
-    : "CONTINUE_ALLOWED";
+export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscoveryOnly = false, requestedPaidContinuation = false } = {}) {
+  if (requestedDiscoveryOnly) return "DISCOVER_ONLY";
+  if (!pendingImageOperation) return "CONTINUE_ALLOWED";
+  return requestedPaidContinuation && ["READY", "PARTIAL"].includes(pendingImageOperation.protocol_state)
+    ? "CONTINUE_ALLOWED"
+    : "DISCOVER_ONLY";
 }
 
 
@@ -931,6 +933,7 @@ function App() {
   const [customImageCount, setCustomImageCount] = useState(initialGenerationSession?.custom_image_count || 3);
   const [productionMode, setProductionMode] = useState(initialGenerationSession?.production_mode || "smart");
   const [imageResume, setImageResume] = useState(initialGenerationSession?.image_resume || null);
+  const [recoveryDiscoveryReceipt, setRecoveryDiscoveryReceipt] = useState(null);
   const [actionReferences, setActionReferences] = useState(initialGenerationSession?.action_reference_manifest || []);
   const [actionReferencePreviewUrls, setActionReferencePreviewUrls] = useState({});
   const actionReferenceHydrationsRef = useRef(new Map());
@@ -1033,7 +1036,12 @@ function App() {
     activeDraftId: workspaceEnvelope.active_draft_id,
     pendingImageOperation,
   }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly, workspaceEnvelope.active_draft_id, pendingImageOperation]);
-  const pendingRecoveryDiscoveryOnly = pendingImageOperation?.protocol_state === "UNKNOWN";
+  const pendingRecoveryDiscoveryOnly = Boolean(pendingImageOperation);
+  const paidRecoveryContinuationReady = Boolean(pendingImageOperation
+    && recoveryDiscoveryReceipt?.active_draft_id === workspaceEnvelope.active_draft_id
+    && recoveryDiscoveryReceipt?.operation_nonce === pendingImageOperation.operation_nonce
+    && recoveryDiscoveryReceipt?.run_id === pendingImageOperation.run_id
+    && ["READY", "PARTIAL"].includes(recoveryDiscoveryReceipt?.status));
   const publicationExportLocked = workspaceReadOnly || workspaceTransitioning || !publicationAuthority.allowed;
   const imageFailureFeedback = generationError?.stage === "image" && pendingRecoveryDiscoveryOnly && publicationAuthority.allowed
     ? {
@@ -2251,6 +2259,7 @@ function App() {
     const discoveryOnly = imageRecoveryClickMode({
       pendingImageOperation: baseRecord.pending_image_operation,
       requestedDiscoveryOnly: options?.discoveryOnly === true,
+      requestedPaidContinuation: options?.paidContinuation === true && paidRecoveryContinuationReady,
     }) === "DISCOVER_ONLY";
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
@@ -2463,6 +2472,13 @@ function App() {
         if (progressReceipt.action !== "CONTINUE" || !mainAuthority.isCurrent(mainOperation)) return { action: "STOP" };
         if (discoveryOnly) {
           mainAuthority.commit(mainOperation, () => {
+            const discoveredPending = progressReceipt.operation_snapshot?.pending_image_operation;
+            setRecoveryDiscoveryReceipt({
+              active_draft_id: currentOperation.draft_id,
+              operation_nonce: discoveredPending?.operation_nonce || baseRecord.pending_image_operation?.operation_nonce || null,
+              run_id: response.run_id || discoveredPending?.run_id || null,
+              status: response.status,
+            });
             setGenerationState("IDLE");
             setToast("零调用查询已完成；恢复点已更新，本次没有进入付费图片步骤");
           });
@@ -3185,7 +3201,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""}>
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-visible-page-count={visiblePages.length}>
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
@@ -3208,6 +3224,7 @@ function App() {
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
         <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (pendingRecoveryDiscoveryOnly ? "正在查询已有结果（0 次图片调用）" : `${productionModeLabel(productionMode)}生成中`) : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>确认付费：继续图片步骤 {Number(imageResume?.completed_image_steps || 0) + 1}/{Number(imageResume?.total_image_steps || 1)}</button>}
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
       </section>}
     </>;

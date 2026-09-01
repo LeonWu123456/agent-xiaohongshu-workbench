@@ -31,7 +31,7 @@ function authorityToken(content, textDraft, textConfirmed, assembledDraftId, act
     pendingImageOperation?.operation_nonce || null,
     pendingImageOperation?.run_id || null,
     pendingImageOperation?.protocol_state || null,
-    content?.visible_pages || 0,
+    Array.isArray(content?.pages) ? content.pages.length : 0,
   ]);
 }
 
@@ -71,15 +71,13 @@ export function derivePublicationAuthority({
 
   if (!draftId) return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
   const pendingSnapshot = pendingImageOperation?.operation_snapshot;
+  const visiblePageCount = Array.isArray(content.pages) ? content.pages.length : 0;
   const currentCanvasSurvivesPendingRecovery = typeof activeDraftId === "string"
     && Boolean(activeDraftId)
     && pendingSnapshot?.draft_record_id === activeDraftId
     && pendingSnapshot?.confirmed_draft?.draft_id === draftId
     && /^[0-9a-f]{64}$/.test(pendingImageOperation?.operation_nonce || "")
-    && Number.isInteger(content.visible_pages)
-    && content.visible_pages > 0
-    && Array.isArray(content.pages)
-    && content.pages.length >= content.visible_pages;
+    && visiblePageCount > 0;
   if (assembledDraftId !== draftId && !currentCanvasSurvivesPendingRecovery) {
     return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
   }

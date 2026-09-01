@@ -329,14 +329,19 @@ test("pending image authority freezes every image input while the same operation
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
 });
 
-test("UNKNOWN recovery is one DISCOVER-only action and cannot chain into STEP", () => {
+test("every persisted pending recovery needs a fresh DISCOVER before a separate paid continuation", () => {
   assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" } }), "DISCOVER_ONLY");
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" } }), "CONTINUE_ALLOWED");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "PARTIAL" } }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" } }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "PARTIAL" }, requestedPaidContinuation: true }), "CONTINUE_ALLOWED");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" }, requestedPaidContinuation: true }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: null }), "CONTINUE_ALLOWED");
   assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" }, requestedDiscoveryOnly: true }), "DISCOVER_ONLY");
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
   assert.match(imageSource, /const discoveryOnly = imageRecoveryClickMode\s*\(/);
   assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP" \};[\s\S]*nextImageStepRequest/);
   assert.match(imageSource, /零调用查询已完成/);
+  assert.match(mainSource, /确认付费：继续图片步骤/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
 });

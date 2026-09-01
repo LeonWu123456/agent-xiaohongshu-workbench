@@ -207,9 +207,16 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /mode: "DISCOVER"/);
   assert.match(source, /mode: "STEP"/);
   assert.match(source, /只查询恢复结果（0 次图片调用）/);
+  assert.match(source, /确认付费：继续图片步骤/);
   assert.match(source, /data-active-draft-id=\{workspaceEnvelope\.active_draft_id\}/);
+  assert.match(source, /data-text-draft-id=\{textDraft\.draft_id \|\| ""\}/);
+  assert.match(source, /data-content-source-draft-id=\{content\.generation\?\.source_draft_id \|\| ""\}/);
+  assert.match(source, /data-pending-snapshot-draft-record-id=\{pendingImageOperation\?\.operation_snapshot\?\.draft_record_id \|\| ""\}/);
+  assert.match(source, /data-pending-snapshot-text-draft-id=\{pendingImageOperation\?\.operation_snapshot\?\.confirmed_draft\?\.draft_id \|\| ""\}/);
   assert.match(source, /data-pending-bootstrap-nonce=\{pendingImageOperation\?\.operation_nonce \|\| ""\}/);
   assert.match(source, /data-pending-run-id=\{pendingImageOperation\?\.run_id \|\| ""\}/);
+  assert.match(source, /data-publication-authority-code=\{publicationAuthority\.code\}/);
+  assert.match(source, /data-visible-page-count=\{visiblePages\.length\}/);
   assert.doesNotMatch(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
 });
