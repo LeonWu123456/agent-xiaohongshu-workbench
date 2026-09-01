@@ -219,7 +219,6 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /只查询恢复结果（0 次图片调用）/);
   assert.match(source, /确认付费：继续图片步骤/);
   assert.match(source, /恢复当前两页对应文案（0 次图片调用）/);
-  assert.match(source, /data-active-draft-id=\{workspaceEnvelope\.active_draft_id\}/);
   assert.match(source, /data-text-draft-id=\{textDraft\.draft_id \|\| ""\}/);
   assert.match(source, /data-content-source-draft-id=\{content\.generation\?\.source_draft_id \|\| ""\}/);
   assert.match(source, /data-pending-snapshot-draft-record-id=\{pendingImageOperation\?\.operation_snapshot\?\.draft_record_id \|\| ""\}/);
@@ -227,11 +226,21 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /data-pending-bootstrap-nonce=\{pendingImageOperation\?\.operation_nonce \|\| ""\}/);
   assert.match(source, /data-pending-run-id=\{pendingImageOperation\?\.run_id \|\| ""\}/);
   assert.match(source, /data-publication-authority-code=\{publicationAuthority\.code\}/);
-  assert.match(source, /data-visible-page-count=\{visiblePages\.length\}/);
   assert.match(source, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
   assert.match(source, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
   assert.doesNotMatch(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
+});
+
+test("draft identity stays in workspace state instead of product observation markup", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  assert.match(source, /const draftId = item\.draft_record_id;/);
+  assert.match(source, /activateWorkspaceDraft\(draftId\);/);
+  assert.match(source, /key=\{item\.draft_record_id\}/);
+  assert.match(source, /onClick=\{\(\) => openDraft\(item\)\}/);
+  assert.doesNotMatch(source, /data-active-draft-id=/);
+  assert.doesNotMatch(source, /data-visible-page-count=/);
+  assert.doesNotMatch(source, /data-draft-id=/);
 });
 
 test("confirmed authoring exposes one editable copy and a compact publish package instead of a second copy editor", async () => {

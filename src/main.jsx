@@ -3313,7 +3313,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-visible-page-count={visiblePages.length} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
@@ -3391,7 +3391,7 @@ function App() {
         </div>}
 
         {view === "compose" && <section className={`workbench ${creatorOpen ? "is-creator-open" : ""}`}>
-          <section className="gallery" aria-label="页面编辑区" data-active-draft-id={workspaceEnvelope.active_draft_id} data-visible-page-count={visiblePages.length}>
+          <section className="gallery" aria-label="页面编辑区">
             <div className="gallery__toolbar">
               <span className="mode-badge">{content.generation?.mode === "PROVIDER" ? "AI 素材草稿" : "演示模板"}</span>
               <span>{visiblePages.length} 页 · {generatedImageCount} 图</span>
@@ -3509,8 +3509,8 @@ function App() {
             <div className="library-section-title"><strong>逐份打开</strong><span>{library.length} 份本机资产 · 发布后可持续补真实数据</span></div>
             <div className="library-grid">{library.map((item) => {
               const status = realityFeedbackStatus(item.reality_feedback);
-              return <article className="library-item" key={item.draft_record_id} data-draft-id={item.draft_record_id}>
-                <button className="library-card" data-draft-id={item.draft_record_id} onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
+              return <article className="library-item" key={item.draft_record_id}>
+                <button className="library-card" onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
                 <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.draft_record_id)}>现实反馈</button>
               </article>;
             })}</div>
