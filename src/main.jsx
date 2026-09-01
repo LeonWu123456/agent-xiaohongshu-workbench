@@ -3133,6 +3133,7 @@ function App() {
       prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(canonicalContent, pngPages, {
         createdAt: contentSnapshot.created_at,
         mediaAssets,
+        publicationAuthority: initialGate.code,
       }));
       const finalDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
       if (!finalDecision.allowed || !mainAuthority.isCurrent(operation)) {

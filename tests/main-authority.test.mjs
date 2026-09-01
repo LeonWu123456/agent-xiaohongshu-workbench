@@ -334,6 +334,7 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.match(downloadSource, /^function downloadZip\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\) \|\| workspaceTransitionLock\.isLocked\(\)\) return;/);
   assert.match(downloadSource, /materializeForWorkspace\(\{ content_package: contentSnapshot \}\)/);
   assert.match(downloadSource, /mediaStore\.exportMediaAssets\(mediaRefs\)/);
+  assert.match(downloadSource, /publicationAuthority:\s*initialGate\.code/);
   assert.ok(downloadSource.indexOf("materializeForWorkspace") < downloadSource.indexOf("buildPublishZip"), "export must canonicalize media before ZIP creation");
   assert.match(mainSource, /当前 .* 页成品与已确认文字一致，可以直接编辑、保存、复制和导出；另一条配图恢复只锁图片参数与新图片生成/);
 

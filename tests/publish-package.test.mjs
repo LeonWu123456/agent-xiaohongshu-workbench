@@ -67,6 +67,16 @@ test("ZIP keeps canonical refs and embeds the exact verified media backup set", 
   assert.deepEqual(manifest.files, Object.keys(zip.files));
 });
 
+test("ZIP manifest records the publication authority that unlocked this exact export", async () => {
+  const content = generateContentPackage({ topic: "发布权威同稿回读" });
+  const blob = await buildPublishZip(content, [pngHeader(1080, 1440), pngHeader(1080, 1440)], {
+    publicationAuthority: "CONFIRMED_TEXT_AUTHORITY",
+  });
+  const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+  const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
+  assert.equal(manifest.publication_authority, "CONFIRMED_TEXT_AUTHORITY");
+});
+
 test("ZIP refuses runtime media and a canonical ref without its verified backup asset", async () => {
   const content = generateContentPackage({ topic: "临时引用拒绝" });
   content.pages[0].image_style.src = "blob:http://127.0.0.1:4184/missing";

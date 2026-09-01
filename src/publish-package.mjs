@@ -70,7 +70,9 @@ export async function buildPublishZip(content, pngPages, options = {}) {
   zip.file("publish-copy.txt", publishCopy(content), { date: entryDate });
   zip.file("content.json", JSON.stringify(portableContent, null, 2), { date: entryDate });
   zip.file("media-assets.json", JSON.stringify(mediaAssets, null, 2), { date: entryDate });
-  const manifest = buildManifest(portableContent, names, createdAt);
+  const manifest = buildManifest(portableContent, names, createdAt, {
+    publicationAuthority: options.publicationAuthority,
+  });
   manifest.files = [...names, "publish-copy.txt", "content.json", "media-assets.json", "manifest.json"];
   manifest.content_media_contract = "canonical-refs-with-verified-backup-assets-v1";
   manifest.media_assets_file = "media-assets.json";

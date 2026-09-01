@@ -1030,7 +1030,7 @@ export function publishCopy(contentPackage) {
   return `${contentPackage.selectedTitle}\n\n${contentPackage.body}\n\n${contentPackage.tags.map((tag) => `#${tag}`).join(" ")}`;
 }
 
-export function buildManifest(contentPackage, imageNames, createdAt = new Date().toISOString()) {
+export function buildManifest(contentPackage, imageNames, createdAt = new Date().toISOString(), options = {}) {
   return {
     schema: "xiaoshimei.publish-package.v1",
     created_at: createdAt,
@@ -1039,7 +1039,7 @@ export function buildManifest(contentPackage, imageNames, createdAt = new Date()
     page_count: imageNames.length,
     dimensions: { width: 1080, height: 1440, ratio: "3:4" },
     files: [...imageNames, "publish-copy.txt", "content.json", "manifest.json"],
-    publication_authority: "HUMAN_CONFIRMATION_REQUIRED",
+    publication_authority: options.publicationAuthority || "HUMAN_CONFIRMATION_REQUIRED",
   };
 }
 
