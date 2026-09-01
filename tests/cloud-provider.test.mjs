@@ -14,6 +14,7 @@ import {
   createUpstashImageLedger,
   createUpstashImageLedgerFromEnv,
   generateImages,
+  imageLedgerRuntimeBinding,
   imageLedgerIdentity,
   inspectAccessSessionCandidates,
   inspectServerAccessConfig,
@@ -699,6 +700,32 @@ const D36_PRODUCTION_READINESS = Object.freeze({
   calibrated: true,
   capacityAvailable: true,
   calibrationSha256: "a".repeat(64),
+});
+
+test("Preview ledger binding uses the immutable deployment commit instead of the shared Production candidate", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "preview",
+    VERCEL_GIT_COMMIT_SHA: "a".repeat(40),
+    XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_preview",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "a".repeat(40));
+  assert.equal(binding.expected.vercel_environment, "preview");
+});
+
+test("Production ledger binding keeps the explicit candidate even when a deployment SHA is present", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    VERCEL_GIT_COMMIT_SHA: "a".repeat(40),
+    XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "b".repeat(40));
+  assert.equal(binding.expected.vercel_environment, "production");
 });
 
 function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {

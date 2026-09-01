@@ -176,14 +176,22 @@ function imageLedgerEnv(env = process.env) {
   return { url, token, ready: validUrl && token.length >= 16 };
 }
 
-function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", restUrl = "") {
+export function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", restUrl = "") {
   let restOrigin = "";
   try { restOrigin = new URL(restUrl).origin; } catch { restOrigin = ""; }
   const publicKey = String(env?.XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY || "").trim();
   const databaseIdSha256 = String(env?.XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256 || "").trim().toLowerCase();
   const vercelProjectId = String(env?.XIAOSHIMEI_VERCEL_PROJECT_ID || env?.VERCEL_PROJECT_ID || "").trim();
   const vercelEnvironment = String(env?.VERCEL_ENV || "").trim();
-  const candidateCommit = String(env?.XIAOSHIMEI_CANDIDATE_COMMIT || env?.VERCEL_GIT_COMMIT_SHA || "").trim().toLowerCase();
+  const deploymentCommit = String(env?.VERCEL_GIT_COMMIT_SHA || "").trim().toLowerCase();
+  const configuredCandidateCommit = String(env?.XIAOSHIMEI_CANDIDATE_COMMIT || "").trim().toLowerCase();
+  // A Preview deployment is already bound to an immutable Vercel Git SHA.
+  // Prefer that deployment identity so Preview validation cannot accidentally
+  // share or rotate Production's explicit candidate binding. Production keeps
+  // the configured candidate as its authority and only falls back when absent.
+  const candidateCommit = vercelEnvironment === "preview" && /^[0-9a-f]{40}$/.test(deploymentCommit)
+    ? deploymentCommit
+    : configuredCandidateCommit || deploymentCommit;
   return {
     ready: Boolean(publicKey)
       && /^[0-9a-f]{64}$/.test(databaseIdSha256)
