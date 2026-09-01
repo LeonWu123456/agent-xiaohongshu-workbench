@@ -15,6 +15,7 @@ test("D36 attestation workflow is a bounded default-branch schedule plus explici
   assert.match(source, /node-version: 24/);
   assert.match(source, /vercel_environment:[\s\S]*candidate_commit:[\s\S]*app_scope:[\s\S]*allow_candidate_rotation:/);
   assert.match(source, /allow_candidate_rotation:[\s\S]*default: false[\s\S]*type: boolean/);
+  assert.match(source, /zero_provider_recovery:[\s\S]*default: false[\s\S]*type: boolean/);
 });
 
 test("D36 scheduled production uses explicit repository variables and never github.sha", async () => {
@@ -41,7 +42,16 @@ test("D36 attestation workflow references the exact secret set without secret li
     "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY",
   ]);
   assert.doesNotMatch(source, /upload-artifact|echo\s+\$|printenv|set\s+-x/i);
-  assert.equal((source.match(/node scripts\/attest-upstash-image-ledger\.mjs/g) || []).length, 1);
+  assert.equal((source.match(/node scripts\/attest-upstash-image-ledger\.mjs/g) || []).length, 2);
+});
+
+test("D43 recovery stays manual, Production-only, exact-input bound and uses no new Secret", async () => {
+  const source = await readFile(workflowPath, "utf8");
+  assert.match(source, /XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.zero_provider_recovery/);
+  assert.match(source, /if test "\$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true"; then[\s\S]*test "\$GITHUB_EVENT_NAME" = "workflow_dispatch"[\s\S]*test "\$VERCEL_ENV" = "production"[\s\S]*test "\$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"/);
+  assert.match(source, /XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID:[\s\S]*XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256:[\s\S]*XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID:[\s\S]*XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_ATTEMPT_NONCE:[\s\S]*XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256:/);
+  assert.match(source, /if: env\.XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE == 'true'[\s\S]*run: node scripts\/attest-upstash-image-ledger\.mjs/);
+  assert.doesNotMatch(source, /upload-artifact|printenv|set\s+-x/i);
 });
 
 test("D36 attestor keeps account audit logs on the official root endpoint", async () => {

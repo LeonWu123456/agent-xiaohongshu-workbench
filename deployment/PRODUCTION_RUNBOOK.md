@@ -74,6 +74,7 @@
 - GitHub schedule 可能延迟或丢失，公开仓库连续 60 天无活动还会自动停用 scheduled workflow。因此它不是单独的 Runtime Authority：MeSy/Codex 只读 watchdog 只检查 workflow 是否 enabled、最近一次成功是否仍在续签缓冲内，失败才通知；watchdog 不持秘密、不签名、不写 Redis。发现停用或超龄后先手动恢复/dispatch，并回读新 receipt，不能把“workflow 文件存在”当运行成功。
 - 第 7 天 receipt 过期：只关闭 paid START/STEP，Provider 调用必须为 0；登录、`GET /config`、DISCOVER 与已认证 raw asset recovery 不连坐。
 - Provider 已产生图片副作用但首次 durable commit 前死亡：标记 `UNKNOWN`，不得自动重试；没有官方 attempt-id 查询证据时，结果恢复保持未证明。
+- D43 零 Provider 误封只允许一次 Runtime 外 exact-CAS：`workflow_dispatch` 必须选 Production、关闭 candidate rotation，并逐字提供冻结证据绑定的 run/checkpoint/logical step/canonical attempt nonce/evidence SHA。脚本还要独立验证 UNKNOWN meta/action、narrative mode、全页 durable coverage、无 result payload、reservation/inventory 前像；全部匹配才原子删除这一条 false action、回退其一次 reservation 并恢复 PARTIAL。任一不符零写，脚本内部 post-readback 失败立即用同进程 preimage 回滚。该通道不接受任意 evidence SHA，也不放宽真正 post-Provider UNKNOWN；CI 输出不得包含 Redis token、owner token 或私钥。
 - Developer API、audit continuity、签名、SCAN/DBSIZE、foreign key、generation、capacity 或校准任一 UNKNOWN：fail closed，不签发、不减计、不调用 Provider。
 
 ### 部署前与回滚

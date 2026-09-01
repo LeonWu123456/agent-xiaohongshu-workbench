@@ -26,6 +26,31 @@ on:
         required: true
         default: false
         type: boolean
+      zero_provider_recovery:
+        description: Recover the one D43 false UNKNOWN after exact Redis preimage verification
+        required: true
+        default: false
+        type: boolean
+      recovery_run_id:
+        description: Exact D43 image run id; required only for recovery
+        required: false
+        type: string
+      recovery_checkpoint_sha256:
+        description: Exact D43 checkpoint SHA-256; required only for recovery
+        required: false
+        type: string
+      recovery_logical_step_id:
+        description: Exact D43 logical step id; required only for recovery
+        required: false
+        type: string
+      recovery_attempt_nonce:
+        description: Exact canonical attempt nonce; required only for recovery
+        required: false
+        type: string
+      recovery_evidence_sha256:
+        description: Exact frozen D43 Reality evidence SHA-256; required only for recovery
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -54,6 +79,12 @@ jobs:
       XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_candidate_rotation && 'true' || 'false' }}
       XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS: "86400000"
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.zero_provider_recovery && 'true' || 'false' }}
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256: ${{ inputs.recovery_checkpoint_sha256 }}
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID: ${{ inputs.recovery_logical_step_id }}
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_ATTEMPT_NONCE: ${{ inputs.recovery_attempt_nonce }}
+      XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256: ${{ inputs.recovery_evidence_sha256 }}
 
     steps:
       - name: Check out the default branch
@@ -73,7 +104,23 @@ jobs:
           case "$XIAOSHIMEI_CANDIDATE_COMMIT" in (*[!0-9a-fA-F]*) exit 1;; esac
           test -n "$XIAOSHIMEI_APP_SCOPE"
           test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true" || test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
+          test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true" || test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "false"
           if test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi
+          if test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true"; then
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            test "$VERCEL_ENV" = "production"
+            test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
+            test -n "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID"
+            test "${#XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256}" -eq 64
+            test -n "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID"
+            test "${#XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_ATTEMPT_NONCE}" -eq 64
+            test "${#XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256}" -eq 64
+          fi
 
       - name: Verify or renew the signed receipt
+        if: env.XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE != 'true'
+        run: node scripts/attest-upstash-image-ledger.mjs
+
+      - name: Recover the exact D43 zero-Provider false UNKNOWN
+        if: env.XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE == 'true'
         run: node scripts/attest-upstash-image-ledger.mjs

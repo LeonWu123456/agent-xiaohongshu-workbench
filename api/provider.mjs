@@ -2594,6 +2594,31 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   if (sha256Json(input.checkpoint_preimage) !== input.checkpoint_preimage_sha256) throw new TypeError("IMAGE_CHECKPOINT_HASH_MISMATCH");
   const checkpoint = verifyD36CheckpointPreimage(input.checkpoint_preimage, settings.apiKey, { runId: input.run_id, checkpointSha256: input.checkpoint_preimage_sha256 });
   const state = await readD36RunState(imageLedger, input.run_id, appScopeId);
+  let coveredNarrativePreparation = null;
+  if (state.compactRun?.production_mode === "narrative") {
+    const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger, appScopeId);
+    const advanced = completeCoveredNarrativePublicImageRun(hydratedRun);
+    if (advanced) {
+      const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, appScopeId, state.referenceManifest || []);
+      const legacyInput = d36LegacyInput(state.snapshot, references);
+      const compactRun = compactPublicImageRun(advanced);
+      const inlineContent = assemblePublicImageContent(advanced, legacyInput, settings);
+      const allManifests = compactRun.assets.map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, input.run_id)));
+      const contentPackage = replaceInlineMediaWithRefs(inlineContent, allManifests);
+      const response = d36ResponseForCompactRun({
+        compactRun,
+        bootstrapNonce: state.bootstrapNonce,
+        inputSha256: state.inputSha256,
+        apiKey: settings.apiKey,
+        mediaDelta: [],
+        recoverableUntil: state.recoverableUntil,
+        upstreamCalls: 0,
+        status: "COMPLETE",
+        contentPackage,
+      });
+      coveredNarrativePreparation = { compactRun, response };
+    }
+  }
   const reservation = await imageLedger.reserveStep({
     runId: input.run_id,
     appScopeId,
@@ -2640,47 +2665,48 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   let compactRun;
   let response;
   try {
-    const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger, appScopeId);
-    const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, appScopeId, state.referenceManifest || []);
-    const legacyInput = d36LegacyInput(state.snapshot, references);
-    try {
-      const coveredNarrative = completeCoveredNarrativePublicImageRun(hydratedRun);
-      const advanced = coveredNarrative || await executePublicImageJob(hydratedRun, legacyInput, settings);
-      const persisted = coveredNarrative
-        ? { compactRun: compactPublicImageRun(advanced), mediaDelta: [] }
-        : await persistD36GeneratedAssets(imageLedger, input.run_id, appScopeId, advanced, state.compactRun.assets || []);
-      compactRun = persisted.compactRun;
-      let contentPackage;
-      if (advanced.status === "COMPLETE") {
-        const inlineContent = assemblePublicImageContent(advanced, legacyInput, settings);
-        const allManifests = compactRun.assets.map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, input.run_id)));
-        contentPackage = replaceInlineMediaWithRefs(inlineContent, allManifests);
+    if (coveredNarrativePreparation) {
+      ({ compactRun, response } = coveredNarrativePreparation);
+    } else {
+      const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger, appScopeId);
+      const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, appScopeId, state.referenceManifest || []);
+      const legacyInput = d36LegacyInput(state.snapshot, references);
+      try {
+        const advanced = await executePublicImageJob(hydratedRun, legacyInput, settings);
+        const persisted = await persistD36GeneratedAssets(imageLedger, input.run_id, appScopeId, advanced, state.compactRun.assets || []);
+        compactRun = persisted.compactRun;
+        let contentPackage;
+        if (advanced.status === "COMPLETE") {
+          const inlineContent = assemblePublicImageContent(advanced, legacyInput, settings);
+          const allManifests = compactRun.assets.map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, input.run_id)));
+          contentPackage = replaceInlineMediaWithRefs(inlineContent, allManifests);
+        }
+        response = d36ResponseForCompactRun({
+          compactRun,
+          bootstrapNonce: state.bootstrapNonce,
+          inputSha256: state.inputSha256,
+          apiKey: settings.apiKey,
+          mediaDelta: persisted.mediaDelta,
+          recoverableUntil: state.recoverableUntil,
+          upstreamCalls: 1,
+          status: advanced.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+          contentPackage,
+        });
+      } catch (error) {
+        const failedRun = error?.details?.resume_checkpoint ? parsePublicImageRun(error.details.resume_checkpoint) : null;
+        if (!failedRun) throw error;
+        compactRun = compactPublicImageRun(failedRun);
+        response = d36ResponseForCompactRun({
+          compactRun,
+          bootstrapNonce: state.bootstrapNonce,
+          inputSha256: state.inputSha256,
+          apiKey: settings.apiKey,
+          recoverableUntil: state.recoverableUntil,
+          upstreamCalls: 1,
+          status: "ERROR",
+          error: { code: "IMAGE_STEP_FAILED", details: { cause: String(error?.message || error).slice(0, 180) } },
+        });
       }
-      response = d36ResponseForCompactRun({
-        compactRun,
-        bootstrapNonce: state.bootstrapNonce,
-        inputSha256: state.inputSha256,
-        apiKey: settings.apiKey,
-        mediaDelta: persisted.mediaDelta,
-        recoverableUntil: state.recoverableUntil,
-        upstreamCalls: coveredNarrative ? 0 : 1,
-        status: advanced.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
-        contentPackage,
-      });
-    } catch (error) {
-      const failedRun = error?.details?.resume_checkpoint ? parsePublicImageRun(error.details.resume_checkpoint) : null;
-      if (!failedRun) throw error;
-      compactRun = compactPublicImageRun(failedRun);
-      response = d36ResponseForCompactRun({
-        compactRun,
-        bootstrapNonce: state.bootstrapNonce,
-        inputSha256: state.inputSha256,
-        apiKey: settings.apiKey,
-        recoverableUntil: state.recoverableUntil,
-        upstreamCalls: 1,
-        status: "ERROR",
-        error: { code: "IMAGE_STEP_FAILED", details: { cause: String(error?.message || error).slice(0, 180) } },
-      });
     }
   } catch (error) {
     try { await imageLedger.markStepUnknown({ runId: input.run_id, appScopeId, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }

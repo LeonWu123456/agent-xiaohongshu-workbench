@@ -19,6 +19,8 @@ export const HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 // capacity proof still measures the full worst-case run; only its transport is
 // split into bounded chunks so the external renewal runner matches local use.
 export const CALIBRATION_CHUNK_BYTES = 1_000_000;
+export const D43_RECOVERY_EVIDENCE_SHA256 = "2b0ba3321bbf1f4ac4c86f8c4f04b28b010608c2c290afb26eefbf724f8f27b1";
+export const D43_RECOVERY_EXPECTED_RESERVATION_COUNT = 2;
 
 const INSTALL_ATTESTATION_LUA = `
 local prior_generation = redis.call('HGET', KEYS[1], 'capacity_generation') or ''
@@ -43,6 +45,55 @@ redis.call('HSET', KEYS[1],
   'unfinalized_inventory', inventory)
 redis.call('SET', KEYS[2], ARGV[7])
 return {'INSTALLED', reserved, live, inventory}
+`;
+
+const RECOVER_ZERO_PROVIDER_FALSE_UNKNOWN_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('EXISTS', KEYS[2]) == 0 then return {'INVENTORY_MISSING'} end
+if redis.call('HGET', KEYS[1], 'app_scope') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'checkpoint_sha') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'logical_step_id') ~= ARGV[3]
+  or redis.call('HGET', KEYS[1], 'run_state_sha') ~= ARGV[6] then return {'META_PREIMAGE_MISMATCH'} end
+local count = tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '-1')
+if redis.call('HGET', KEYS[1], 'status') == 'PARTIAL'
+  and redis.call('EXISTS', KEYS[3]) == 0
+  and count == tonumber(ARGV[5]) - 1
+  and redis.call('SISMEMBER', KEYS[2], KEYS[3]) == 0 then return {'ALREADY_RECOVERED', tostring(count)} end
+if redis.call('HGET', KEYS[1], 'status') ~= 'UNKNOWN'
+  or count ~= tonumber(ARGV[5]) then return {'META_STATE_MISMATCH'} end
+if redis.call('EXISTS', KEYS[3]) == 0
+  or redis.call('SISMEMBER', KEYS[2], KEYS[1]) ~= 1
+  or redis.call('SISMEMBER', KEYS[2], KEYS[2]) ~= 1
+  or redis.call('SISMEMBER', KEYS[2], KEYS[3]) ~= 1 then return {'INVENTORY_PREIMAGE_MISMATCH'} end
+if redis.call('HGET', KEYS[3], 'status') ~= 'UNKNOWN'
+  or redis.call('HGET', KEYS[3], 'checkpoint_sha') ~= ARGV[2]
+  or redis.call('HGET', KEYS[3], 'logical_step_id') ~= ARGV[3]
+  or redis.call('HGET', KEYS[3], 'attempt_nonce') ~= ARGV[4]
+  or tonumber(redis.call('HGET', KEYS[3], 'fence') or '-1') ~= tonumber(ARGV[5])
+  or redis.call('HEXISTS', KEYS[3], 'result_sha') == 1
+  or redis.call('HEXISTS', KEYS[3], 'result_json') == 1 then return {'ACTION_PREIMAGE_MISMATCH'} end
+local prior_inventory_count = tonumber(redis.call('HGET', KEYS[1], 'inventory_count') or '-1')
+if prior_inventory_count < 3 then return {'INVENTORY_COUNT_INVALID'} end
+local prior_step = redis.call('HGETALL', KEYS[3])
+local prior_step_ttl = redis.call('PTTL', KEYS[3])
+local function rollback()
+  redis.call('HSET', KEYS[1], 'status', 'UNKNOWN', 'reservation_count', tostring(count), 'inventory_count', tostring(prior_inventory_count))
+  if redis.call('EXISTS', KEYS[3]) == 1 then redis.call('DEL', KEYS[3]) end
+  if #prior_step > 0 then redis.call('HSET', KEYS[3], unpack(prior_step)) end
+  redis.call('SADD', KEYS[2], KEYS[3])
+  if prior_step_ttl > 0 then redis.call('PEXPIRE', KEYS[3], prior_step_ttl) end
+end
+redis.call('HSET', KEYS[1], 'status', 'PARTIAL', 'reservation_count', tostring(count - 1))
+local removed = redis.call('SREM', KEYS[2], KEYS[3])
+local deleted = redis.call('DEL', KEYS[3])
+if removed ~= 1 or deleted ~= 1 then rollback() return {'ROLLED_BACK_MUTATION_INCOMPLETE'} end
+redis.call('HSET', KEYS[1], 'inventory_count', tostring(prior_inventory_count - 1))
+if redis.call('HGET', KEYS[1], 'status') ~= 'PARTIAL'
+  or tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '-1') ~= count - 1
+  or tonumber(redis.call('HGET', KEYS[1], 'inventory_count') or '-1') ~= prior_inventory_count - 1
+  or redis.call('EXISTS', KEYS[3]) ~= 0
+  or redis.call('SISMEMBER', KEYS[2], KEYS[3]) ~= 0 then rollback() return {'ROLLED_BACK_POST_READBACK_FAILED'} end
+return {'RECOVERED', tostring(count - 1), tostring(prior_inventory_count - 1)}
 `;
 
 export function canonicalJson(value) {
@@ -210,6 +261,77 @@ function hashObject(value) {
   const result = {};
   for (let index = 0; index < value.length; index += 2) result[String(value[index])] = value[index + 1];
   return result;
+}
+
+function exactHex(value, name, length) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!new RegExp(`^[0-9a-f]{${length}}$`).test(text)) throw new Error(`ZERO_PROVIDER_RECOVERY_INPUT_INVALID:${name}`);
+  return text;
+}
+
+function coveredNarrativeRun(run) {
+  if (!run || run.production_mode !== "narrative" || run.status === "COMPLETE") return false;
+  const pageCount = Number(run.final_page_count);
+  if (!Number.isSafeInteger(pageCount) || pageCount < 1) return false;
+  const unitPages = new Map((run.illustration_units || []).map((unit) => [unit.unit_id, Number(unit.page_index)]));
+  const coveredPages = new Set((run.assets || []).map((asset) => unitPages.get(asset.unit_id)).filter(Number.isSafeInteger));
+  return Array.from({ length: pageCount }, (_value, pageIndex) => coveredPages.has(pageIndex)).every(Boolean);
+}
+
+export async function recoverZeroProviderFalseUnknown({ env = process.env, fetchImpl = globalThis.fetch, redisOverride = null } = {}) {
+  const redisUrl = required(env, "UPSTASH_REDIS_REST_URL").replace(/\/$/, "");
+  const redisToken = required(env, "UPSTASH_REDIS_REST_TOKEN");
+  const appScope = required(env, "XIAOSHIMEI_APP_SCOPE");
+  const runId = required(env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID");
+  if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(runId)) throw new Error("ZERO_PROVIDER_RECOVERY_INPUT_INVALID:run_id");
+  const checkpointSha256 = exactHex(required(env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256"), "checkpoint_sha256", 64);
+  const logicalStepId = required(env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID");
+  if (!/^render-job-[0-9]{2}$/.test(logicalStepId)) throw new Error("ZERO_PROVIDER_RECOVERY_INPUT_INVALID:logical_step_id");
+  const attemptNonce = exactHex(required(env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_ATTEMPT_NONCE"), "attempt_nonce", 64);
+  const evidenceSha256 = exactHex(required(env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256"), "evidence_sha256", 64);
+  if (evidenceSha256 !== D43_RECOVERY_EVIDENCE_SHA256) throw new Error("ZERO_PROVIDER_RECOVERY_EVIDENCE_MISMATCH");
+  const root = `${appRoot(appScope)}:run:${runId}`;
+  const metaKey = `${root}:meta`;
+  const inventoryKey = `${root}:inventory`;
+  const actionId = sha256(Buffer.from(`xiaoshimei-image-step-v1\0${runId}\0${checkpointSha256}\0${logicalStepId}`, "utf8"));
+  const stepKey = `${root}:step:${actionId}`;
+  const redis = redisOverride || { command: (args) => redisCommand(redisUrl, redisToken, args, fetchImpl) };
+  const meta = hashObject(await redis.command(["HGETALL", metaKey]));
+  if (!meta.run_json || meta.run_state_sha !== sha256(Buffer.from(meta.run_json))) throw new Error("ZERO_PROVIDER_RECOVERY_RUN_HASH_MISMATCH");
+  let compactRun;
+  try { compactRun = JSON.parse(meta.run_json); } catch { throw new Error("ZERO_PROVIDER_RECOVERY_RUN_JSON_INVALID"); }
+  if (!coveredNarrativeRun(compactRun)) throw new Error("ZERO_PROVIDER_RECOVERY_NARRATIVE_COVERAGE_MISSING");
+  const reply = await redis.command(["EVAL", RECOVER_ZERO_PROVIDER_FALSE_UNKNOWN_LUA, "3", metaKey, inventoryKey, stepKey,
+    appScope,
+    checkpointSha256,
+    logicalStepId,
+    attemptNonce,
+    D43_RECOVERY_EXPECTED_RESERVATION_COUNT,
+    meta.run_state_sha,
+  ]);
+  const status = Array.isArray(reply) ? String(reply[0] || "") : "";
+  if (!new Set(["RECOVERED", "ALREADY_RECOVERED"]).has(status)) throw new Error(`ZERO_PROVIDER_RECOVERY_DENIED:${status || "UNKNOWN"}`);
+  const [postMetaRaw, postStepExists, postStepMember] = await Promise.all([
+    redis.command(["HGETALL", metaKey]),
+    redis.command(["EXISTS", stepKey]),
+    redis.command(["SISMEMBER", inventoryKey, stepKey]),
+  ]);
+  const postMeta = hashObject(postMetaRaw);
+  if (postMeta.status !== "PARTIAL"
+    || Number(postMeta.reservation_count) !== D43_RECOVERY_EXPECTED_RESERVATION_COUNT - 1
+    || Number(postStepExists) !== 0
+    || Number(postStepMember) !== 0
+    || postMeta.run_state_sha !== meta.run_state_sha) throw new Error("ZERO_PROVIDER_RECOVERY_POST_READBACK_FAILED");
+  return {
+    status,
+    run_id: runId,
+    checkpoint_sha256: checkpointSha256,
+    logical_step_id: logicalStepId,
+    evidence_sha256: evidenceSha256,
+    reservation_count: Number(postMeta.reservation_count),
+    inventory_count: Number(postMeta.inventory_count),
+    provider_calls: 0,
+  };
 }
 
 function controlConfig(database, stats, databaseId) {
@@ -447,6 +569,10 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
 }
 
 async function main() {
+  if (enabledEnv(process.env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE")) {
+    process.stdout.write(`${JSON.stringify(await recoverZeroProviderFalseUnknown(), null, 2)}\n`);
+    return;
+  }
   const result = await buildAndInstallAttestation();
   if (result.status === "ATTESTATION_NOT_DUE") {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

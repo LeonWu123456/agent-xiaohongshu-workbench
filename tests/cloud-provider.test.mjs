@@ -28,6 +28,8 @@ import {
 import {
   buildAndInstallAttestation,
   canonicalJson as canonicalAttestationJson,
+  D43_RECOVERY_EVIDENCE_SHA256,
+  recoverZeroProviderFalseUnknown,
 } from "../scripts/attest-upstash-image-ledger.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { computeImageGenerationInputSha256, parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
@@ -1569,7 +1571,100 @@ test("D41 covered narrative checkpoint commits COMPLETE with zero additional Pro
     globalThis.fetch = previousFetch;
   }
   assert.equal(upstreamCalls, 0);
-  assertOrdered(events, ["ledger:readiness", "ledger:reserveStep", "ledger:readRunAsset", "ledger:commitStep"]);
+  assertOrdered(events, ["ledger:readiness", "ledger:readRunAsset", "ledger:reserveStep", "ledger:commitStep"]);
+});
+
+test("D43 covered narrative assembly failure happens before paid reservation and never marks UNKNOWN", async () => {
+  const events = [];
+  const imageLedger = new FakeD36ImageLedger({ events });
+  const run = await seedD41CoveredNarrativeRun(imageLedger);
+  run.compactRun.final_pages[0].title = "短";
+  run.checkpointPreimage = providerModule.createImageTransactionCheckpoint(run.compactRun, D36_SETTINGS.apiKey);
+  run.checkpointPreimageSha256 = providerModule.imageTransactionCheckpointSha256(run.checkpointPreimage);
+  imageLedger.runs.set(run.runId, run);
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => d36Transaction()(d36StepInput(run), D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_720_000, appScopeId: D36_APP_SCOPE }),
+      /XHS_PUBLISH_GATE_FAILED:1:XHS_COVER_TITLE_BUDGET/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+  assert.equal(events.includes("ledger:reserveStep"), false);
+  assert.equal(events.includes("ledger:markStepUnknown"), false);
+  assert.equal(imageLedger.runs.get(run.runId).status, "PARTIAL");
+  assert.equal(imageLedger.runs.get(run.runId).paidCalls, 1);
+});
+
+test("D43 Runtime-external recovery accepts only the exact covered narrative preimage and reads back zero Provider calls", async () => {
+  const imageLedger = new FakeD36ImageLedger();
+  const run = await seedD41CoveredNarrativeRun(imageLedger);
+  const runJson = canonicalAttestationJson(run.compactRun);
+  const runStateSha = sha256Bytes(Buffer.from(runJson));
+  const meta = {
+    status: "UNKNOWN",
+    app_scope: D36_APP_SCOPE,
+    checkpoint_sha: run.checkpointPreimageSha256,
+    logical_step_id: run.logicalStepId,
+    run_state_sha: runStateSha,
+    run_json: runJson,
+    reservation_count: "2",
+    inventory_count: "7",
+  };
+  let stepExists = 1;
+  let stepMember = 1;
+  const commands = [];
+  const redis = {
+    async command(args) {
+      commands.push(args);
+      if (args[0] === "HGETALL") return Object.entries(meta).flat();
+      if (args[0] === "EVAL") {
+        assert.match(args[1], /ROLLED_BACK_POST_READBACK_FAILED/);
+        assert.equal(args.at(-1), runStateSha);
+        meta.status = "PARTIAL";
+        meta.reservation_count = "1";
+        meta.inventory_count = "6";
+        stepExists = 0;
+        stepMember = 0;
+        return ["RECOVERED", "1", "6"];
+      }
+      if (args[0] === "EXISTS") return stepExists;
+      if (args[0] === "SISMEMBER") return stepMember;
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${args[0]}`);
+    },
+  };
+  const env = {
+    UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+    UPSTASH_REDIS_REST_TOKEN: "test-token",
+    XIAOSHIMEI_APP_SCOPE: D36_APP_SCOPE,
+    XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID: run.runId,
+    XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256: run.checkpointPreimageSha256,
+    XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID: run.logicalStepId,
+    XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_ATTEMPT_NONCE: "e".repeat(64),
+    XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256: D43_RECOVERY_EVIDENCE_SHA256,
+  };
+  const recovered = await recoverZeroProviderFalseUnknown({ env, redisOverride: redis });
+  assert.deepEqual(recovered, {
+    status: "RECOVERED",
+    run_id: run.runId,
+    checkpoint_sha256: run.checkpointPreimageSha256,
+    logical_step_id: run.logicalStepId,
+    evidence_sha256: D43_RECOVERY_EVIDENCE_SHA256,
+    reservation_count: 1,
+    inventory_count: 6,
+    provider_calls: 0,
+  });
+  assert.equal(commands.filter((args) => args[0] === "EVAL").length, 1);
+
+  await assert.rejects(
+    () => recoverZeroProviderFalseUnknown({ env: { ...env, XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_EVIDENCE_SHA256: "f".repeat(64) }, redisOverride: redis }),
+    /ZERO_PROVIDER_RECOVERY_EVIDENCE_MISMATCH/,
+  );
+  assert.equal(commands.filter((args) => args[0] === "EVAL").length, 1);
 });
 
 test("D36 STEP reserves one logical action; an alternate nonce cannot enter the image upstream", async () => {
