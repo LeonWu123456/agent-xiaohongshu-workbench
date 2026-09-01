@@ -48,6 +48,24 @@ test("unconfirmed or unassembled text cannot publish", () => {
   assert.equal(derivePublicationAuthority({ ...pair, assembledDraftId: null }).code, "TEXT_NOT_ASSEMBLED");
 });
 
+test("an exact visible canvas in the active record recovers after a no-op text edit and reconfirm", () => {
+  const pair = confirmedPair();
+  const result = derivePublicationAuthority({
+    ...pair,
+    assembledDraftId: null,
+    activeDraftId: "active-record-1",
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.code, "CONFIRMED_TEXT_AUTHORITY");
+  assert.equal(result.resolved_assembled_draft_id, pair.textDraft.draft_id);
+  assert.equal(derivePublicationAuthority({
+    ...pair,
+    content: { ...pair.content, body: `${pair.content.body}真实改字` },
+    assembledDraftId: null,
+    activeDraftId: "active-record-1",
+  }).code, "PUBLICATION_COPY_MISMATCH");
+});
+
 test("an exact current canvas remains publishable while a separate image recovery is pending", () => {
   const pair = confirmedPair();
   const draftId = pair.textDraft.draft_id;

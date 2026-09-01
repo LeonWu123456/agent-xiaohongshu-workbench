@@ -69,13 +69,18 @@ export function derivePublicationAuthority({
   if (!draftId) return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
   const pendingSnapshot = pendingImageOperation?.operation_snapshot;
   const visiblePageCount = Array.isArray(content.pages) ? content.pages.length : 0;
+  const exactCurrentCanvas = typeof activeDraftId === "string"
+    && Boolean(activeDraftId)
+    && !pendingImageOperation
+    && visiblePageCount > 0
+    && sourceDraftId === draftId;
   const currentCanvasSurvivesPendingRecovery = typeof activeDraftId === "string"
     && Boolean(activeDraftId)
     && pendingSnapshot?.draft_record_id === activeDraftId
     && pendingSnapshot?.confirmed_draft?.draft_id === draftId
     && /^[0-9a-f]{64}$/.test(pendingImageOperation?.operation_nonce || "")
     && visiblePageCount > 0;
-  if (assembledDraftId !== draftId && !currentCanvasSurvivesPendingRecovery) {
+  if (assembledDraftId !== draftId && !exactCurrentCanvas && !currentCanvasSurvivesPendingRecovery) {
     return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
   }
 
