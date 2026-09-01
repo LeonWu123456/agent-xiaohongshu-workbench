@@ -6,7 +6,7 @@ import {
   Crop, ImagePlus, Layers3, Library, Lock, Minus, Move, Palette, Plus, Redo2, RefreshCw, RotateCcw, Save,
   Search, SlidersHorizontal, Trash2, Type, Undo2, Unlock, Upload, UserRound, X,
 } from "lucide-react";
-import { buildPublishZip } from "./publish-package.mjs";
+import { buildPublishZip, collectPublishMediaRefs } from "./publish-package.mjs";
 import {
   admitProducerWithVerdict, admitSingleExpansion, deletePage, duplicatePage, generateContentPackage,
   generateWithProvider, importLocalEditableDraft, inspectImportContract, invalidateVisualReview,
@@ -3125,7 +3125,15 @@ function App() {
       if (!afterRenderDecision.allowed) {
         throw new Error("PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
       }
-      prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(contentSnapshot, pngPages, { createdAt: contentSnapshot.created_at }));
+      const materialized = await materializeForWorkspace({ content_package: contentSnapshot });
+      const canonicalContent = materialized.value.content_package;
+      const mediaRefs = collectPublishMediaRefs(canonicalContent);
+      const mediaAssets = await mediaStore.exportMediaAssets(mediaRefs);
+      if (!mainAuthority.isCurrent(operation)) throw new Error("STALE_MAIN_OPERATION");
+      prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(canonicalContent, pngPages, {
+        createdAt: contentSnapshot.created_at,
+        mediaAssets,
+      }));
       const finalDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
       if (!finalDecision.allowed || !mainAuthority.isCurrent(operation)) {
         if (prepared.revoke) URL.revokeObjectURL(prepared.url);
@@ -3319,7 +3327,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images">
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>

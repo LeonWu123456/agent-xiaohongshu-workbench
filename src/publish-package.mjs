@@ -1,70 +1,41 @@
 import JSZip from "jszip";
 import { buildManifest, publishCopy } from "./content-engine.mjs";
-import { detectImageMime, sha256MediaBytes } from "./media-asset-store.mjs";
+import { MEDIA_ASSET_BACKUP_SCHEMA, MEDIA_REF_PREFIX } from "./media-asset-store.mjs";
 
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
-const PACKAGE_MEDIA_CONTRACT = "archive-relative-v1";
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
-function isEphemeralMediaRef(value) {
-  return typeof value === "string" && (/^blob:/i.test(value) || /^data:image\//i.test(value));
+export function collectPublishMediaRefs(value, refs = new Set()) {
+  if (typeof value === "string") {
+    if (/^(?:data|blob):/i.test(value)) throw new TypeError("PUBLISH_CONTENT_MEDIA_NOT_CANONICAL");
+    if (value.startsWith(MEDIA_REF_PREFIX)) {
+      const sha256 = value.slice(MEDIA_REF_PREFIX.length);
+      if (!SHA256_PATTERN.test(sha256)) throw new TypeError("PUBLISH_CONTENT_MEDIA_REF_INVALID");
+      refs.add(value);
+    }
+  } else if (Array.isArray(value)) value.forEach((item) => collectPublishMediaRefs(item, refs));
+  else if (value && typeof value === "object") Object.values(value).forEach((item) => collectPublishMediaRefs(item, refs));
+  return [...refs].sort();
 }
 
-function collectEphemeralMediaRefs(value, refs = new Set()) {
-  if (isEphemeralMediaRef(value)) refs.add(value);
-  else if (Array.isArray(value)) value.forEach((item) => collectEphemeralMediaRefs(item, refs));
-  else if (value && typeof value === "object") Object.values(value).forEach((item) => collectEphemeralMediaRefs(item, refs));
-  return refs;
-}
-
-function replaceEphemeralMediaRefs(value, replacements) {
-  if (isEphemeralMediaRef(value)) return replacements.get(value);
-  if (Array.isArray(value)) return value.map((item) => replaceEphemeralMediaRefs(item, replacements));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceEphemeralMediaRefs(item, replacements)]));
+function exactMediaAssets(content, mediaAssets) {
+  if (!Array.isArray(mediaAssets)) throw new TypeError("PUBLISH_MEDIA_ASSETS_INVALID");
+  const expectedRefs = collectPublishMediaRefs(content);
+  const assets = mediaAssets.map((asset) => {
+    if (!asset || typeof asset !== "object" || Array.isArray(asset) || asset.schema !== MEDIA_ASSET_BACKUP_SCHEMA) {
+      throw new TypeError("PUBLISH_MEDIA_ASSET_SCHEMA_INVALID");
+    }
+    const sha256 = String(asset.sha256 || "");
+    if (!SHA256_PATTERN.test(sha256) || asset.media_ref !== `${MEDIA_REF_PREFIX}${sha256}` || typeof asset.bytes_base64 !== "string") {
+      throw new TypeError("PUBLISH_MEDIA_ASSET_IDENTITY_INVALID");
+    }
+    return structuredClone(asset);
+  }).sort((left, right) => left.sha256.localeCompare(right.sha256));
+  const actualRefs = assets.map((asset) => asset.media_ref);
+  if (new Set(actualRefs).size !== actualRefs.length || JSON.stringify(actualRefs) !== JSON.stringify(expectedRefs)) {
+    throw new TypeError("PUBLISH_MEDIA_ASSET_SET_MISMATCH");
   }
-  return value;
-}
-
-function mediaExtension(mime) {
-  if (mime === "image/png") return "png";
-  if (mime === "image/jpeg") return "jpg";
-  if (mime === "image/webp") return "webp";
-  throw new TypeError("PACKAGE_MEDIA_MIME_UNSUPPORTED");
-}
-
-function mediaBytes(value) {
-  if (value instanceof Uint8Array) return new Uint8Array(value);
-  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
-  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
-  throw new TypeError("PACKAGE_MEDIA_BYTES_INVALID");
-}
-
-async function fetchMediaBytes(ref, fetchApi = globalThis.fetch) {
-  if (typeof fetchApi !== "function") throw new TypeError("PACKAGE_MEDIA_FETCH_UNAVAILABLE");
-  const response = await fetchApi(ref);
-  if (!response?.ok) throw new TypeError("PACKAGE_MEDIA_FETCH_FAILED");
-  return new Uint8Array(await response.arrayBuffer());
-}
-
-async function packageMedia(value, options) {
-  const refs = [...collectEphemeralMediaRefs(value)].sort();
-  const replacements = new Map();
-  const files = new Map();
-  const resolveMedia = options.resolveMedia || ((ref) => fetchMediaBytes(ref, options.fetchApi));
-  for (const ref of refs) {
-    let bytes;
-    try { bytes = mediaBytes(await resolveMedia(ref)); }
-    catch (error) { throw new TypeError(`PACKAGE_MEDIA_RESOLVE_FAILED: ${error?.message || "unknown"}`); }
-    const mime = detectImageMime(bytes);
-    const sha256 = await sha256MediaBytes(bytes, { cryptoApi: options.cryptoApi });
-    const name = `media/${sha256}.${mediaExtension(mime)}`;
-    replacements.set(ref, `./${name}`);
-    if (!files.has(name)) files.set(name, bytes);
-  }
-  return {
-    content: replaceEphemeralMediaRefs(value, replacements),
-    files: [...files.entries()].sort(([left], [right]) => left.localeCompare(right)),
-  };
+  return assets;
 }
 
 export function inspectPng(bytes) {
@@ -83,12 +54,11 @@ export async function buildPublishZip(content, pngPages, options = {}) {
   const createdAt = options.createdAt || new Date().toISOString();
   const entryDate = new Date(createdAt);
   if (Number.isNaN(entryDate.getTime())) throw new TypeError("ZIP createdAt is invalid");
-  const contentWithoutLocalState = structuredClone(content);
-  delete contentWithoutLocalState.id;
-  delete contentWithoutLocalState.saved_at;
-  delete contentWithoutLocalState.reality_feedback;
-  const packagedMedia = await packageMedia(contentWithoutLocalState, options);
-  const portableContent = packagedMedia.content;
+  const portableContent = structuredClone(content);
+  delete portableContent.id;
+  delete portableContent.saved_at;
+  delete portableContent.reality_feedback;
+  const mediaAssets = exactMediaAssets(portableContent, options.mediaAssets || []);
   const names = [];
   pngPages.forEach((page, index) => {
     const dimensions = inspectPng(page);
@@ -98,13 +68,13 @@ export async function buildPublishZip(content, pngPages, options = {}) {
     zip.file(name, page, { date: entryDate });
   });
   zip.file("publish-copy.txt", publishCopy(content), { date: entryDate });
-  for (const [name, bytes] of packagedMedia.files) zip.file(name, bytes, { date: entryDate, createFolders: false });
   zip.file("content.json", JSON.stringify(portableContent, null, 2), { date: entryDate });
+  zip.file("media-assets.json", JSON.stringify(mediaAssets, null, 2), { date: entryDate });
   const manifest = buildManifest(portableContent, names, createdAt);
-  const mediaNames = packagedMedia.files.map(([name]) => name);
-  manifest.files = [...names, "publish-copy.txt", ...mediaNames, "content.json", "manifest.json"];
-  manifest.content_media_contract = PACKAGE_MEDIA_CONTRACT;
-  manifest.content_media_files = mediaNames;
+  manifest.files = [...names, "publish-copy.txt", "content.json", "media-assets.json", "manifest.json"];
+  manifest.content_media_contract = "canonical-refs-with-verified-backup-assets-v1";
+  manifest.media_assets_file = "media-assets.json";
+  manifest.media_asset_count = mediaAssets.length;
   zip.file("manifest.json", JSON.stringify(manifest, null, 2), { date: entryDate });
   return zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
 }

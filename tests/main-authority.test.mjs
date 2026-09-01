@@ -330,7 +330,11 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.doesNotMatch(mainSource, /liveDraft\?\.pending_image_operation|latestDraft\?\.pending_image_operation/, "pending assets must not suppress semantic autosave");
   assert.match(namedFunctionSource(mainSource, "saveDraft"), /^function saveDraft\(\) \{\s*if \(draftMutationIsLocked\(\)\) return;/);
   assert.match(namedFunctionSource(mainSource, "copyPublicationCopy"), /^function copyPublicationCopy\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
-  assert.match(namedFunctionSource(mainSource, "downloadZip"), /^function downloadZip\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\) \|\| workspaceTransitionLock\.isLocked\(\)\) return;/);
+  const downloadSource = namedFunctionSource(mainSource, "downloadZip");
+  assert.match(downloadSource, /^function downloadZip\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\) \|\| workspaceTransitionLock\.isLocked\(\)\) return;/);
+  assert.match(downloadSource, /materializeForWorkspace\(\{ content_package: contentSnapshot \}\)/);
+  assert.match(downloadSource, /mediaStore\.exportMediaAssets\(mediaRefs\)/);
+  assert.ok(downloadSource.indexOf("materializeForWorkspace") < downloadSource.indexOf("buildPublishZip"), "export must canonicalize media before ZIP creation");
   assert.match(mainSource, /当前 .* 页成品与已确认文字一致，可以直接编辑、保存、复制和导出；另一条配图恢复只锁图片参数与新图片生成/);
 
   const creatorSource = namedFunctionSource(mainSource, "renderCreatorWorkflow");
@@ -418,9 +422,9 @@ test("a visible-canvas lineage split has one explicit zero-provider repair that 
   assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
   assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
   assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
-  assert.doesNotMatch(mainSource, /data-last-image-request-modes=/);
-  assert.doesNotMatch(mainSource, /data-last-image-response-status=/);
-  assert.doesNotMatch(mainSource, /data-last-image-upstream-calls=/);
+  assert.match(mainSource, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
+  assert.match(mainSource, /data-last-image-response-status=\{imageOperationReadback\?\.response_status \|\| ""\}/);
+  assert.match(mainSource, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {
