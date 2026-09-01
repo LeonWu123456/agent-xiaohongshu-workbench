@@ -2065,7 +2065,7 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
         title: page.title,
         body: page.body,
         info_panels: page.panels.map((panel) => ({ title: panel.title, body: panel.body, content_role: panel.contentRole })),
-      })), { pillar: input.draft.pillar, publishBody: input.draft.body });
+      })), { pillar: input.draft.pillar, publishBody: input.draft.body, productionMode: input.production_mode });
       planAttempts.push({ attempt, status: "PASS" });
       break;
     } catch (error) {

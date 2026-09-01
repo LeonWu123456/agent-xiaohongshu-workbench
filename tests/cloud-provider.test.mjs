@@ -589,7 +589,7 @@ async function seedD41CoveredNarrativeRun(imageLedger) {
       panels: [],
     },
     {
-      pageRole: "example",
+      pageRole: "method",
       shotRole: "action",
       highlightPhrases: ["按发生顺序"],
       eyebrow: "记录时只做三件事",

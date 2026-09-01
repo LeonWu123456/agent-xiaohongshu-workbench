@@ -27,6 +27,16 @@ test("publish gate rejects a long cover, missing hero, and missing wellness boun
   assert.ok(issues.some((issue) => issue.code === "XHS_WELLNESS_SAFETY_BOUNDARY_MISSING"));
 });
 
+test("publish gate allows a narrative method page without infographic panels but keeps other modes strict", () => {
+  const pages = [
+    { page_role: "hook", eyebrow: "白露食白", title: "日常白色食物吃法", info_panels: [] },
+    { page_role: "method", eyebrow: "温润吃法", title: "蒸煮炖慢慢加入日常", body: "挑两三种顺手的白色食物，改用蒸、煮、炖的温热吃法。", visual: "character", info_panels: [] },
+  ];
+  assert.ok(!inspectXhsPublishQuality(pages, { productionMode: "narrative" }).some((issue) => issue.code === "XHS_METHOD_UNITS_REQUIRED"));
+  assert.ok(inspectXhsPublishQuality(pages, { productionMode: "smart" }).some((issue) => issue.code === "XHS_METHOD_UNITS_REQUIRED"));
+  assert.ok(inspectXhsPublishQuality(pages, { productionMode: "infographic" }).some((issue) => issue.code === "XHS_METHOD_UNITS_REQUIRED"));
+});
+
 test("publish gate rejects repeated section labels, typo repeats and overstuffed panel copy", () => {
   const issues = inspectXhsPublishQuality([
     { page_role: "hook", eyebrow: "处暑养生", title: "三个实用养养法", info_panels: [] },

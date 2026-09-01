@@ -27,9 +27,10 @@ function declaredStepCounts(page) {
  * A deterministic pre-publish scorecard. It checks information architecture,
  * not taste: the browser geometry and pixel gates remain separate authorities.
  */
-export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "" } = {}) {
+export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "", productionMode = "smart" } = {}) {
   if (!Array.isArray(pages) || !pages.length) return [{ code: "XHS_PAGES_MISSING", page: 0 }];
   const issues = [];
+  const narrative = String(productionMode) === "narrative";
   const layouts = pages.map((page, index) => recommendHtmlLayout(page, index));
   pages.forEach((page, index) => {
     const role = String(page?.page_role || (index === 0 ? "hook" : "example"));
@@ -50,7 +51,7 @@ export function inspectXhsPublishQuality(pages, { pillar = "", publishBody = "" 
     if (panels.length >= 2 && declaredStepCounts(page).some((count) => count !== panels.length)) {
       issues.push({ code: "XHS_STEP_COUNT_MISMATCH", page: index + 1 });
     }
-    if (["method", "checklist", "pitfall"].includes(role) && (panels.length < 2 || panels.length > 4)) {
+    if (!narrative && ["method", "checklist", "pitfall"].includes(role) && (panels.length < 2 || panels.length > 4)) {
       issues.push({ code: "XHS_METHOD_UNITS_REQUIRED", page: index + 1 });
     }
     if (panels.length >= 2 && panels.filter((panel) => panel?.content_role === "hero").length !== 1) {

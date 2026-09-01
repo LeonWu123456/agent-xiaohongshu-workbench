@@ -939,7 +939,7 @@ export function assembleArkContentFromDraft(draft, pages, assetUrls, modelInfo, 
     generation: { mode: "PROVIDER", provider: "volcengine-ark", source_draft_id: draft.draft_id, production_mode: normalizedProductionMode, notice: modelInfo.motherSheetCount ? `两节点生成：文字已由用户确认；${modelInfo.motherSheetCount}张3:4母版图（首张含9:8高清KV，后续按需续页）切分为${modelInfo.illustrationUnitCount}个独立插画单元并组装为${contentPages.length}个画板；图片来自${modelInfo.imageModel}；尚未独立评测` : `两节点生成：文字已由用户确认；使用${productionModeLabel(normalizedProductionMode)}生成${contentPages.length}张图片；图片来自${modelInfo.imageModel}；尚未独立评测` },
     ...(draft.style_lock ? { content_strategy: buildContentStrategy({ contentType: draft.content_type || "knowledge_card", styleLock: draft.style_lock }) } : {}),
   };
-  if (modelInfo?.enforcePublishQuality) assertXhsPublishQuality(contentPages, { pillar: draft.pillar, publishBody: draft.body });
+  if (modelInfo?.enforcePublishQuality) assertXhsPublishQuality(contentPages, { pillar: draft.pillar, publishBody: draft.body, productionMode: normalizedProductionMode });
   return parseContentPackage(JSON.stringify(content));
 }
 
