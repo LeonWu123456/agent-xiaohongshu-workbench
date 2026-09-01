@@ -2549,9 +2549,26 @@ function App() {
       };
 
       let providerResult = await provider.generateImages(initialRequest, consumeImageResponse);
+      mainAuthority.commit(mainOperation, () => setImageOperationReadback({
+        active_draft_id: imageOperation.draft_id,
+        operation_nonce: imageOperation.operation_id,
+        run_id: providerResult.run_id || null,
+        request_modes: [...observedRequestModes],
+        response_status: providerResult.status || "UNKNOWN",
+        upstream_calls: Number(providerResult.upstream_calls ?? providerResult.progress?.upstream_calls ?? 0),
+      }));
       if (providerResult.status === "ERROR" && providerResult.error?.code === "IMAGE_LEDGER_RUN_MISSING" && baseRecord.pending_image_operation?.protocol_state === "BOOTSTRAP") {
         const start = await rebuildPendingImageStartV3({ pendingImageOperation: baseRecord.pending_image_operation, mediaStore });
+        observedRequestModes.push(start.mode);
         providerResult = await provider.generateImages(start, consumeImageResponse);
+        mainAuthority.commit(mainOperation, () => setImageOperationReadback({
+          active_draft_id: imageOperation.draft_id,
+          operation_nonce: imageOperation.operation_id,
+          run_id: providerResult.run_id || null,
+          request_modes: [...observedRequestModes],
+          response_status: providerResult.status || "UNKNOWN",
+          upstream_calls: Number(providerResult.upstream_calls ?? providerResult.progress?.upstream_calls ?? 0),
+        }));
       }
       if (providerResult.status === "ERROR" && providerResult.error?.code === "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS") {
         const plannerFailureReceipt = await commitDraftImagePlannerFailureV3({

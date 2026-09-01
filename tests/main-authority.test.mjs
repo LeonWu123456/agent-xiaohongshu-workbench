@@ -343,6 +343,8 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.match(imageSource, /零调用查询已完成/);
   assert.match(imageSource, /const observedRequestModes = \[initialRequest\.mode\]/);
   assert.match(imageSource, /upstream_calls: Number\(response\.upstream_calls \?\? response\.progress\?\.upstream_calls \?\? 0\)/);
+  assert.match(imageSource, /upstream_calls: Number\(providerResult\.upstream_calls \?\? providerResult\.progress\?\.upstream_calls \?\? 0\)/, "direct UNKNOWN and ERROR returns must still expose the runtime readback");
+  assert.ok(imageSource.indexOf("let providerResult = await provider.generateImages") < imageSource.indexOf("response_status: providerResult.status"), "the final provider return must be recorded before error handling");
   assert.ok(imageSource.indexOf("if (discoveryOnly)") < imageSource.indexOf("observedRequestModes.push(nextRequest.mode)"), "a discovery-only response must stop before STEP enters the observed request sequence");
   assert.match(mainSource, /确认付费：继续图片步骤/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
