@@ -208,6 +208,7 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /mode: "STEP"/);
   assert.match(source, /只查询恢复结果（0 次图片调用）/);
   assert.match(source, /确认付费：继续图片步骤/);
+  assert.match(source, /恢复当前两页对应文案（0 次图片调用）/);
   assert.match(source, /data-active-draft-id=\{workspaceEnvelope\.active_draft_id\}/);
   assert.match(source, /data-text-draft-id=\{textDraft\.draft_id \|\| ""\}/);
   assert.match(source, /data-content-source-draft-id=\{content\.generation\?\.source_draft_id \|\| ""\}/);

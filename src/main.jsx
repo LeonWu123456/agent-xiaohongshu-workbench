@@ -2033,6 +2033,55 @@ function App() {
     }
   }
 
+  async function repairVisibleCanvasLineage() {
+    if (workspaceMutationIsLocked()) return;
+    if (publicationAuthorityRef.current?.code !== "CONTENT_LINEAGE_MISMATCH" || historicalAdoptionRef.current) return;
+    const operation = mainAuthority.capture("visible-canvas-lineage-repair", { envelopeScoped: true });
+    historicalAdoptionRef.current = true;
+    setHistoricalAdoptionBusy(true);
+    try {
+      const baseWorkspace = workspaceEnvelopeRef.current;
+      const draftId = baseWorkspace.active_draft_id;
+      const sourceRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      const sourceLineageId = String(sourceRecord?.content_package?.generation?.source_draft_id || "");
+      if (!sourceRecord || !sourceLineageId || !sourceRecord.pending_image_operation) throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRECONDITION_FAILED");
+      const frozenPages = JSON.stringify(sourceRecord.content_package.pages);
+      const frozenPending = JSON.stringify(sourceRecord.pending_image_operation);
+      const adoption = buildHistoricalDraftAdoption({
+        content: sourceRecord.content_package,
+        draftId: sourceLineageId,
+        createdAt: sourceRecord.created_at,
+      });
+      const materialized = await materializeForWorkspace({ content_package: adoption.content_package, generation_session: adoption.generation_session });
+      if (!mainAuthority.isCurrent(operation)) return;
+      const nextWorkspace = saveDraftRecordV3(baseWorkspace, {
+        draftId,
+        contentPackage: materialized.value.content_package,
+        generationSession: materialized.value.generation_session,
+      });
+      const nextRecord = nextWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      if (!nextRecord
+        || JSON.stringify(nextRecord.content_package.pages) !== frozenPages
+        || JSON.stringify(nextRecord.pending_image_operation) !== frozenPending) {
+        throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRESERVATION_FAILED");
+      }
+      if (!await persistAndAdoptWorkspace(nextWorkspace, {
+        record: nextRecord,
+        expectedWorkspaceToken: workspaceEnvelopeV3Token(baseWorkspace),
+        reason: "REPAIR_VISIBLE_CANVAS_LINEAGE",
+        operation,
+      })) return;
+      setRecoveryDiscoveryReceipt(null);
+      setToast("当前两页对应文案已恢复为唯一确认文字；图片与待恢复操作均未改变");
+    } catch (error) {
+      console.warn(error);
+      mainAuthority.commit(operation, () => setToast("当前两页对应文案未能恢复，原稿和待恢复操作都没有改变"));
+    } finally {
+      historicalAdoptionRef.current = false;
+      setHistoricalAdoptionBusy(false);
+    }
+  }
+
   async function openCreator() {
     if (isFreshDraft && workspaceEnvelopeRef.current.active_draft_id === workspaceEnvelope.active_draft_id) {
       setView("compose"); setCreatorOpen(true); setMobileInspectorOpen(true);
@@ -3355,6 +3404,7 @@ function App() {
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
                   {publicationAuthority.code === "HISTORICAL_CONFIRMATION_REQUIRED" && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
+                  {publicationAuthority.code === "CONTENT_LINEAGE_MISMATCH" && pendingImageOperation && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : "恢复当前两页对应文案（0 次图片调用）"}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>

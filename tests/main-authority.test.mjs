@@ -346,6 +346,18 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
 });
 
+test("a visible-canvas lineage split has one explicit zero-provider repair that preserves pages and pending", () => {
+  const repairSource = namedFunctionSource(mainSource, "repairVisibleCanvasLineage");
+  assert.doesNotMatch(repairSource, /draftMutationIsLocked\s*\(/, "the repair is the bounded exception to the pending authoring lock");
+  assert.match(repairSource, /sourceRecord\.content_package/);
+  assert.match(repairSource, /draftId: sourceLineageId/);
+  assert.match(repairSource, /JSON\.stringify\(nextRecord\.content_package\.pages\) !== frozenPages/);
+  assert.match(repairSource, /JSON\.stringify\(nextRecord\.pending_image_operation\) !== frozenPending/);
+  assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
+  assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
+  assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
+});
+
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {
   const persist = namedFunctionSource(mainSource, "persistAndAdoptWorkspace");
   assert.match(persist, /EXPECTED_WORKSPACE_V3_TOKEN_REQUIRED/);
