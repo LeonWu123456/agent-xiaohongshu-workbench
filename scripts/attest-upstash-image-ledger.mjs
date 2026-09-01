@@ -15,6 +15,7 @@ export const CAPACITY_SCHEMA = "xiaoshimei.image-ledger-capacity.v1";
 export const AUDIT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 export const RENEW_MAX_MS = 6 * 24 * 60 * 60 * 1000;
 export const HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+export const CALIBRATION_CHUNK_BYTES = 4_000_000;
 
 const INSTALL_ATTESTATION_LUA = `
 local prior_generation = redis.call('HGET', KEYS[1], 'capacity_generation') or ''
@@ -204,17 +205,18 @@ function hashObject(value) {
 function controlConfig(database, stats, databaseId) {
   const state = String(database.state ?? database.status ?? "").toLowerCase();
   if (state !== "active") throw new Error("ATTESTATION_DATABASE_NOT_ACTIVE");
-  const modifying = booleanFalse(database.modifying ?? database.is_modifying ?? false, "ATTESTATION_DATABASE_MODIFYING");
+  const modifyingValue = database.modifying_state ?? database.modifying ?? database.is_modifying ?? false;
+  const modifying = modifyingValue === "" ? false : booleanFalse(modifyingValue, "ATTESTATION_DATABASE_MODIFYING");
   const tls = booleanTrue(database.tls ?? database.tls_enabled ?? database.ssl, "ATTESTATION_TLS_UNKNOWN");
   const eviction = booleanFalse(database.eviction ?? database.eviction_enabled ?? database.maxmemory_policy, "ATTESTATION_EVICTION_UNKNOWN");
   const dbEviction = booleanFalse(database.db_eviction ?? database.database_eviction ?? database.eviction, "ATTESTATION_DB_EVICTION_UNKNOWN");
   const autoUpgrade = booleanFalse(database.auto_upgrade ?? database.autoUpgrade ?? false, "ATTESTATION_AUTO_UPGRADE_UNKNOWN");
   const storageThresholdBytes = numberFrom(
-    stats.storage_threshold_bytes ?? stats.max_storage_bytes ?? stats.max_data_size ?? database.storage_threshold_bytes ?? database.max_data_size,
+    stats.storage_threshold_bytes ?? stats.max_storage_bytes ?? stats.max_data_size ?? database.storage_threshold_bytes ?? database.db_disk_threshold ?? database.max_data_size,
     "ATTESTATION_STORAGE_THRESHOLD_UNKNOWN",
   );
   const currentStorageBytes = numberFrom(
-    stats.current_storage_bytes ?? stats.total_data_size ?? stats.storage_bytes ?? database.current_storage_bytes ?? 0,
+    stats.current_storage_bytes ?? stats.current_storage ?? stats.total_data_size ?? stats.storage_bytes ?? database.current_storage_bytes ?? 0,
     "ATTESTATION_CURRENT_STORAGE_UNKNOWN",
   );
   if (storageThresholdBytes <= 0 || currentStorageBytes > storageThresholdBytes) throw new Error("ATTESTATION_STORAGE_INVALID");
@@ -232,20 +234,31 @@ function controlConfig(database, stats, databaseId) {
 }
 
 async function calibrateWorstCase(redis, root, worstCaseRunBytes) {
-  const fixtureKey = `${root}:calibration:${sha256(randomBytes(32)).slice(0, 32)}`;
-  const bytes = randomBytes(worstCaseRunBytes);
-  const encoded = bytes.toString("base64");
+  const fixtureRoot = `${root}:calibration:${sha256(randomBytes(32)).slice(0, 32)}`;
+  const fixtureKeys = [];
+  const calibrationHash = createHash("sha256");
+  let physicalBytes = 0;
   try {
-    if (await redis.command(["SET", fixtureKey, encoded, "PX", "600000"]) !== "OK") throw new Error("ATTESTATION_CALIBRATION_WRITE_FAILED");
-    const readback = await redis.command(["GET", fixtureKey]);
-    if (typeof readback !== "string" || !Buffer.from(readback, "base64").equals(bytes)) throw new Error("ATTESTATION_CALIBRATION_READBACK_FAILED");
-    const physicalBytes = numberFrom(await redis.command(["MEMORY", "USAGE", fixtureKey]), "ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
-    if (physicalBytes <= 0) throw new Error("ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
-    return { calibration_sha256: sha256(bytes), calibration_bytes: physicalBytes };
+    for (let offset = 0, index = 0; offset < worstCaseRunBytes; offset += CALIBRATION_CHUNK_BYTES, index += 1) {
+      const logicalBytes = Math.min(CALIBRATION_CHUNK_BYTES, worstCaseRunBytes - offset);
+      const fixtureKey = `${fixtureRoot}:${index}`;
+      const bytes = randomBytes(logicalBytes);
+      fixtureKeys.push(fixtureKey);
+      calibrationHash.update(bytes);
+      if (await redis.command(["SET", fixtureKey, bytes.toString("base64"), "PX", "600000"]) !== "OK") throw new Error("ATTESTATION_CALIBRATION_WRITE_FAILED");
+      const readback = await redis.command(["GET", fixtureKey]);
+      if (typeof readback !== "string" || !Buffer.from(readback, "base64").equals(bytes)) throw new Error("ATTESTATION_CALIBRATION_READBACK_FAILED");
+      const chunkPhysicalBytes = numberFrom(await redis.command(["MEMORY", "USAGE", fixtureKey]), "ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
+      if (chunkPhysicalBytes <= 0) throw new Error("ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
+      physicalBytes += chunkPhysicalBytes;
+    }
+    return { calibration_sha256: calibrationHash.digest("hex"), calibration_bytes: physicalBytes };
   } finally {
-    await redis.command(["DEL", fixtureKey]).catch(() => null);
-    const exists = await redis.command(["EXISTS", fixtureKey]).catch(() => 1);
-    if (Number(exists) !== 0) throw new Error("ATTESTATION_CALIBRATION_DELETE_UNKNOWN");
+    for (const fixtureKey of fixtureKeys) {
+      await redis.command(["DEL", fixtureKey]).catch(() => null);
+      const exists = await redis.command(["EXISTS", fixtureKey]).catch(() => 1);
+      if (Number(exists) !== 0) throw new Error("ATTESTATION_CALIBRATION_DELETE_UNKNOWN");
+    }
   }
 }
 
@@ -299,11 +312,12 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   }
 
   const developerBase = String(env.UPSTASH_DEVELOPER_API_BASE || "https://api.upstash.com/v2").replace(/\/$/, "");
+  const auditBase = String(env.UPSTASH_AUDIT_API_BASE || "https://api.upstash.com").replace(/\/$/, "");
   const headers = developerHeaders(env);
   const [database, stats, auditLogs] = await Promise.all([
     fetchJson(`${developerBase}/redis/database/${encodeURIComponent(databaseId)}?credentials=hide`, { headers }, fetchImpl),
     fetchJson(`${developerBase}/redis/stats/${encodeURIComponent(databaseId)}`, { headers }, fetchImpl),
-    fetchJson(`${developerBase}/auditlogs`, { headers }, fetchImpl),
+    fetchJson(`${auditBase}/auditlogs`, { headers }, fetchImpl),
   ]);
   const control = controlConfig(database, stats, databaseId);
   const allAudits = canonicalRelevantAuditSet(auditLogs, databaseId);

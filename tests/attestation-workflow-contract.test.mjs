@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workflowPath = new URL("../.github/workflows/xiaoshimei-ledger-attestation.yml", import.meta.url);
+const attestorPath = new URL("../scripts/attest-upstash-image-ledger.mjs", import.meta.url);
 
 test("D36 attestation workflow is a bounded default-branch schedule plus explicit manual dispatch", async () => {
   const source = await readFile(workflowPath, "utf8");
@@ -38,4 +39,17 @@ test("D36 attestation workflow references the exact secret set without secret li
   ]);
   assert.doesNotMatch(source, /upload-artifact|echo\s+\$|printenv|set\s+-x/i);
   assert.equal((source.match(/node scripts\/attest-upstash-image-ledger\.mjs/g) || []).length, 1);
+});
+
+test("D36 attestor keeps account audit logs on the official root endpoint", async () => {
+  const source = await readFile(attestorPath, "utf8");
+  assert.match(source, /UPSTASH_AUDIT_API_BASE \|\| "https:\/\/api\.upstash\.com"/);
+  assert.match(source, /fetchJson\(`\$\{auditBase\}\/auditlogs`/);
+  assert.doesNotMatch(source, /fetchJson\(`\$\{developerBase\}\/auditlogs`/);
+  assert.match(source, /database\.db_disk_threshold/);
+  assert.match(source, /stats\.current_storage/);
+  assert.match(source, /database\.modifying_state/);
+  assert.match(source, /CALIBRATION_CHUNK_BYTES = 4_000_000/);
+  assert.match(source, /physicalBytes \+= chunkPhysicalBytes/);
+  assert.match(source, /for \(const fixtureKey of fixtureKeys\)/);
 });
