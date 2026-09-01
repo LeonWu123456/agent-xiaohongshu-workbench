@@ -8,6 +8,22 @@ const htmlEditorUrl = new URL("../src/HtmlPageEditor.jsx", import.meta.url);
 const cssUrl = new URL("../src/styles.css", import.meta.url);
 const pageContractCssUrl = new URL("../src/xhs-page-contract.css", import.meta.url);
 const arkProviderServerUrl = new URL("../scripts/ark-provider-server.mjs", import.meta.url);
+const vercelConfigUrl = new URL("../vercel.json", import.meta.url);
+
+test("Vercel sends authenticated multi-segment image assets to the Provider before the generic one-segment route", async () => {
+  const config = JSON.parse(await readFile(vercelConfigUrl, "utf8"));
+  assert.ok(Array.isArray(config.rewrites));
+  assert.deepEqual(config.rewrites[0], {
+    source: "/api/provider/assets/:runId/:sha256",
+    destination: "/api/provider?route=assets/:runId/:sha256",
+  });
+  assert.deepEqual(config.rewrites[1], {
+    source: "/api/provider/:route",
+    destination: "/api/provider?route=:route",
+  });
+  assert.equal(config.rewrites.filter((rule) => rule.source === "/api/provider/assets/:runId/:sha256").length, 1);
+  assert.equal(config.rewrites.some((rule) => String(rule.source).includes(":route*")), false);
+});
 
 test("workbench keeps one journey navigator and removes duplicate summary chrome", async () => {
   const source = await readFile(mainUrl, "utf8");
@@ -20,8 +36,8 @@ test("workbench keeps one journey navigator and removes duplicate summary chrome
 
 test("blocked publication controls use native disable in addition to the inner lineage guard", async () => {
   const source = await readFile(mainUrl, "utf8");
-  assert.match(source, /className="copy-publish"[\s\S]*disabled=\{!publicationAuthority\.allowed\}[\s\S]*onClick=\{copyPublicationCopy\}/);
-  assert.match(source, /className="download-final"[\s\S]*disabled=\{exportState === "GENERATING" \|\| !publicationAuthority\.allowed\}/);
+  assert.match(source, /className="copy-publish"[^>]*disabled=\{workspaceWriteBlocked \|\| !publicationAuthority\.allowed\}[^>]*onClick=\{copyPublicationCopy\}/);
+  assert.match(source, /className="download-final"[^>]*disabled=\{draftEditingLocked \|\| exportState === "GENERATING" \|\| !publicationAuthority\.allowed\}/);
   assert.match(source, /runGuardedPublicationAction/);
   assert.match(source, /publicationSnapshotDecision/);
 });
@@ -181,8 +197,14 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /个插画单元/);
   assert.match(source, /3:4 母版图（首张含 9:8 高清 KV，后续按需续页）/);
   assert.match(source, /每完成一步都会先保存/);
-  assert.match(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
-  assert.match(source, /继续图片步骤/);
+  assert.match(source, /pending_image_operation/);
+  assert.match(source, /rebuildPendingImageStartV3/);
+  assert.match(source, /function imageDiscoveryRequest\(pending\)/);
+  assert.match(source, /function nextImageStepRequest\(response, attemptNonce\)/);
+  assert.match(source, /mode: "START"|rebuildPendingImageStartV3/);
+  assert.match(source, /mode: "DISCOVER"/);
+  assert.match(source, /mode: "STEP"/);
+  assert.doesNotMatch(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
 });
 

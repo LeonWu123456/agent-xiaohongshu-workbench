@@ -10,6 +10,10 @@
   },
   "rewrites": [
     {
+      "source": "/api/provider/assets/:runId/:sha256",
+      "destination": "/api/provider?route=assets/:runId/:sha256"
+    },
+    {
       "source": "/api/provider/:route",
       "destination": "/api/provider?route=:route"
     }

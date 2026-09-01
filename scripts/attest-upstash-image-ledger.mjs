@@ -1,0 +1,383 @@
+#!/usr/bin/env node
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  randomBytes,
+  sign,
+  verify,
+} from "node:crypto";
+import { pathToFileURL } from "node:url";
+
+export const ATTESTATION_SCHEMA = "xiaoshimei.image-ledger-attestation.v1";
+export const ATTESTATION_ENVELOPE_SCHEMA = "xiaoshimei.image-ledger-attestation-envelope.v1";
+export const CAPACITY_SCHEMA = "xiaoshimei.image-ledger-capacity.v1";
+export const AUDIT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
+export const RENEW_MAX_MS = 6 * 24 * 60 * 60 * 1000;
+export const HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+const INSTALL_ATTESTATION_LUA = `
+local prior_generation = redis.call('HGET', KEYS[1], 'capacity_generation') or ''
+if prior_generation ~= '' and prior_generation ~= ARGV[2] then
+  local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_bytes') or '0')
+  local live = tonumber(redis.call('HGET', KEYS[1], 'live_reservations') or '0')
+  local inventory = tonumber(redis.call('HGET', KEYS[1], 'unfinalized_inventory') or '0')
+  if reserved ~= 0 or live ~= 0 or inventory ~= 0 then return {'CAPACITY_ROTATION_BLOCKED'} end
+end
+local reserved = prior_generation == ARGV[2] and (redis.call('HGET', KEYS[1], 'reserved_bytes') or '0') or '0'
+local live = prior_generation == ARGV[2] and (redis.call('HGET', KEYS[1], 'live_reservations') or '0') or '0'
+local inventory = prior_generation == ARGV[2] and (redis.call('HGET', KEYS[1], 'unfinalized_inventory') or '0') or '0'
+redis.call('HSET', KEYS[1],
+  'schema', ARGV[1],
+  'capacity_generation', ARGV[2],
+  'attestation_generation', ARGV[3],
+  'capacity_limit_bytes', ARGV[4],
+  'headroom_bytes', ARGV[5],
+  'worst_case_run_bytes', ARGV[6],
+  'reserved_bytes', reserved,
+  'live_reservations', live,
+  'unfinalized_inventory', inventory)
+redis.call('SET', KEYS[2], ARGV[7])
+return {'INSTALLED', reserved, live, inventory}
+`;
+
+export function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function required(env, name) {
+  const value = String(env?.[name] || "").trim();
+  if (!value) throw new Error(`ATTESTATION_ENV_REQUIRED:${name}`);
+  return value;
+}
+
+function integerEnv(env, name) {
+  const value = Number(required(env, name));
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`ATTESTATION_ENV_INVALID:${name}`);
+  return value;
+}
+
+function booleanFalse(value, code) {
+  if (value === false || value === 0 || value === "0" || value === "false" || value === "off" || value === "noeviction") return false;
+  throw new Error(code);
+}
+
+function booleanTrue(value, code) {
+  if (value === true || value === 1 || value === "1" || value === "true" || value === "on") return true;
+  throw new Error(code);
+}
+
+function numberFrom(value, code) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error(code);
+  return number;
+}
+
+function appRoot(appScope) {
+  if (!/^xiaoshimei-studio:[0-9a-f]{32}$/.test(appScope) && appScope !== "xiaoshimei-test-scope") throw new Error("ATTESTATION_APP_SCOPE_INVALID");
+  return `xiaoshimei:image-d36:{${sha256(Buffer.from(appScope)).slice(0, 32)}}`;
+}
+
+function publicKeyDerBase64(privateKey) {
+  return createPublicKey(privateKey).export({ format: "der", type: "spki" }).toString("base64");
+}
+
+async function fetchJson(url, options, fetchImpl) {
+  let response;
+  try { response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(15_000) }); }
+  catch { throw new Error(`ATTESTATION_FETCH_FAILED:${new URL(url).pathname}`); }
+  const body = await response.json().catch(() => null);
+  if (!response.ok || body == null) throw new Error(`ATTESTATION_HTTP_${response.status}:${new URL(url).pathname}`);
+  return body;
+}
+
+function developerHeaders(env) {
+  const email = required(env, "UPSTASH_DEVELOPER_EMAIL");
+  const apiKey = required(env, "UPSTASH_DEVELOPER_API_KEY");
+  return { authorization: `Basic ${Buffer.from(`${email}:${apiKey}`, "utf8").toString("base64")}`, accept: "application/json" };
+}
+
+function listBody(value) {
+  if (Array.isArray(value)) return value;
+  for (const field of ["data", "result", "results", "items", "logs"]) if (Array.isArray(value?.[field])) return value[field];
+  throw new Error("ATTESTATION_AUDIT_LOGS_INVALID");
+}
+
+function auditTimestampMs(value) {
+  const raw = value?.timestamp ?? value?.created_at ?? value?.createdAt ?? value?.time;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric < 1e12 ? Math.floor(numeric * 1000) : Math.floor(numeric);
+  const parsed = Date.parse(String(raw || ""));
+  if (!Number.isFinite(parsed)) throw new Error("ATTESTATION_AUDIT_TIMESTAMP_INVALID");
+  return parsed;
+}
+
+function auditId(value) {
+  const id = String(value?.id ?? value?.log_id ?? value?.uuid ?? "").trim();
+  if (!id) throw new Error("ATTESTATION_AUDIT_ID_INVALID");
+  return id;
+}
+
+export function canonicalRelevantAuditSet(logs, databaseId) {
+  const relevant = listBody(logs)
+    .filter((entry) => canonicalJson(entry).includes(databaseId))
+    .map((entry) => ({
+      log_id: auditId(entry),
+      timestamp_ms: auditTimestampMs(entry),
+      action: String(entry.action ?? entry.event ?? entry.operation ?? "UNKNOWN"),
+      resource: String(entry.resource ?? entry.resource_id ?? entry.target ?? databaseId),
+    }))
+    .sort((a, b) => a.timestamp_ms - b.timestamp_ms || a.log_id.localeCompare(b.log_id));
+  if (!relevant.length) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
+  return relevant;
+}
+
+function verifyPriorEnvelope(value, publicKey) {
+  if (!value) return null;
+  if (value.schema !== ATTESTATION_ENVELOPE_SCHEMA || !value.payload || typeof value.signature !== "string") throw new Error("ATTESTATION_PRIOR_INVALID");
+  const signature = Buffer.from(value.signature, "base64");
+  if (signature.length !== 64 || !verify(null, Buffer.from(canonicalJson(value.payload)), publicKey, signature)) throw new Error("ATTESTATION_PRIOR_SIGNATURE_INVALID");
+  return value.payload;
+}
+
+async function redisCommand(endpoint, token, args, fetchImpl) {
+  return (await fetchJson(endpoint, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(args.map((value) => Buffer.isBuffer(value) ? value.toString("base64") : String(value))),
+  }, fetchImpl)).result;
+}
+
+async function redisTimeMs(redis) {
+  const value = await redis.command(["TIME"]);
+  if (!Array.isArray(value) || value.length !== 2) throw new Error("ATTESTATION_REDIS_TIME_INVALID");
+  const result = Number(value[0]) * 1000 + Math.floor(Number(value[1]) / 1000);
+  if (!Number.isSafeInteger(result) || result <= 0) throw new Error("ATTESTATION_REDIS_TIME_INVALID");
+  return result;
+}
+
+function hashObject(value) {
+  if (!Array.isArray(value) || value.length % 2 !== 0) throw new Error("ATTESTATION_REDIS_HASH_INVALID");
+  const result = {};
+  for (let index = 0; index < value.length; index += 2) result[String(value[index])] = value[index + 1];
+  return result;
+}
+
+function controlConfig(database, stats, databaseId) {
+  const state = String(database.state ?? database.status ?? "").toLowerCase();
+  if (state !== "active") throw new Error("ATTESTATION_DATABASE_NOT_ACTIVE");
+  const modifying = booleanFalse(database.modifying ?? database.is_modifying ?? false, "ATTESTATION_DATABASE_MODIFYING");
+  const tls = booleanTrue(database.tls ?? database.tls_enabled ?? database.ssl, "ATTESTATION_TLS_UNKNOWN");
+  const eviction = booleanFalse(database.eviction ?? database.eviction_enabled ?? database.maxmemory_policy, "ATTESTATION_EVICTION_UNKNOWN");
+  const dbEviction = booleanFalse(database.db_eviction ?? database.database_eviction ?? database.eviction, "ATTESTATION_DB_EVICTION_UNKNOWN");
+  const autoUpgrade = booleanFalse(database.auto_upgrade ?? database.autoUpgrade ?? false, "ATTESTATION_AUTO_UPGRADE_UNKNOWN");
+  const storageThresholdBytes = numberFrom(
+    stats.storage_threshold_bytes ?? stats.max_storage_bytes ?? stats.max_data_size ?? database.storage_threshold_bytes ?? database.max_data_size,
+    "ATTESTATION_STORAGE_THRESHOLD_UNKNOWN",
+  );
+  const currentStorageBytes = numberFrom(
+    stats.current_storage_bytes ?? stats.total_data_size ?? stats.storage_bytes ?? database.current_storage_bytes ?? 0,
+    "ATTESTATION_CURRENT_STORAGE_UNKNOWN",
+  );
+  if (storageThresholdBytes <= 0 || currentStorageBytes > storageThresholdBytes) throw new Error("ATTESTATION_STORAGE_INVALID");
+  return {
+    database_id_sha256: sha256(Buffer.from(databaseId)),
+    database_state: state,
+    database_modifying: false,
+    tls,
+    eviction,
+    db_eviction: dbEviction,
+    auto_upgrade: autoUpgrade,
+    storage_threshold_bytes: storageThresholdBytes,
+    current_storage_bytes: currentStorageBytes,
+  };
+}
+
+async function calibrateWorstCase(redis, root, worstCaseRunBytes) {
+  const fixtureKey = `${root}:calibration:${sha256(randomBytes(32)).slice(0, 32)}`;
+  const bytes = randomBytes(worstCaseRunBytes);
+  const encoded = bytes.toString("base64");
+  try {
+    if (await redis.command(["SET", fixtureKey, encoded, "PX", "600000"]) !== "OK") throw new Error("ATTESTATION_CALIBRATION_WRITE_FAILED");
+    const readback = await redis.command(["GET", fixtureKey]);
+    if (typeof readback !== "string" || !Buffer.from(readback, "base64").equals(bytes)) throw new Error("ATTESTATION_CALIBRATION_READBACK_FAILED");
+    const physicalBytes = numberFrom(await redis.command(["MEMORY", "USAGE", fixtureKey]), "ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
+    if (physicalBytes <= 0) throw new Error("ATTESTATION_CALIBRATION_USAGE_UNKNOWN");
+    return { calibration_sha256: sha256(bytes), calibration_bytes: physicalBytes };
+  } finally {
+    await redis.command(["DEL", fixtureKey]).catch(() => null);
+    const exists = await redis.command(["EXISTS", fixtureKey]).catch(() => 1);
+    if (Number(exists) !== 0) throw new Error("ATTESTATION_CALIBRATION_DELETE_UNKNOWN");
+  }
+}
+
+export async function buildAndInstallAttestation({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  const databaseId = required(env, "UPSTASH_DATABASE_ID");
+  const redisUrl = required(env, "UPSTASH_REDIS_REST_URL").replace(/\/$/, "");
+  const redisToken = required(env, "UPSTASH_REDIS_REST_TOKEN");
+  const appScope = required(env, "XIAOSHIMEI_APP_SCOPE");
+  const projectId = required(env, "XIAOSHIMEI_VERCEL_PROJECT_ID");
+  const environment = required(env, "VERCEL_ENV");
+  const candidateCommit = required(env, "XIAOSHIMEI_CANDIDATE_COMMIT").toLowerCase();
+  const worstCaseRunBytes = integerEnv(env, "XIAOSHIMEI_WORST_CASE_RUN_BYTES");
+  if (!/^[0-9a-f]{40}$/.test(candidateCommit)) throw new Error("ATTESTATION_CANDIDATE_INVALID");
+  const privateKey = createPrivateKey(required(env, "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY"));
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("ATTESTATION_PRIVATE_KEY_INVALID");
+  const publicKey = createPublicKey(privateKey);
+  const developerBase = String(env.UPSTASH_DEVELOPER_API_BASE || "https://api.upstash.com/v2").replace(/\/$/, "");
+  const headers = developerHeaders(env);
+  const [database, stats, auditLogs] = await Promise.all([
+    fetchJson(`${developerBase}/redis/database/${encodeURIComponent(databaseId)}?credentials=hide`, { headers }, fetchImpl),
+    fetchJson(`${developerBase}/redis/stats/${encodeURIComponent(databaseId)}`, { headers }, fetchImpl),
+    fetchJson(`${developerBase}/auditlogs`, { headers }, fetchImpl),
+  ]);
+  const control = controlConfig(database, stats, databaseId);
+  const allAudits = canonicalRelevantAuditSet(auditLogs, databaseId);
+  const redis = { command: (args) => redisCommand(redisUrl, redisToken, args, fetchImpl) };
+  const signedAtMs = await redisTimeMs(redis);
+  const audits = allAudits.filter((entry) => entry.timestamp_ms >= signedAtMs - HARD_EXPIRY_MAX_MS && entry.timestamp_ms <= signedAtMs);
+  if (!audits.length) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
+  const root = appRoot(appScope);
+  const readinessKey = `${root}:readiness`;
+  const capacityKey = `${root}:capacity`;
+  const priorRaw = await redis.command(["GET", readinessKey]);
+  let priorEnvelope = null;
+  if (typeof priorRaw === "string") {
+    try { priorEnvelope = JSON.parse(priorRaw); } catch { throw new Error("ATTESTATION_PRIOR_INVALID"); }
+  }
+  const prior = verifyPriorEnvelope(priorEnvelope, publicKey);
+  if (prior) {
+    const priorFound = allAudits.some((entry) => entry.log_id === prior.audit_high_water.log_id && entry.timestamp_ms === prior.audit_high_water.timestamp_ms);
+    if (!priorFound || signedAtMs - prior.audit_fetch_at_ms > HARD_EXPIRY_MAX_MS) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
+  }
+  const auditHighWater = audits.at(-1);
+  if (auditHighWater.timestamp_ms > signedAtMs) throw new Error("ATTESTATION_AUDIT_CONTINUITY_UNKNOWN");
+  if (worstCaseRunBytes > control.storage_threshold_bytes) throw new Error("ATTESTATION_CAPACITY_INSUFFICIENT");
+  const calibration = await calibrateWorstCase(redis, root, worstCaseRunBytes);
+  const headroomBytes = Math.max(Math.ceil(control.storage_threshold_bytes * 0.2), calibration.calibration_bytes * 2);
+  if (control.current_storage_bytes + calibration.calibration_bytes + headroomBytes > control.storage_threshold_bytes) {
+    throw new Error("ATTESTATION_CAPACITY_INSUFFICIENT");
+  }
+  const capacityIdentity = {
+    database_id_sha256: control.database_id_sha256,
+    rest_origin: new URL(redisUrl).origin,
+    app_scope: appScope,
+    key_schema: "xiaoshimei.image-d36.app-scope-hash-tag.v1",
+    calibration_schema: "xiaoshimei.image-ledger-random-bytes-base64.v1",
+    logical_worst_case_run_bytes: worstCaseRunBytes,
+    calibration_bytes: calibration.calibration_bytes,
+    worst_case_run_bytes: calibration.calibration_bytes,
+    headroom_bytes: headroomBytes,
+    capacity_limit_bytes: control.storage_threshold_bytes,
+  };
+  const capacityGeneration = sha256(Buffer.from(canonicalJson(capacityIdentity)));
+  const priorCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
+  if (prior?.capacity_generation && prior.capacity_generation !== capacityGeneration) {
+    if (Number(priorCapacity.live_reservations || 0) !== 0 || Number(priorCapacity.unfinalized_inventory || 0) !== 0 || Number(priorCapacity.reserved_bytes || 0) !== 0) {
+      throw new Error("ATTESTATION_CAPACITY_ROTATION_BLOCKED");
+    }
+  }
+  const controlConfigHash = sha256(Buffer.from(canonicalJson(control)));
+  const relevantAuditSetHash = sha256(Buffer.from(canonicalJson(audits)));
+  const attestationGeneration = sha256(Buffer.from(canonicalJson({
+    prior: prior?.attestation_generation || null,
+    control_config_hash: controlConfigHash,
+    relevant_audit_set_hash: relevantAuditSetHash,
+    signed_at_ms: signedAtMs,
+  })));
+  const payload = {
+    schema: ATTESTATION_SCHEMA,
+    database_id_sha256: control.database_id_sha256,
+    rest_origin: new URL(redisUrl).origin,
+    app_scope: appScope,
+    vercel_project_id: projectId,
+    vercel_environment: environment,
+    candidate_commit: candidateCommit,
+    database_state: control.database_state,
+    database_modifying: control.database_modifying,
+    tls: control.tls,
+    eviction: control.eviction,
+    db_eviction: control.db_eviction,
+    auto_upgrade: control.auto_upgrade,
+    storage_threshold_bytes: control.storage_threshold_bytes,
+    current_storage_bytes: control.current_storage_bytes,
+    control_config_hash: controlConfigHash,
+    relevant_audit_set_hash: relevantAuditSetHash,
+    audit_high_water: { timestamp_ms: auditHighWater.timestamp_ms, log_id: auditHighWater.log_id },
+    audit_fetch_at_ms: signedAtMs,
+    audit_retention_seconds: AUDIT_RETENTION_SECONDS,
+    calibration_sha256: calibration.calibration_sha256,
+    calibration_bytes: calibration.calibration_bytes,
+    worst_case_run_bytes: calibration.calibration_bytes,
+    headroom_bytes: headroomBytes,
+    capacity_limit_bytes: control.storage_threshold_bytes,
+    attestation_generation: attestationGeneration,
+    capacity_generation: capacityGeneration,
+    signed_at_ms: signedAtMs,
+    renew_at_ms: signedAtMs + RENEW_MAX_MS,
+    hard_expiry_ms: signedAtMs + HARD_EXPIRY_MAX_MS,
+  };
+  const envelope = {
+    schema: ATTESTATION_ENVELOPE_SCHEMA,
+    payload,
+    signature: sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64"),
+  };
+  const serialized = canonicalJson(envelope);
+  const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, "2", capacityKey, readinessKey,
+    CAPACITY_SCHEMA,
+    capacityGeneration,
+    attestationGeneration,
+    payload.capacity_limit_bytes,
+    payload.headroom_bytes,
+    payload.worst_case_run_bytes,
+    serialized,
+  ]);
+  if (!Array.isArray(installed) || installed[0] !== "INSTALLED") {
+    if (Array.isArray(installed) && installed[0] === "CAPACITY_ROTATION_BLOCKED") throw new Error("ATTESTATION_CAPACITY_ROTATION_BLOCKED");
+    throw new Error("ATTESTATION_SENTINEL_WRITE_FAILED");
+  }
+  if (await redis.command(["GET", readinessKey]) !== serialized) throw new Error("ATTESTATION_SENTINEL_READBACK_FAILED");
+  const installedCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
+  if (installedCapacity.attestation_generation !== attestationGeneration || installedCapacity.capacity_generation !== capacityGeneration) {
+    throw new Error("ATTESTATION_CAPACITY_READBACK_FAILED");
+  }
+  return {
+    envelope,
+    public_key_spki_base64: publicKeyDerBase64(privateKey),
+    readiness_key: readinessKey,
+    capacity_key: capacityKey,
+    control_config_hash: controlConfigHash,
+    relevant_audit_set_hash: relevantAuditSetHash,
+    audit_entry_count: audits.length,
+  };
+}
+
+async function main() {
+  const result = await buildAndInstallAttestation();
+  process.stdout.write(`${JSON.stringify({
+    status: "ATTESTATION_INSTALLED",
+    public_key_spki_base64: result.public_key_spki_base64,
+    readiness_key: result.readiness_key,
+    capacity_key: result.capacity_key,
+    control_config_hash: result.control_config_hash,
+    relevant_audit_set_hash: result.relevant_audit_set_hash,
+    audit_entry_count: result.audit_entry_count,
+    attestation_generation: result.envelope.payload.attestation_generation,
+    capacity_generation: result.envelope.payload.capacity_generation,
+    renew_at_ms: result.envelope.payload.renew_at_ms,
+    hard_expiry_ms: result.envelope.payload.hard_expiry_ms,
+  }, null, 2)}\n`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    process.stderr.write(`${String(error?.message || error)}\n`);
+    process.exitCode = 1;
+  });
+}

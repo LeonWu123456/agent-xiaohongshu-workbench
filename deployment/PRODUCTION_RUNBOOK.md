@@ -19,7 +19,7 @@
 - 当前集成分支：`xiaoshimei-v2`。
 - 唯一正式 Vercel 项目：`xiaoshimei-full-workbench`。
 - 稳定域名：`https://xiaoshimei-full-workbench.vercel.app/`。
-- 构建合同：Node 22，`npm ci --omit=dev --workspaces=false`，`npm test`，`npm run build`，输出 `dist/`。
+- 构建合同：Vercel 项目当前锁定 Node 24.x；`npm ci --omit=dev --workspaces=false`，`npm test`，`npm run build`，输出 `dist/`。每次发布前必须从 Vercel Project readback 复核 Node 版本，手册不得凭旧值覆盖生产事实。
 
 ## 数据与秘密
 
@@ -27,6 +27,55 @@
 - `.data`、生成图片、Provider 回执、账号素材、下载包和 `.env*` 不进入 Git。
 - 本地运行数据落在 `~/.mesy/runtime/packages/xiaoshimei-studio-v2/`。
 - Vercel BYOK API Key 只由使用者当前标签页提交到 `/api/provider`，服务端不持久化；本地 Key 只从 Keychain/环境读取。
+
+## D36 跨实例图片账本（当前仅本地候选，未启用）
+
+这条 Lane 解决的是：Vercel 实例死亡或响应丢失后，已经发生的图片付费副作用不能被另一个实例重复执行。它不替代浏览器 IndexedDB 的长期稿件/媒体权威；Redis 只保留完整 run、step 和 raw asset 七天。
+
+### 一次 Human Gate 的精确边界
+
+执行下列任一外部动作前必须由 Leon 一次明确批准：
+
+1. 在 **native Upstash account** 中创建或选用一个只供小师妹使用的 Free Redis database；不得用 Vercel 托管的第三方账号冒充 Developer API 可见资源。
+2. 按 Vercel Integration Option 2 把该 existing native resource 链接到唯一项目 `xiaoshimei-full-workbench`。
+3. 让 Runtime 外短进程持有 Upstash Developer API Basic credential 与 Ed25519 私钥，执行一次不可压缩 worst-case 校准、写 signed sentinel，并在受控变更前或最迟第 6 天刷新。
+4. 向目标 Vercel environment 写入 Redis REST token、签名公钥和下表绑定值。
+
+该 Gate **不**授权：信用卡/付费升级、auto-upgrade、eviction、共享数据库、Runtime 持有 Developer credential/私钥、自动部署或图片 Provider 调用。官方控制面依据：[Upstash Developer API](https://upstash.com/docs/devops/developer-api/overall/getstarted)、[Audit Logs](https://upstash.com/docs/devops/developer-api/account/list_audit_logs)、[Vercel existing account/resource link](https://upstash.com/docs/redis/howto/connectwithvercel)。
+
+### 秘密与绑定分层
+
+| 所在面 | 变量 | 作用 |
+|---|---|---|
+| Runtime 外 attestor | `UPSTASH_DEVELOPER_EMAIL`、`UPSTASH_DEVELOPER_API_KEY` | 只读 database/config/stats/account audit logs |
+| Runtime 外 attestor | `XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY` | Ed25519 签名；绝不进入 Vercel Runtime |
+| attestor + Runtime | `UPSTASH_REDIS_REST_URL`、`UPSTASH_REDIS_REST_TOKEN` | 同一 native database 的 data plane；Vercel 中设为 Sensitive |
+| attestor + Runtime | `XIAOSHIMEI_VERCEL_PROJECT_ID`、`VERCEL_ENV`、`XIAOSHIMEI_CANDIDATE_COMMIT` | receipt 与当前部署精确绑定 |
+| attestor | `UPSTASH_DATABASE_ID`、`XIAOSHIMEI_WORST_CASE_RUN_BYTES` | 控制面定位与不可压缩校准输入 |
+| Runtime | `XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256`、`XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY` | 只保存数据库 ID 哈希与验签公钥 |
+
+`XIAOSHIMEI_APP_SCOPE` 由当前 access/origin 配置确定；attestor 与 Runtime 必须逐字一致。日志、CI artifact 和聊天里不得输出 REST token、Basic credential 或私钥。
+
+### 签发、续签与运行门
+
+1. 冻结 candidate commit、Vercel project/environment、native database 和 app scope。
+2. 在 Runtime 外运行 `node scripts/attest-upstash-image-ledger.mjs`。脚本只在 active、not modifying、TLS on、eviction/db_eviction/auto-upgrade off、七天审计连续、校准写入/readback/物理用量/DEL/absence 全部可证时签发。
+3. 回读输出中的 `control_config_hash`、`relevant_audit_set_hash`、audit high-water、`attestation_generation`、`capacity_generation`、第 6 天 renew 和第 7 天 hard expiry；输出不含秘密。
+4. 相同 capacity identity 的续签只改变 `attestation_generation`，保留所有 live reservation；改变 database/origin/app scope/key schema/calibration/capacity 时，旧 `live_reservations`、`reserved_bytes`、`unfinalized_inventory` 任一非零都拒绝切换。
+5. 新 START 在 Provider 前验签 sentinel，并执行 Redis TIME、PING、DBSIZE A/full SCAN/DBSIZE B、exact inventory union、物理/逻辑容量检查；同一 claim Lua 再验 generation 并原子占 worst-case reservation。STEP 只重验当前 receipt、稳定 `capacity_generation` 和已有 reservation，不重复全库扫描。
+6. 七天内不得因 COMPLETE、本机已保存或 helper 调用提前删除 server raw asset。Redis TIME 到恢复截止后，下一次 paid admission 才有界执行 inventory freeze → exact DEL → 每键 EXISTS=0 + run-root SCAN empty → 原子 capacity release；TTL 设得晚于七天，仅作无后续请求时的物理兜底，TTL 本身不释放 reservation。
+
+### 触发与失败语义
+
+- 立即重签：deploy/rollback、Vercel env、Redis resource/config/token/public key、签名 key、协议/key schema、校准或 capacity 变化之前，以及 audit log 出现相关新 entry 时。
+- 周期刷新：无变化时最迟第 6 天由 Runtime 外 Intel/CI 短进程运行，留一天重试缓冲；这不是 Runtime 内常驻自签。
+- 第 7 天 receipt 过期：只关闭 paid START/STEP，Provider 调用必须为 0；登录、`GET /config`、DISCOVER 与已认证 raw asset recovery 不连坐。
+- Provider 已产生图片副作用但首次 durable commit 前死亡：标记 `UNKNOWN`，不得自动重试；没有官方 attempt-id 查询证据时，结果恢复保持未证明。
+- Developer API、audit continuity、签名、SCAN/DBSIZE、foreign key、generation、capacity 或校准任一 UNKNOWN：fail closed，不签发、不减计、不调用 Provider。
+
+### 部署前与回滚
+
+只有本地 fake Developer API/Redis 正负矩阵、完整测试、production build、同一制品 Preview 实际路径与消费者回读全绿后，才可请求上述 Human Gate。外部启用失败时撤销新增 Vercel D36 env 并关闭 paid 图片 Lane；不得删除浏览器 IndexedDB 稿件/媒体，不得用不兼容的旧 receipt 恢复 STEP。只有旧、新 deployment 绑定同一 `capacity_generation` 与兼容协议时，才可沿用未完成 reservation；否则保持 fail closed，等待七天 finalizer 清零后再切换。
 
 ## 每次发布必须记录
 

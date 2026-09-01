@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import sharp from "sharp";
 import {
   ARK_BASE_URL,
@@ -73,11 +73,17 @@ export const ACCESS_COOKIE_HEADER_MAX_BYTES = 8_192;
 export const ACCESS_SESSION_MAX_PAIRS = 16;
 export const ACCESS_SESSION_PAID_MIN_REMAINING_MS = 270_000;
 export const IMAGE_LEDGER_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const IMAGE_LEDGER_PHYSICAL_TTL_MS = 8 * 24 * 60 * 60 * 1000;
 export const IMAGE_LEDGER_IN_FLIGHT_LEASE_MS = 360_000;
 export const IMAGE_PLANNER_LEASE_MS = 240_000;
 export const IMAGE_LEDGER_COMMIT_MARGIN_MS = 30_000;
 export const IMAGE_TRANSACTION_RESPONSE_MAX_BYTES = 1_250_000;
 export const IMAGE_ASSET_SHA256_HEADER = "x-content-sha256";
+export const IMAGE_LEDGER_ATTESTATION_SCHEMA = "xiaoshimei.image-ledger-attestation.v1";
+export const IMAGE_LEDGER_ATTESTATION_ENVELOPE_SCHEMA = "xiaoshimei.image-ledger-attestation-envelope.v1";
+export const IMAGE_LEDGER_AUDIT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
+export const IMAGE_LEDGER_RENEW_MAX_MS = 6 * 24 * 60 * 60 * 1000;
+export const IMAGE_LEDGER_HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 const SERVER_MANAGED_PROVIDER_ROUTES = new Set(["text-draft", "generate-images", "page-candidates"]);
 const IMAGE_LEDGER_MAX_CACHE_BYTES = PUBLIC_GENERATION_RESPONSE_MAX_BYTES + 64_000;
 const ACCESS_SESSION_COOKIE_PATTERN = /^__Host-xiaoshimei_session_([0-9a-f]{32})$/;
@@ -160,6 +166,31 @@ function imageLedgerEnv(env = process.env) {
   let validUrl = false;
   try { validUrl = new URL(url).protocol === "https:"; } catch { validUrl = false; }
   return { url, token, ready: validUrl && token.length >= 16 };
+}
+
+function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", restUrl = "") {
+  let restOrigin = "";
+  try { restOrigin = new URL(restUrl).origin; } catch { restOrigin = ""; }
+  const publicKey = String(env?.XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY || "").trim();
+  const databaseIdSha256 = String(env?.XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256 || "").trim().toLowerCase();
+  const vercelProjectId = String(env?.XIAOSHIMEI_VERCEL_PROJECT_ID || env?.VERCEL_PROJECT_ID || "").trim();
+  const vercelEnvironment = String(env?.VERCEL_ENV || "").trim();
+  const candidateCommit = String(env?.XIAOSHIMEI_CANDIDATE_COMMIT || env?.VERCEL_GIT_COMMIT_SHA || "").trim().toLowerCase();
+  return {
+    ready: Boolean(publicKey)
+      && /^[0-9a-f]{64}$/.test(databaseIdSha256)
+      && Boolean(restOrigin && appScopeId && vercelProjectId && vercelEnvironment)
+      && /^[0-9a-f]{40}$/.test(candidateCommit),
+    publicKey,
+    expected: {
+      database_id_sha256: databaseIdSha256,
+      rest_origin: restOrigin,
+      app_scope: appScopeId,
+      vercel_project_id: vercelProjectId,
+      vercel_environment: vercelEnvironment,
+      candidate_commit: candidateCommit,
+    },
+  };
 }
 
 function requestHeader(request, name) {
@@ -668,23 +699,133 @@ function sha256Json(value) {
   return sha256Bytes(Buffer.from(canonicalJson(value), "utf8"));
 }
 
+function exactObjectKeys(value, expected, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(code);
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) throw new Error(code);
+  return value;
+}
+
+function exactFiniteInteger(value, minimum, code) {
+  if (!Number.isSafeInteger(value) || value < minimum) throw new Error(code);
+  return value;
+}
+
+function importEd25519PublicKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw new Error("IMAGE_LEDGER_ATTESTATION_PUBLIC_KEY_REQUIRED");
+  try {
+    if (raw.startsWith("-----BEGIN PUBLIC KEY-----")) return createPublicKey(raw);
+    const der = Buffer.from(raw, "base64");
+    if (!der.length || der.toString("base64").replace(/=+$/, "") !== raw.replace(/=+$/, "")) throw new Error("bad-base64");
+    return createPublicKey({ key: der, format: "der", type: "spki" });
+  } catch {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_PUBLIC_KEY_INVALID");
+  }
+}
+
+export function verifyImageLedgerAttestationEnvelope(envelope, { publicKey, expected = {}, nowMs = Date.now() } = {}) {
+  exactObjectKeys(envelope, ["schema", "payload", "signature"], "IMAGE_LEDGER_ATTESTATION_ENVELOPE_INVALID");
+  if (envelope.schema !== IMAGE_LEDGER_ATTESTATION_ENVELOPE_SCHEMA) throw new Error("IMAGE_LEDGER_ATTESTATION_ENVELOPE_INVALID");
+  const payloadKeys = [
+    "schema", "database_id_sha256", "rest_origin", "app_scope", "vercel_project_id", "vercel_environment",
+    "candidate_commit", "database_state", "database_modifying", "tls", "eviction", "db_eviction", "auto_upgrade",
+    "storage_threshold_bytes", "current_storage_bytes", "control_config_hash", "relevant_audit_set_hash",
+    "audit_high_water", "audit_fetch_at_ms", "audit_retention_seconds", "calibration_sha256", "calibration_bytes",
+    "worst_case_run_bytes", "headroom_bytes", "capacity_limit_bytes", "attestation_generation", "capacity_generation",
+    "signed_at_ms", "renew_at_ms", "hard_expiry_ms",
+  ];
+  const payload = exactObjectKeys(envelope.payload, payloadKeys, "IMAGE_LEDGER_ATTESTATION_PAYLOAD_INVALID");
+  if (payload.schema !== IMAGE_LEDGER_ATTESTATION_SCHEMA) throw new Error("IMAGE_LEDGER_ATTESTATION_PAYLOAD_INVALID");
+  const signature = Buffer.from(String(envelope.signature || ""), "base64");
+  if (signature.length !== 64 || !verifySignature(null, Buffer.from(canonicalJson(payload), "utf8"), importEd25519PublicKey(publicKey), signature)) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_SIGNATURE_INVALID");
+  }
+  for (const [key, expectedValue] of Object.entries(expected || {})) {
+    if (payload[key] !== expectedValue) throw new Error(`IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH:${key}`);
+  }
+  for (const field of ["database_id_sha256", "control_config_hash", "relevant_audit_set_hash", "calibration_sha256", "attestation_generation", "capacity_generation"]) {
+    if (!/^[0-9a-f]{64}$/.test(String(payload[field] || ""))) throw new Error(`IMAGE_LEDGER_ATTESTATION_FIELD_INVALID:${field}`);
+  }
+  if (!/^https:\/\//.test(payload.rest_origin) || new URL(payload.rest_origin).origin !== payload.rest_origin) throw new Error("IMAGE_LEDGER_ATTESTATION_FIELD_INVALID:rest_origin");
+  if (!/^[0-9a-f]{40}$/.test(payload.candidate_commit) || !payload.app_scope || !payload.vercel_project_id || !payload.vercel_environment) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_BINDING_INVALID");
+  }
+  if (payload.database_state !== "active" || payload.database_modifying !== false || payload.tls !== true
+    || payload.eviction !== false || payload.db_eviction !== false || payload.auto_upgrade !== false) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_CONTROL_DRIFT");
+  }
+  const auditHighWater = exactObjectKeys(payload.audit_high_water, ["timestamp_ms", "log_id"], "IMAGE_LEDGER_ATTESTATION_AUDIT_INVALID");
+  exactFiniteInteger(auditHighWater.timestamp_ms, 0, "IMAGE_LEDGER_ATTESTATION_AUDIT_INVALID");
+  if (!String(auditHighWater.log_id || "")) throw new Error("IMAGE_LEDGER_ATTESTATION_AUDIT_INVALID");
+  const auditFetchAtMs = exactFiniteInteger(payload.audit_fetch_at_ms, 0, "IMAGE_LEDGER_ATTESTATION_AUDIT_INVALID");
+  if (payload.audit_retention_seconds !== IMAGE_LEDGER_AUDIT_RETENTION_SECONDS
+    || auditHighWater.timestamp_ms > auditFetchAtMs
+    || auditFetchAtMs > nowMs
+    || nowMs - auditFetchAtMs > IMAGE_LEDGER_HARD_EXPIRY_MAX_MS) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_AUDIT_INVALID");
+  }
+  const signedAtMs = exactFiniteInteger(payload.signed_at_ms, 0, "IMAGE_LEDGER_ATTESTATION_TIME_INVALID");
+  const renewAtMs = exactFiniteInteger(payload.renew_at_ms, signedAtMs, "IMAGE_LEDGER_ATTESTATION_TIME_INVALID");
+  const hardExpiryMs = exactFiniteInteger(payload.hard_expiry_ms, renewAtMs, "IMAGE_LEDGER_ATTESTATION_TIME_INVALID");
+  if (signedAtMs > nowMs || hardExpiryMs <= nowMs
+    || renewAtMs - signedAtMs > IMAGE_LEDGER_RENEW_MAX_MS
+    || hardExpiryMs - signedAtMs > IMAGE_LEDGER_HARD_EXPIRY_MAX_MS) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_TIME_INVALID");
+  }
+  const storageThreshold = exactFiniteInteger(payload.storage_threshold_bytes, 1, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  const currentStorage = exactFiniteInteger(payload.current_storage_bytes, 0, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  const calibrationBytes = exactFiniteInteger(payload.calibration_bytes, 1, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  const worstCaseRunBytes = exactFiniteInteger(payload.worst_case_run_bytes, 1, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  const headroomBytes = exactFiniteInteger(payload.headroom_bytes, 1, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  const capacityLimitBytes = exactFiniteInteger(payload.capacity_limit_bytes, 1, "IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  if (capacityLimitBytes > storageThreshold || currentStorage > capacityLimitBytes
+    || calibrationBytes < worstCaseRunBytes
+    || headroomBytes < Math.max(Math.ceil(storageThreshold * 0.2), worstCaseRunBytes * 2)
+    || currentStorage + worstCaseRunBytes + headroomBytes > capacityLimitBytes) {
+    throw new Error("IMAGE_LEDGER_ATTESTATION_CAPACITY_INVALID");
+  }
+  return structuredClone(payload);
+}
+
+function d36AppRoot(appScopeId) {
+  const value = String(appScopeId || "");
+  if (!/^xiaoshimei-studio:[0-9a-f]{32}$/.test(value) && value !== "xiaoshimei-test-scope") throw new TypeError("IMAGE_LEDGER_APP_SCOPE_REQUIRED");
+  const tag = sha256Bytes(Buffer.from(value, "utf8")).slice(0, 32);
+  return `xiaoshimei:image-d36:{${tag}}`;
+}
+
+function d36ReadinessKey(appScopeId) {
+  return `${d36AppRoot(appScopeId)}:readiness`;
+}
+
+function d36CapacityKey(appScopeId) {
+  return `${d36AppRoot(appScopeId)}:capacity`;
+}
+
+function d36ExpiryIndexKey(appScopeId) {
+  return `${d36AppRoot(appScopeId)}:expiry`;
+}
+
 function d36RunId(appScopeId, bootstrapNonce) {
   const digest = sha256Bytes(Buffer.from(`xiaoshimei-image-run-v1\0${appScopeId}\0${bootstrapNonce}`, "utf8"));
   return `images-${BigInt(`0x${digest}`).toString(10)}-${digest.slice(0, 8)}`;
 }
 
-function d36RunRoot(runId) {
+function d36RunRoot(runId, appScopeId) {
   if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(String(runId || ""))) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
-  return `xiaoshimei:image-d36:{${runId}}`;
+  if (!appScopeId) return `xiaoshimei:image-d36:{${runId}}`;
+  return `${d36AppRoot(appScopeId)}:run:${runId}`;
 }
 
-function d36AssetKey(runId, sha256) {
+function d36AssetKey(runId, sha256, appScopeId) {
   if (!/^[0-9a-f]{64}$/.test(String(sha256 || ""))) throw new TypeError("IMAGE_ASSET_SHA_INVALID");
-  return `${d36RunRoot(runId)}:asset:${sha256}`;
+  return `${d36RunRoot(runId, appScopeId)}:asset:${sha256}`;
 }
 
-function d36InventoryKey(runId) {
-  return `${d36RunRoot(runId)}:inventory`;
+function d36InventoryKey(runId, appScopeId) {
+  return `${d36RunRoot(runId, appScopeId)}:inventory`;
 }
 
 function d36StepActionId(runId, checkpointSha256, logicalStepId) {
@@ -791,11 +932,11 @@ function compactPublicImageRun(run) {
   return compact;
 }
 
-async function hydrateCompactPublicImageRun(compactRun, imageLedger) {
+async function hydrateCompactPublicImageRun(compactRun, imageLedger, appScopeId) {
   const hydrated = structuredClone(compactRun);
   hydrated.assets = [];
   for (const asset of compactRun.assets || []) {
-    const stored = await imageLedger.readRunAsset({ runId: compactRun.run_id, sha256: asset.sha256 });
+    const stored = await imageLedger.readRunAsset({ runId: compactRun.run_id, appScopeId, sha256: asset.sha256 });
     if (!stored || stored.status === "MISSING") throw new Error("IMAGE_ASSET_MISSING");
     const bytes = Buffer.from(stored.bytes);
     if (bytes.length !== asset.size_bytes || sha256Bytes(bytes) !== asset.sha256) throw new Error("IMAGE_ASSET_CORRUPT");
@@ -945,7 +1086,9 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
     or redis.call('HGET', KEYS[1], 'bootstrap_nonce') ~= ARGV[2]
     or redis.call('HGET', KEYS[1], 'input_sha') ~= ARGV[3]
     or redis.call('HGET', KEYS[1], 'snapshot_sha') ~= ARGV[4]
-    or redis.call('HGET', KEYS[1], 'manifest_sha') ~= ARGV[5] then
+    or redis.call('HGET', KEYS[1], 'manifest_sha') ~= ARGV[5]
+    or (#KEYS >= 4 and (redis.call('HGET', KEYS[1], 'capacity_generation') ~= ARGV[12]
+      or redis.call('HGET', KEYS[1], 'capacity_reservation_bytes') ~= ARGV[13])) then
     return {'CONFLICT'}
   end
   if redis.call('EXISTS', KEYS[2]) == 0
@@ -962,6 +1105,22 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
   end
   return {status, redis.call('HGET', KEYS[1], 'planner_owner') or '', redis.call('HGET', KEYS[1], 'planner_fence') or '0', redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0'}
 end
+local runtime_attested = #KEYS >= 4
+local reservation = 0
+if runtime_attested then
+  if redis.call('HGET', KEYS[3], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v1'
+    or redis.call('HGET', KEYS[3], 'attestation_generation') ~= ARGV[11]
+    or redis.call('HGET', KEYS[3], 'capacity_generation') ~= ARGV[12] then return {'CAPACITY_GENERATION_DRIFT'} end
+  local reserved = tonumber(redis.call('HGET', KEYS[3], 'reserved_bytes') or '-1')
+  local capacity_limit = tonumber(redis.call('HGET', KEYS[3], 'capacity_limit_bytes') or '-1')
+  local headroom = tonumber(redis.call('HGET', KEYS[3], 'headroom_bytes') or '-1')
+  reservation = tonumber(ARGV[13])
+  if reserved < 0 or capacity_limit <= 0 or headroom <= 0 or reservation <= 0
+    or reserved + reservation + headroom > capacity_limit then return {'CAPACITY_EXHAUSTED'} end
+end
+local recoverable_until = now_ms + tonumber(ARGV[10])
+local physical_ttl = runtime_attested and tonumber(ARGV[14]) or tonumber(ARGV[10])
+local physical_expire_at = now_ms + physical_ttl
 redis.call('SADD', KEYS[2], KEYS[1], KEYS[2])
 redis.call('HSET', KEYS[1],
   'status', 'MATERIALIZING',
@@ -975,10 +1134,18 @@ redis.call('HSET', KEYS[1],
   'reservation_count', '0',
   'inventory_schema', 'xiaoshimei.d36-key-inventory.v1',
   'inventory_count', '2',
-  'recoverable_until_ms', tostring(now_ms + tonumber(ARGV[10])))
-redis.call('PEXPIRE', KEYS[1], ARGV[10])
-redis.call('PEXPIRE', KEYS[2], ARGV[10])
-return {'MATERIALIZING', '', '0', tostring(now_ms + tonumber(ARGV[10]))}
+  'recoverable_until_ms', tostring(recoverable_until),
+  'physical_expire_at_ms', tostring(physical_expire_at))
+if runtime_attested then
+  redis.call('HSET', KEYS[1], 'capacity_generation', ARGV[12], 'capacity_reservation_bytes', ARGV[13], 'capacity_released', '0')
+  redis.call('HINCRBY', KEYS[3], 'reserved_bytes', reservation)
+  redis.call('HINCRBY', KEYS[3], 'live_reservations', 1)
+  redis.call('HINCRBY', KEYS[3], 'unfinalized_inventory', 1)
+  redis.call('ZADD', KEYS[4], recoverable_until, KEYS[1] .. '|' .. ARGV[12] .. '|' .. ARGV[13])
+end
+redis.call('PEXPIRE', KEYS[1], physical_ttl)
+redis.call('PEXPIRE', KEYS[2], physical_ttl)
+return {'MATERIALIZING', '', '0', tostring(recoverable_until)}
 `;
 
 const D36_DISCOVER_LUA = `
@@ -1015,12 +1182,13 @@ if redis.call('EXISTS', KEYS[3]) == 1 then
   return {'EXISTING'}
 end
 local recoverable_until = tonumber(redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0')
-if recoverable_until <= 0 then return {'RECOVERY_DEADLINE_MISSING'} end
+local physical_expire_at = tonumber(redis.call('HGET', KEYS[1], 'physical_expire_at_ms') or '0')
+if recoverable_until <= 0 or physical_expire_at <= recoverable_until then return {'RECOVERY_DEADLINE_MISSING'} end
 redis.call('SET', KEYS[3], ARGV[1])
 local added = redis.call('SADD', KEYS[2], KEYS[3])
 if added == 1 then redis.call('HINCRBY', KEYS[1], 'inventory_count', 1) end
-redis.call('PEXPIREAT', KEYS[3], recoverable_until)
-redis.call('PEXPIREAT', KEYS[2], recoverable_until)
+redis.call('PEXPIREAT', KEYS[3], physical_expire_at)
+redis.call('PEXPIREAT', KEYS[2], physical_expire_at)
 return {'STORED'}
 `;
 
@@ -1110,7 +1278,9 @@ end
 local required_remaining = tonumber(ARGV[5]) + tonumber(ARGV[6])
 if tonumber(ARGV[8]) - now_ms < required_remaining then return {'EXPIRY_WINDOW_TOO_SHORT'} end
 local recoverable_until = tonumber(redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0')
+local physical_expire_at = tonumber(redis.call('HGET', KEYS[1], 'physical_expire_at_ms') or '0')
 if recoverable_until - now_ms < required_remaining
+  or physical_expire_at <= recoverable_until
   or redis.call('PTTL', KEYS[1]) < required_remaining
   or redis.call('PTTL', KEYS[2]) < required_remaining then return {'RUN_EXPIRY_WINDOW_TOO_SHORT'} end
 local run_status = redis.call('HGET', KEYS[1], 'status')
@@ -1131,8 +1301,8 @@ redis.call('HSET', KEYS[3],
   'lease_until_ms', tostring(now_ms + tonumber(ARGV[5])))
 local added = redis.call('SADD', KEYS[2], KEYS[3])
 if added == 1 then redis.call('HINCRBY', KEYS[1], 'inventory_count', 1) end
-redis.call('PEXPIREAT', KEYS[3], recoverable_until)
-redis.call('PEXPIREAT', KEYS[2], recoverable_until)
+redis.call('PEXPIREAT', KEYS[3], physical_expire_at)
+redis.call('PEXPIREAT', KEYS[2], physical_expire_at)
 redis.call('HSET', KEYS[1], 'status', 'IN_FLIGHT', 'reservation_count', tostring(fence))
 return {'RESERVED', ARGV[4], tostring(fence)}
 `;
@@ -1208,6 +1378,22 @@ for index = 1, #members do reply[#reply + 1] = members[index] end
 return reply
 `;
 
+const D36_RELEASE_CAPACITY_LUA = `
+if redis.call('HGET', KEYS[1], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v1'
+  or redis.call('HGET', KEYS[1], 'capacity_generation') ~= ARGV[2] then return {'CAPACITY_GENERATION_DRIFT'} end
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) == false then return {'ALREADY_RELEASED'} end
+local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_bytes') or '-1')
+local live = tonumber(redis.call('HGET', KEYS[1], 'live_reservations') or '-1')
+local inventory = tonumber(redis.call('HGET', KEYS[1], 'unfinalized_inventory') or '-1')
+local amount = tonumber(ARGV[3])
+if reserved < amount or live < 1 or inventory < 1 or amount <= 0 then return {'CAPACITY_ACCOUNTING_INVALID'} end
+redis.call('HINCRBY', KEYS[1], 'reserved_bytes', -amount)
+redis.call('HINCRBY', KEYS[1], 'live_reservations', -1)
+redis.call('HINCRBY', KEYS[1], 'unfinalized_inventory', -1)
+redis.call('ZREM', KEYS[2], ARGV[1])
+return {'RELEASED'}
+`;
+
 function imageLedgerKeys(runId, attemptIndex = null) {
   const normalized = String(runId || "");
   if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(normalized)) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
@@ -1245,7 +1431,7 @@ function assertProductionReadiness(value) {
   return structuredClone(value);
 }
 
-export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fetch, timeoutMs = 5_000, productionReadiness = null, readinessProbe = null } = {}) {
+export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fetch, timeoutMs = 5_000, productionReadiness = null, readinessProbe = null, runtimeBinding = null } = {}) {
   let endpoint;
   try { endpoint = new URL(url); } catch { throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED"); }
   if (endpoint.protocol !== "https:" || typeof token !== "string" || token.length < 16 || typeof fetchImpl !== "function") throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
@@ -1318,21 +1504,148 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
   const discoverD36 = async ({ runId, appScopeId, bootstrapNonce = "", inputSha256 = "", requireExternalIdentity = false } = {}) => {
     const reply = await evalLua(
       D36_DISCOVER_LUA,
-      [`${d36RunRoot(runId)}:meta`],
+      [`${d36RunRoot(runId, appScopeId)}:meta`],
       [appScopeId, bootstrapNonce, inputSha256, requireExternalIdentity ? "1" : "0"],
     );
     return parseD36Discovery(reply, runId);
   };
-  const scanD36RootKeys = async (root) => {
+  const scanPatternKeys = async (pattern) => {
     const result = [];
     let cursor = "0";
     do {
-      const reply = await command(["SCAN", cursor, "MATCH", `${root}:*`, "COUNT", "1000"]);
+      const reply = await command(["SCAN", cursor, "MATCH", pattern, "COUNT", "1000"]);
       if (!Array.isArray(reply) || reply.length !== 2 || !Array.isArray(reply[1])) throw new Error("IMAGE_LEDGER_SCAN_INVALID_REPLY");
       cursor = String(reply[0]);
       for (const key of reply[1]) result.push(String(key));
     } while (cursor !== "0");
     return [...new Set(result)].sort();
+  };
+  const scanD36RootKeys = (root) => scanPatternKeys(`${root}:*`);
+  const redisTimeMs = async () => {
+    const value = await command(["TIME"]);
+    if (!Array.isArray(value) || value.length !== 2 || !/^\d+$/.test(String(value[0])) || !/^\d+$/.test(String(value[1]))) {
+      throw new Error("IMAGE_LEDGER_TIME_INVALID");
+    }
+    return Number(value[0]) * 1000 + Math.floor(Number(value[1]) / 1000);
+  };
+  const verifyRuntimeSentinel = async (context) => {
+    if (!runtimeBinding?.ready) throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
+    const appScopeId = String(context?.appScopeId || "");
+    if (appScopeId !== runtimeBinding.expected?.app_scope) throw new Error("IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH:app_scope");
+    const nowMs = await redisTimeMs();
+    const raw = await command(["GET", d36ReadinessKey(appScopeId)]);
+    if (typeof raw !== "string") throw new Error("IMAGE_LEDGER_ATTESTATION_MISSING");
+    let envelope;
+    try { envelope = JSON.parse(raw); } catch { throw new Error("IMAGE_LEDGER_ATTESTATION_ENVELOPE_INVALID"); }
+    return verifyImageLedgerAttestationEnvelope(envelope, {
+      publicKey: runtimeBinding.publicKey,
+      expected: runtimeBinding.expected,
+      nowMs,
+    });
+  };
+  const finalizeExpiredRunsWithAttestation = async (appScopeId, attestation, { limit = 8 } = {}) => {
+    const nowMs = await redisTimeMs();
+    const expiryKey = d36ExpiryIndexKey(appScopeId);
+    const members = await command(["ZRANGEBYSCORE", expiryKey, "-inf", String(nowMs), "LIMIT", "0", String(limit)]);
+    if (!Array.isArray(members)) throw new Error("IMAGE_LEDGER_EXPIRY_INDEX_INVALID");
+    const results = [];
+    for (const rawMember of members) {
+      const member = String(rawMember);
+      const match = /^(.*:meta)\|([0-9a-f]{64})\|(\d+)$/.exec(member);
+      if (!match || !match[1].startsWith(`${d36AppRoot(appScopeId)}:run:`)) throw new Error("IMAGE_LEDGER_EXPIRY_INDEX_INVALID");
+      const [, metaKey, capacityGeneration, reservationRaw] = match;
+      const reservationBytes = Number(reservationRaw);
+      if (capacityGeneration !== attestation.capacity_generation || !Number.isSafeInteger(reservationBytes) || reservationBytes <= 0) {
+        throw new Error("IMAGE_LEDGER_CAPACITY_GENERATION_DRIFT");
+      }
+      const runRoot = metaKey.replace(/:meta$/, "");
+      const inventoryKey = `${runRoot}:inventory`;
+      if (Number(await command(["EXISTS", metaKey])) !== 0) {
+        const frozen = await evalLua(D36_FREEZE_CLEANUP_LUA, [metaKey, inventoryKey], []);
+        if (frozen.status !== "FROZEN") {
+          results.push({ member, status: frozen.status, released: false });
+          continue;
+        }
+        const exactKeys = [...new Set(frozen.values.map(String))].sort();
+        const physicalKeys = await scanD36RootKeys(runRoot);
+        if (!exactKeys.length || exactKeys.length !== physicalKeys.length || exactKeys.some((key, index) => key !== physicalKeys[index])) {
+          results.push({ member, status: "INVENTORY_INCOMPLETE", released: false });
+          continue;
+        }
+        await command(["DEL", ...exactKeys]);
+        let remained = false;
+        for (const key of exactKeys) if (Number(await command(["EXISTS", key])) !== 0) remained = true;
+        if (remained || (await scanD36RootKeys(runRoot)).length !== 0) {
+          results.push({ member, status: "PHYSICAL_KEYS_REMAIN", released: false });
+          continue;
+        }
+      } else if ((await scanD36RootKeys(runRoot)).length !== 0) {
+        results.push({ member, status: "PHYSICAL_KEYS_REMAIN", released: false });
+        continue;
+      }
+      const released = await evalLua(D36_RELEASE_CAPACITY_LUA, [d36CapacityKey(appScopeId), expiryKey], [member, capacityGeneration, reservationBytes]);
+      if (!new Set(["RELEASED", "ALREADY_RELEASED"]).has(released.status)) throw new Error(`IMAGE_LEDGER_${released.status}`);
+      results.push({ member, status: released.status, released: true });
+    }
+    return results;
+  };
+  const verifyStartInventoryAndCapacity = async (context, attestation) => {
+    const appScopeId = String(context?.appScopeId || "");
+    await finalizeExpiredRunsWithAttestation(appScopeId, attestation);
+    const root = d36AppRoot(appScopeId);
+    const dbSizeBefore = Number(await command(["DBSIZE"]));
+    if (!Number.isSafeInteger(dbSizeBefore) || dbSizeBefore < 0) throw new Error("IMAGE_LEDGER_DBSIZE_INVALID");
+    const keys = await scanPatternKeys("*");
+    const dbSizeAfter = Number(await command(["DBSIZE"]));
+    if (dbSizeBefore !== dbSizeAfter || keys.length !== dbSizeAfter) throw new Error("IMAGE_LEDGER_SCAN_NOT_STABLE");
+    if (keys.some((key) => !key.startsWith(`${root}:`))) throw new Error("IMAGE_LEDGER_FOREIGN_KEYS_PRESENT");
+    let physicalBytes = 0;
+    for (const key of keys) {
+      const usage = Number(await command(["MEMORY", "USAGE", key]));
+      if (!Number.isSafeInteger(usage) || usage < 0) throw new Error("IMAGE_LEDGER_USAGE_UNKNOWN");
+      physicalBytes += usage;
+      if (!Number.isSafeInteger(physicalBytes)) throw new Error("IMAGE_LEDGER_USAGE_UNKNOWN");
+    }
+    const capacityRaw = await command(["HGETALL", d36CapacityKey(appScopeId)]);
+    const capacity = redisHashObject(capacityRaw);
+    if (capacity.schema !== "xiaoshimei.image-ledger-capacity.v1"
+      || capacity.capacity_generation !== attestation.capacity_generation) {
+      throw new Error("IMAGE_LEDGER_CAPACITY_GENERATION_DRIFT");
+    }
+    const reservedBytes = Number(capacity.reserved_bytes);
+    const liveReservations = Number(capacity.live_reservations);
+    const unfinalizedInventory = Number(capacity.unfinalized_inventory);
+    if (![reservedBytes, liveReservations, unfinalizedInventory].every((value) => Number.isSafeInteger(value) && value >= 0)) {
+      throw new Error("IMAGE_LEDGER_CAPACITY_INVALID");
+    }
+    const runMetaKeys = keys.filter((key) => /:run:images-[^:]+:meta$/.test(key));
+    const inventoryUnion = new Set([d36ReadinessKey(appScopeId), d36CapacityKey(appScopeId), d36ExpiryIndexKey(appScopeId)]);
+    for (const key of [...inventoryUnion]) if (!keys.includes(key)) inventoryUnion.delete(key);
+    for (const metaKey of runMetaKeys) {
+      const inventoryKey = metaKey.replace(/:meta$/, ":inventory");
+      const members = await command(["SMEMBERS", inventoryKey]);
+      if (!Array.isArray(members) || !members.includes(metaKey) || !members.includes(inventoryKey)) {
+        throw new Error("IMAGE_LEDGER_INVENTORY_INCOMPLETE");
+      }
+      for (const member of members) inventoryUnion.add(String(member));
+    }
+    if (keys.some((key) => !inventoryUnion.has(key))) throw new Error("IMAGE_LEDGER_INVENTORY_UNION_MISMATCH");
+    if (physicalBytes + reservedBytes + attestation.worst_case_run_bytes + attestation.headroom_bytes > attestation.capacity_limit_bytes) {
+      throw new Error("IMAGE_LEDGER_CAPACITY_EXHAUSTED");
+    }
+    return { ...attestation, mode: "START", runtime_attested: true, physicalBytes, reservedBytes, liveReservations, unfinalizedInventory };
+  };
+  const verifyStepReservation = async (context, attestation) => {
+    const runId = String(context?.runId || "");
+    const appScopeId = String(context?.appScopeId || "");
+    const record = redisHashObject(await command(["HGETALL", `${d36RunRoot(runId, appScopeId)}:meta`]));
+    if (record.app_scope !== appScopeId
+      || record.capacity_generation !== attestation.capacity_generation
+      || Number(record.capacity_reservation_bytes) !== attestation.worst_case_run_bytes
+      || Number(record.capacity_released || 0) !== 0) {
+      throw new Error("IMAGE_LEDGER_CAPACITY_RESERVATION_INVALID");
+    }
+    return { ...attestation, mode: "STEP", runtime_attested: true };
   };
   return {
     async assertReady() {
@@ -1353,8 +1666,18 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     },
     async assertProductionReady(context = {}) {
       await this.assertReady();
-      const observed = typeof readinessProbe === "function" ? await readinessProbe(structuredClone(context)) : productionReadiness;
-      return assertProductionReadiness(observed);
+      if (typeof readinessProbe === "function" || productionReadiness != null) {
+        const observed = typeof readinessProbe === "function" ? await readinessProbe(structuredClone(context)) : productionReadiness;
+        return assertProductionReadiness(observed);
+      }
+      const attestation = await verifyRuntimeSentinel(context);
+      if (context.mode === "START") return verifyStartInventoryAndCapacity(context, attestation);
+      if (context.mode === "STEP") return verifyStepReservation(context, attestation);
+      throw new Error("IMAGE_LEDGER_READINESS_MODE_INVALID");
+    },
+    async finalizeExpiredRuns({ appScopeId, limit = 8 } = {}) {
+      const attestation = await verifyRuntimeSentinel({ appScopeId });
+      return finalizeExpiredRunsWithAttestation(String(appScopeId || ""), attestation, { limit });
     },
     async init(identity) {
       const keys = imageLedgerKeys(identity.runId);
@@ -1376,11 +1699,20 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       const keys = imageLedgerKeys(identity.runId, identity.attemptIndex);
       return evalLua(IMAGE_LEDGER_UNKNOWN_LUA, [keys.run, keys.attempt], [identity.checkpointSha256, identity.attemptNonce]);
     },
-    async claimStart({ runId, appScopeId, bootstrapNonce, inputSha256, snapshot, referenceManifest, accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, ttlMs = IMAGE_LEDGER_RUN_TTL_MS } = {}) {
-      const root = d36RunRoot(runId);
+    async claimStart({ runId, appScopeId, bootstrapNonce, inputSha256, snapshot, referenceManifest, accessExpiresAtMs, readiness, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, ttlMs = IMAGE_LEDGER_RUN_TTL_MS, physicalTtlMs = IMAGE_LEDGER_PHYSICAL_TTL_MS } = {}) {
+      const root = d36RunRoot(runId, appScopeId);
       const snapshotJson = canonicalJson(snapshot);
       const manifestJson = canonicalJson(referenceManifest);
-      const reply = await evalLua(D36_CLAIM_START_LUA, [`${root}:meta`, `${root}:inventory`], [appScopeId, bootstrapNonce, inputSha256, sha256Bytes(Buffer.from(snapshotJson)), sha256Bytes(Buffer.from(manifestJson)), snapshotJson, manifestJson, accessExpiresAtMs, minRemainingMs, ttlMs]);
+      const runtimeAttested = readiness?.runtime_attested === true;
+      const reply = await evalLua(
+        D36_CLAIM_START_LUA,
+        runtimeAttested
+          ? [`${root}:meta`, `${root}:inventory`, d36CapacityKey(appScopeId), d36ExpiryIndexKey(appScopeId)]
+          : [`${root}:meta`, `${root}:inventory`],
+        runtimeAttested
+          ? [appScopeId, bootstrapNonce, inputSha256, sha256Bytes(Buffer.from(snapshotJson)), sha256Bytes(Buffer.from(manifestJson)), snapshotJson, manifestJson, accessExpiresAtMs, minRemainingMs, ttlMs, readiness.attestation_generation, readiness.capacity_generation, readiness.worst_case_run_bytes, physicalTtlMs]
+          : [appScopeId, bootstrapNonce, inputSha256, sha256Bytes(Buffer.from(snapshotJson)), sha256Bytes(Buffer.from(manifestJson)), snapshotJson, manifestJson, accessExpiresAtMs, minRemainingMs, ttlMs],
+      );
       return {
         status: reply.status,
         runId,
@@ -1389,10 +1721,10 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
         recoverableUntil: Number(reply.values[2] || 0),
       };
     },
-    async putRunAsset({ runId, manifest, bytes } = {}) {
+    async putRunAsset({ runId, appScopeId, manifest, bytes } = {}) {
       const value = assertExactJpegAsset(bytes, manifest);
-      const root = d36RunRoot(runId);
-      const key = d36AssetKey(runId, manifest.sha256);
+      const root = d36RunRoot(runId, appScopeId);
+      const key = d36AssetKey(runId, manifest.sha256, appScopeId);
       const encoded = value.toString("base64");
       const stored = await evalLua(D36_PUT_ASSET_LUA, [`${root}:meta`, `${root}:inventory`, key], [encoded]);
       if (stored.status === "CAS_CONFLICT") throw new Error("IMAGE_ASSET_CAS_CONFLICT");
@@ -1401,26 +1733,26 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       if (typeof readback !== "string" || !Buffer.from(readback, "base64").equals(value)) throw new Error("IMAGE_ASSET_READBACK_FAILED");
       return { status: stored.status, manifest: structuredClone(manifest) };
     },
-    async readRunAsset({ runId, sha256 } = {}) {
-      const value = await command(["GET", d36AssetKey(runId, sha256)]);
+    async readRunAsset({ runId, appScopeId, sha256 } = {}) {
+      const value = await command(["GET", d36AssetKey(runId, sha256, appScopeId)]);
       if (value == null) return { status: "MISSING" };
       const bytes = Buffer.from(String(value), "base64");
       if (sha256Bytes(bytes) !== sha256) return { status: "CORRUPT" };
       return { status: "FOUND", bytes };
     },
-    async claimPlanner({ runId, ownerToken = randomUUID(), materializedManifestSha256, accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_PLANNER_LEASE_MS } = {}) {
-      const reply = await evalLua(D36_CLAIM_PLANNER_LUA, [`${d36RunRoot(runId)}:meta`], [ownerToken, leaseMs, materializedManifestSha256, accessExpiresAtMs, minRemainingMs]);
+    async claimPlanner({ runId, appScopeId, ownerToken = randomUUID(), materializedManifestSha256, accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_PLANNER_LEASE_MS } = {}) {
+      const reply = await evalLua(D36_CLAIM_PLANNER_LUA, [`${d36RunRoot(runId, appScopeId)}:meta`], [ownerToken, leaseMs, materializedManifestSha256, accessExpiresAtMs, minRemainingMs]);
       return { status: reply.status, ownerToken: reply.values[0] || (reply.status === "PLANNING" ? ownerToken : null), fence: Number(reply.values[1] || 0) };
     },
-    async commitPlanner({ runId, ownerToken, fence, compactRun, checkpointPreimage, checkpointPreimageSha256, logicalStepId, response } = {}) {
-      const root = d36RunRoot(runId);
+    async commitPlanner({ runId, appScopeId, ownerToken, fence, compactRun, checkpointPreimage, checkpointPreimageSha256, logicalStepId, response } = {}) {
+      const root = d36RunRoot(runId, appScopeId);
       const runJson = canonicalJson(compactRun);
       const responseJson = canonicalJson(response);
       const reply = await evalLua(D36_COMMIT_PLANNER_LUA, [`${root}:meta`], [ownerToken, fence, runJson, sha256Bytes(Buffer.from(runJson)), canonicalJson(checkpointPreimage), checkpointPreimageSha256, logicalStepId, responseJson]);
       return { status: reply.status };
     },
-    async markPlannerUnknown({ runId, ownerToken, fence } = {}) {
-      const reply = await evalLua(D36_MARK_PLANNER_UNKNOWN_LUA, [`${d36RunRoot(runId)}:meta`], [ownerToken, fence]);
+    async markPlannerUnknown({ runId, appScopeId, ownerToken, fence } = {}) {
+      const reply = await evalLua(D36_MARK_PLANNER_UNKNOWN_LUA, [`${d36RunRoot(runId, appScopeId)}:meta`], [ownerToken, fence]);
       return { status: reply.status };
     },
     async discover({ runId, appScopeId, bootstrapNonce, inputSha256 } = {}) {
@@ -1429,9 +1761,9 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     async discoverByRun({ runId, appScopeId } = {}) {
       return discoverD36({ runId, appScopeId, requireExternalIdentity: false });
     },
-    async reserveStep({ runId, checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken = randomUUID(), accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_LEDGER_IN_FLIGHT_LEASE_MS, maxCalls = 6 } = {}) {
+    async reserveStep({ runId, appScopeId, checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken = randomUUID(), accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_LEDGER_IN_FLIGHT_LEASE_MS, maxCalls = 6 } = {}) {
       const actionId = d36StepActionId(runId, checkpointPreimageSha256, logicalStepId);
-      const root = d36RunRoot(runId);
+      const root = d36RunRoot(runId, appScopeId);
       const stepKey = `${root}:step:${actionId}`;
       const reply = await evalLua(D36_RESERVE_STEP_LUA, [`${root}:meta`, `${root}:inventory`, stepKey], [checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken, leaseMs, IMAGE_LEDGER_COMMIT_MARGIN_MS, "", accessExpiresAtMs, minRemainingMs, maxCalls]);
       let cachedResponse = null;
@@ -1449,15 +1781,15 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
         cachedResponse,
       };
     },
-    async commitStep({ runId, checkpointPreimageSha256, logicalStepId, attemptNonce, actionId, ownerToken, fence, compactRun, checkpointPreimage, nextCheckpointPreimageSha256, nextLogicalStepId, response, status } = {}) {
-      const root = d36RunRoot(runId);
+    async commitStep({ runId, appScopeId, checkpointPreimageSha256, logicalStepId, attemptNonce, actionId, ownerToken, fence, compactRun, checkpointPreimage, nextCheckpointPreimageSha256, nextLogicalStepId, response, status } = {}) {
+      const root = d36RunRoot(runId, appScopeId);
       const resultJson = canonicalJson(response);
       const runJson = canonicalJson(compactRun);
       const reply = await evalLua(D36_COMMIT_STEP_LUA, [`${root}:meta`, `${root}:step:${actionId}`], [checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken, fence, sha256Bytes(Buffer.from(resultJson)), resultJson, status, runJson, sha256Bytes(Buffer.from(runJson)), canonicalJson(checkpointPreimage), nextCheckpointPreimageSha256, nextLogicalStepId]);
       return { status: reply.status };
     },
-    async markStepUnknown({ runId, actionId, attemptNonce, ownerToken, fence } = {}) {
-      const root = d36RunRoot(runId);
+    async markStepUnknown({ runId, appScopeId, actionId, attemptNonce, ownerToken, fence } = {}) {
+      const root = d36RunRoot(runId, appScopeId);
       const reply = await evalLua(D36_MARK_STEP_UNKNOWN_LUA, [`${root}:meta`, `${root}:step:${actionId}`], [attemptNonce, ownerToken, fence]);
       let cachedResponse = null;
       if (reply.status === "COMMITTED" || reply.status === "LATE_RESULT") {
@@ -1467,7 +1799,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       return { status: reply.status, cachedResponse };
     },
     async readAsset({ runId, sha256, appScopeId } = {}) {
-      const discoveredRaw = await command(["HGETALL", `${d36RunRoot(runId)}:meta`]);
+      const discoveredRaw = await command(["HGETALL", `${d36RunRoot(runId, appScopeId)}:meta`]);
       if (!Array.isArray(discoveredRaw) || discoveredRaw.length === 0) return { status: "RUN_MISSING" };
       const record = redisHashObject(discoveredRaw);
       if (record.app_scope !== appScopeId) return { status: "FORBIDDEN" };
@@ -1476,17 +1808,17 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
         ...((record.run_json ? JSON.parse(record.run_json).assets : []) || []).map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, runId))),
       ].find((item) => item.sha256 === sha256);
       if (!manifest) return { status: "NOT_MEMBER" };
-      const stored = await this.readRunAsset({ runId, sha256 });
+      const stored = await this.readRunAsset({ runId, appScopeId, sha256 });
       if (stored.status !== "FOUND") return stored;
       try { assertExactJpegAsset(stored.bytes, manifest); }
       catch { return { status: "CORRUPT" }; }
       return { status: "FOUND", bytes: Buffer.from(stored.bytes), manifest };
     },
-    async cleanupRun({ runId, exactKeys = [] } = {}) {
-      const root = d36RunRoot(runId);
+    async cleanupRun({ runId, appScopeId, exactKeys = [] } = {}) {
+      const root = d36RunRoot(runId, appScopeId);
       if (exactKeys.length) throw new TypeError("IMAGE_LEDGER_CLEANUP_CALLER_KEYS_FORBIDDEN");
       const metaKey = `${root}:meta`;
-      const inventoryKey = d36InventoryKey(runId);
+      const inventoryKey = d36InventoryKey(runId, appScopeId);
       const frozen = await evalLua(D36_FREEZE_CLEANUP_LUA, [metaKey, inventoryKey], []);
       if (frozen.status !== "FROZEN") return { status: frozen.status, released: false, keys: [] };
       const keys = [...new Set(frozen.values.map(String))].sort();
@@ -1498,14 +1830,22 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       }
       await command(["DEL", ...keys]);
       for (const key of keys) if (Number(await command(["EXISTS", key])) !== 0) return { status: "PHYSICAL_KEYS_REMAIN", released: false, keys };
-      return { status: "ABSENT_READBACK", released: true, keys };
+      return {
+        status: "PHYSICAL_ABSENT_READBACK",
+        physicalReleased: true,
+        released: false,
+        keys,
+      };
     },
   };
 }
 
 export function createUpstashImageLedgerFromEnv(env = process.env, options = {}) {
   const value = imageLedgerEnv(env);
-  return value.ready ? createUpstashImageLedger({ url: value.url, token: value.token, ...options }) : null;
+  if (!value.ready) return null;
+  const access = inspectServerAccessConfig(env);
+  const runtimeBinding = imageLedgerRuntimeBinding(env, access.appScope, value.url);
+  return createUpstashImageLedger({ url: value.url, token: value.token, runtimeBinding, ...options });
 }
 
 function publicRunCreatedAtMs(runId) {
@@ -1884,10 +2224,10 @@ function imageTransactionStateError(status, details = {}) {
   return error;
 }
 
-async function readAndVerifyD36ReferenceAssets(imageLedger, runId, referenceManifest) {
+async function readAndVerifyD36ReferenceAssets(imageLedger, runId, appScopeId, referenceManifest) {
   const references = [];
   for (const manifest of referenceManifest || []) {
-    const stored = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    const stored = await imageLedger.readRunAsset({ runId, appScopeId, sha256: manifest.sha256 });
     if (!stored || stored.status !== "FOUND") throw new Error(stored?.status === "CORRUPT" ? "IMAGE_REFERENCE_MEDIA_CORRUPT" : "IMAGE_REFERENCE_MEDIA_MISSING");
     const bytes = assertExactJpegAsset(stored.bytes, manifest);
     references.push({ name: manifest.name, data_url: `data:image/jpeg;base64,${bytes.toString("base64")}` });
@@ -1895,10 +2235,10 @@ async function readAndVerifyD36ReferenceAssets(imageLedger, runId, referenceMani
   return references;
 }
 
-async function materializeD36References(input, imageLedger, runId) {
+async function materializeD36References(input, imageLedger, runId, appScopeId) {
   const missing = new Map(input.missing_reference_media.map((item) => [item.media_ref, item]));
   for (const manifest of input.reference_manifest) {
-    const current = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    const current = await imageLedger.readRunAsset({ runId, appScopeId, sha256: manifest.sha256 });
     if (current?.status === "FOUND") {
       assertExactJpegAsset(current.bytes, manifest);
       continue;
@@ -1908,15 +2248,15 @@ async function materializeD36References(input, imageLedger, runId) {
     if (!transfer) throw new Error("IMAGE_REFERENCE_MEDIA_MISSING");
     const bytes = Buffer.from(transfer.bytes_base64, "base64");
     assertExactJpegAsset(bytes, manifest);
-    await imageLedger.putRunAsset({ runId, manifest: stripAssetUrl(manifest), bytes });
-    const readback = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    await imageLedger.putRunAsset({ runId, appScopeId, manifest: stripAssetUrl(manifest), bytes });
+    const readback = await imageLedger.readRunAsset({ runId, appScopeId, sha256: manifest.sha256 });
     if (!readback || readback.status !== "FOUND") throw new Error("IMAGE_REFERENCE_MEDIA_READBACK_FAILED");
     assertExactJpegAsset(readback.bytes, manifest);
   }
-  await readAndVerifyD36ReferenceAssets(imageLedger, runId, input.reference_manifest);
+  await readAndVerifyD36ReferenceAssets(imageLedger, runId, appScopeId, input.reference_manifest);
 }
 
-async function persistD36GeneratedAssets(imageLedger, runId, run, previousAssets = []) {
+async function persistD36GeneratedAssets(imageLedger, runId, appScopeId, run, previousAssets = []) {
   const previous = new Set(previousAssets.map((asset) => asset.sha256));
   const mediaDelta = [];
   for (const asset of run.assets || []) {
@@ -1925,8 +2265,8 @@ async function persistD36GeneratedAssets(imageLedger, runId, run, previousAssets
     const bytes = Buffer.from(match[1], "base64");
     const manifest = stripAssetUrl(d36ManifestFromAsset(asset, runId));
     assertExactJpegAsset(bytes, manifest);
-    await imageLedger.putRunAsset({ runId, manifest, bytes });
-    const readback = await imageLedger.readRunAsset({ runId, sha256: asset.sha256 });
+    await imageLedger.putRunAsset({ runId, appScopeId, manifest, bytes });
+    const readback = await imageLedger.readRunAsset({ runId, appScopeId, sha256: asset.sha256 });
     if (!readback || readback.status !== "FOUND") throw new Error("IMAGE_GENERATED_ASSET_READBACK_FAILED");
     assertExactJpegAsset(readback.bytes, manifest);
     if (!previous.has(asset.sha256)) mediaDelta.push(d36ManifestFromAsset(asset, runId));
@@ -1968,7 +2308,7 @@ function returnOrThrowD36Response(value) {
 
 async function markPlannerUnknown(imageLedger, claim, cause) {
   if (typeof imageLedger.markPlannerUnknown === "function") {
-    try { await imageLedger.markPlannerUnknown({ runId: claim.runId, ownerToken: claim.ownerToken, fence: claim.fence }); }
+    try { await imageLedger.markPlannerUnknown({ runId: claim.runId, appScopeId: claim.appScopeId, ownerToken: claim.ownerToken, fence: claim.fence }); }
     catch { /* Fail closed below. */ }
   }
   const error = imageTransactionStateError("UNKNOWN", { run_id: claim.runId, cause: String(cause?.message || cause || "PLANNER_UNKNOWN").slice(0, 180) });
@@ -2018,7 +2358,8 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   }
 
   if (typeof imageLedger.assertProductionReady !== "function") throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
-  await imageLedger.assertProductionReady({ appScopeId, nowMs });
+  const readinessRunId = input.mode === "START" ? d36RunId(appScopeId, input.bootstrap_nonce) : input.run_id;
+  const productionReadiness = await imageLedger.assertProductionReady({ appScopeId, nowMs, mode: input.mode, runId: readinessRunId });
 
   if (input.mode === "START") {
     const computedInputSha256 = sha256Bytes(Buffer.from(canonicalImageGenerationInputPreimage(input), "utf8"));
@@ -2032,6 +2373,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       snapshot: input.operation_snapshot,
       referenceManifest: input.reference_manifest,
       accessExpiresAtMs,
+      readiness: productionReadiness,
       minRemainingMs: ACCESS_SESSION_PAID_MIN_REMAINING_MS,
       ttlMs: IMAGE_LEDGER_RUN_TTL_MS,
     });
@@ -2048,9 +2390,10 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
     }
     if (claim.status !== "MATERIALIZING") throw imageTransactionStateError(claim.status, { run_id: runId });
 
-    await materializeD36References(input, imageLedger, runId);
+    await materializeD36References(input, imageLedger, runId, appScopeId);
     const plannerClaim = await imageLedger.claimPlanner({
       runId,
+      appScopeId,
       ownerToken: randomUUID(),
       materializedManifestSha256: sha256Json(input.reference_manifest),
       accessExpiresAtMs,
@@ -2067,12 +2410,12 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       return d36Response({ status: plannerClaim.status, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: { state: plannerClaim.status }, cached: true, recoverableUntil: claim.recoverableUntil });
     }
     if (plannerClaim.status !== "PLANNING") throw imageTransactionStateError(plannerClaim.status, { run_id: runId });
-    const plannerOwner = { ...plannerClaim, runId };
+    const plannerOwner = { ...plannerClaim, runId, appScopeId };
 
     let compactRun;
     let response;
     try {
-      const referenceDataUrls = await readAndVerifyD36ReferenceAssets(imageLedger, runId, input.reference_manifest);
+      const referenceDataUrls = await readAndVerifyD36ReferenceAssets(imageLedger, runId, appScopeId, input.reference_manifest);
       const legacyInput = d36LegacyInput(input.operation_snapshot, referenceDataUrls);
       const draftSha256 = sha256Bytes(Buffer.from(JSON.stringify(legacyInput.draft)));
       const referenceFingerprint = sha256Json({ references: input.reference_manifest, note: input.operation_snapshot.reference_note });
@@ -2086,6 +2429,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
     try {
       const committed = await imageLedger.commitPlanner({
         runId,
+        appScopeId,
         ownerToken: plannerClaim.ownerToken,
         fence: plannerClaim.fence,
         compactRun,
@@ -2108,6 +2452,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   const state = await readD36RunState(imageLedger, input.run_id, appScopeId);
   const reservation = await imageLedger.reserveStep({
     runId: input.run_id,
+    appScopeId,
     checkpointPreimageSha256: input.checkpoint_preimage_sha256,
     logicalStepId: input.logical_step_id,
     attemptNonce: input.attempt_nonce,
@@ -2143,7 +2488,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
     || state.logicalStepId !== input.logical_step_id
     || sha256Json(state.compactRun) !== checkpoint.run_state_sha256;
   if (reservedStateConflict) {
-    try { await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    try { await imageLedger.markStepUnknown({ runId: input.run_id, appScopeId, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
     catch { /* The paid lane remains fail closed. */ }
     throw imageTransactionStateError("CHECKPOINT_CONFLICT", { run_id: input.run_id, reason: "RESERVED_STATE_MISMATCH" });
   }
@@ -2151,12 +2496,12 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   let compactRun;
   let response;
   try {
-    const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger);
-    const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, state.referenceManifest || []);
+    const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger, appScopeId);
+    const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, appScopeId, state.referenceManifest || []);
     const legacyInput = d36LegacyInput(state.snapshot, references);
     try {
       const advanced = await executePublicImageJob(hydratedRun, legacyInput, settings);
-      const persisted = await persistD36GeneratedAssets(imageLedger, input.run_id, advanced, state.compactRun.assets || []);
+      const persisted = await persistD36GeneratedAssets(imageLedger, input.run_id, appScopeId, advanced, state.compactRun.assets || []);
       compactRun = persisted.compactRun;
       let contentPackage;
       if (advanced.status === "COMPLETE") {
@@ -2191,7 +2536,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       });
     }
   } catch (error) {
-    try { await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    try { await imageLedger.markStepUnknown({ runId: input.run_id, appScopeId, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
     catch { /* UNKNOWN remains fail closed. */ }
     throw imageTransactionStateError("UNKNOWN", { run_id: input.run_id, cause: String(error?.message || error).slice(0, 180) });
   }
@@ -2199,6 +2544,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   try {
     const committed = await imageLedger.commitStep({
       runId: input.run_id,
+      appScopeId,
       checkpointPreimageSha256: input.checkpoint_preimage_sha256,
       logicalStepId: input.logical_step_id,
       attemptNonce: input.attempt_nonce,
@@ -2218,7 +2564,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
     const recovered = await recoverD36CommittedResponse(imageLedger, input.run_id, appScopeId);
     if (recovered) return returnOrThrowD36Response(recovered);
     let readback = null;
-    try { readback = await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    try { readback = await imageLedger.markStepUnknown({ runId: input.run_id, appScopeId, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
     catch { /* UNKNOWN remains fail closed. */ }
     if (readback?.status === "COMMITTED" && readback.cachedResponse) return returnOrThrowD36Response({ ...readback.cachedResponse, cached: true, upstream_calls: 0 });
     throw imageTransactionStateError("UNKNOWN", { run_id: input.run_id, cause: String(error?.message || error).slice(0, 180) });

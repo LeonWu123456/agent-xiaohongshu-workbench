@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
 import test from "node:test";
 import handler from "../api/provider.mjs";
 import * as providerModule from "../api/provider.mjs";
@@ -12,6 +12,7 @@ import {
   buildStandaloneRepairPrompt,
   createProviderHandler,
   createUpstashImageLedger,
+  createUpstashImageLedgerFromEnv,
   generateImages,
   imageLedgerIdentity,
   inspectAccessSessionCandidates,
@@ -24,6 +25,10 @@ import {
   verifyAccessSession,
   verifyPublicImageCheckpoint,
 } from "../api/provider.mjs";
+import {
+  buildAndInstallAttestation,
+  canonicalJson as canonicalAttestationJson,
+} from "../scripts/attest-upstash-image-ledger.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { computeImageGenerationInputSha256, parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
 import { sha256Bytes } from "../src/ark-provider-core.mjs";
@@ -581,6 +586,374 @@ const D36_PRODUCTION_READINESS = Object.freeze({
   calibrationSha256: "a".repeat(64),
 });
 
+function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const payload = {
+    schema: "xiaoshimei.image-ledger-attestation.v1",
+    database_id_sha256: "1".repeat(64),
+    rest_origin: restOrigin,
+    app_scope: appScope,
+    vercel_project_id: "prj_xiaoshimei_test",
+    vercel_environment: "preview",
+    candidate_commit: "2".repeat(40),
+    database_state: "active",
+    database_modifying: false,
+    tls: true,
+    eviction: false,
+    db_eviction: false,
+    auto_upgrade: false,
+    storage_threshold_bytes: 100_000_000,
+    current_storage_bytes: 1_000_000,
+    control_config_hash: "3".repeat(64),
+    relevant_audit_set_hash: "4".repeat(64),
+    audit_high_water: { timestamp_ms: nowMs - 2_000, log_id: "audit-001" },
+    audit_fetch_at_ms: nowMs - 1_000,
+    audit_retention_seconds: 604_800,
+    calibration_sha256: "5".repeat(64),
+    calibration_bytes: 10_000_000,
+    worst_case_run_bytes: 10_000_000,
+    headroom_bytes: 20_000_000,
+    capacity_limit_bytes: 100_000_000,
+    attestation_generation: "6".repeat(64),
+    capacity_generation: "7".repeat(64),
+    signed_at_ms: nowMs - 10_000,
+    renew_at_ms: nowMs + 6 * 24 * 60 * 60 * 1000 - 10_000,
+    hard_expiry_ms: nowMs + 7 * 24 * 60 * 60 * 1000 - 10_000,
+    ...overrides,
+  };
+  const envelope = {
+    schema: "xiaoshimei.image-ledger-attestation-envelope.v1",
+    payload,
+    signature: sign(null, Buffer.from(canonicalAttestationJson(payload)), privateKey).toString("base64"),
+  };
+  return {
+    envelope,
+    privateKey,
+    publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64"),
+  };
+}
+
+function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "START", runId = "images-2026-09-01T00-00-00-000Z-deadbeef", runRecord = null, mutateEnvelope = null } = {}) {
+  const accessEnv = {
+    XIAOSHIMEI_ACCESS_CODE_SHA256: "a".repeat(64),
+    XIAOSHIMEI_SESSION_SECRET: "s".repeat(64),
+    XIAOSHIMEI_APP_ORIGIN: "https://xiaoshimei.example",
+  };
+  const appScope = inspectServerAccessConfig(accessEnv).appScope;
+  const signed = attestation || signedRuntimeAttestation({ nowMs, appScope });
+  const envelope = structuredClone(signed.envelope);
+  if (typeof mutateEnvelope === "function") mutateEnvelope(envelope);
+  const rootTag = createHash("sha256").update(appScope).digest("hex").slice(0, 32);
+  const root = `xiaoshimei:image-d36:{${rootTag}}`;
+  const readinessKey = `${root}:readiness`;
+  const capacityKey = `${root}:capacity`;
+  const commands = [];
+  const keys = mode === "START" ? [capacityKey, readinessKey] : [];
+  const env = {
+    ...accessEnv,
+    UPSTASH_REDIS_REST_URL: "https://fake.upstash.io",
+    UPSTASH_REDIS_REST_TOKEN: "runtime-rest-token-123456",
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: signed.publicKey,
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: envelope.payload.database_id_sha256,
+    XIAOSHIMEI_VERCEL_PROJECT_ID: envelope.payload.vercel_project_id,
+    VERCEL_ENV: envelope.payload.vercel_environment,
+    XIAOSHIMEI_CANDIDATE_COMMIT: envelope.payload.candidate_commit,
+  };
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    commands.push(body);
+    const command = body[0];
+    let result;
+    if (command === "PING") result = "PONG";
+    else if (command === "TIME") result = [String(Math.floor(nowMs / 1000)), String((nowMs % 1000) * 1000)];
+    else if (command === "GET" && body[1] === readinessKey) result = JSON.stringify(envelope);
+    else if (command === "ZRANGEBYSCORE") result = [];
+    else if (command === "DBSIZE") result = keys.length;
+    else if (command === "SCAN") result = ["0", keys];
+    else if (command === "MEMORY" && body[1] === "USAGE") result = 1_000;
+    else if (command === "HGETALL" && body[1] === capacityKey) result = [
+      "schema", "xiaoshimei.image-ledger-capacity.v1",
+      "capacity_generation", envelope.payload.capacity_generation,
+      "attestation_generation", envelope.payload.attestation_generation,
+      "capacity_limit_bytes", String(envelope.payload.capacity_limit_bytes),
+      "headroom_bytes", String(envelope.payload.headroom_bytes),
+      "worst_case_run_bytes", String(envelope.payload.worst_case_run_bytes),
+      "reserved_bytes", "0",
+      "live_reservations", "0",
+      "unfinalized_inventory", "0",
+    ];
+    else if (command === "HGETALL" && body[1].endsWith(`:run:${runId}:meta`)) result = runRecord || [
+      "app_scope", appScope,
+      "capacity_generation", envelope.payload.capacity_generation,
+      "capacity_reservation_bytes", String(envelope.payload.worst_case_run_bytes),
+      "capacity_released", "0",
+    ];
+    else if (command === "EVAL" && String(body[1]).includes("capacity_generation")) result = ["MATERIALIZING", "", "0", String(nowMs + 7 * 24 * 60 * 60 * 1000)];
+    else throw new Error(`UNEXPECTED_RUNTIME_COMMAND:${body.join(":")}`);
+    return { ok: true, json: async () => ({ result }) };
+  };
+  return { env, appScope, runId, commands, fetchImpl, envelope, signed, readinessKey, capacityKey };
+}
+
+function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const databaseId = "db-xiaoshimei-native-test";
+  const state = {
+    nowMs,
+    database: {
+      database_id: databaseId,
+      state: "active",
+      modifying: "false",
+      tls: true,
+      eviction: false,
+      db_eviction: false,
+      auto_upgrade: false,
+      max_data_size: 100_000_000,
+    },
+    stats: { storage_threshold_bytes: 100_000_000, current_storage_bytes: 1_000_000 },
+    audits: [
+      { id: "audit-too-old", timestamp: nowMs - 9 * 24 * 60 * 60 * 1000, action: "create", resource_id: databaseId },
+      { id: "audit-current", timestamp: nowMs - 60_000, action: "read", resource_id: databaseId },
+    ],
+    readiness: null,
+    capacity: {},
+    calibration: new Map(),
+    calibrationUsage: 1_400_000,
+    commands: [],
+  };
+  const env = {
+    UPSTASH_DATABASE_ID: databaseId,
+    UPSTASH_REDIS_REST_URL: "https://native-test.upstash.io",
+    UPSTASH_REDIS_REST_TOKEN: "native-runtime-rest-token-123456",
+    UPSTASH_DEVELOPER_EMAIL: "owner@example.test",
+    UPSTASH_DEVELOPER_API_KEY: "developer-api-key-test",
+    XIAOSHIMEI_APP_SCOPE: D36_APP_SCOPE,
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_xiaoshimei_test",
+    VERCEL_ENV: "preview",
+    XIAOSHIMEI_CANDIDATE_COMMIT: "2".repeat(40),
+    XIAOSHIMEI_WORST_CASE_RUN_BYTES: "1000000",
+    XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY: privateKey.export({ format: "pem", type: "pkcs8" }),
+  };
+  const hashEntries = (record) => Object.entries(record).flatMap(([key, value]) => [key, String(value)]);
+  const fetchImpl = async (url, options = {}) => {
+    const parsed = new URL(url);
+    if (parsed.origin === "https://api.upstash.com") {
+      if (parsed.pathname.includes("/redis/database/")) return { ok: true, json: async () => structuredClone(state.database) };
+      if (parsed.pathname.includes("/redis/stats/")) return { ok: true, json: async () => structuredClone(state.stats) };
+      if (parsed.pathname.endsWith("/auditlogs")) return { ok: true, json: async () => structuredClone(state.audits) };
+      throw new Error(`UNEXPECTED_DEVELOPER_API:${parsed.pathname}`);
+    }
+    const body = JSON.parse(options.body);
+    state.commands.push(body);
+    let result;
+    if (body[0] === "TIME") result = [String(Math.floor(state.nowMs / 1000)), String((state.nowMs % 1000) * 1000)];
+    else if (body[0] === "GET") {
+      if (body[1].endsWith(":readiness")) result = state.readiness;
+      else result = state.calibration.get(body[1]) ?? null;
+    } else if (body[0] === "SET") {
+      state.calibration.set(body[1], body[2]);
+      result = "OK";
+    } else if (body[0] === "MEMORY" && body[1] === "USAGE") result = state.calibrationUsage;
+    else if (body[0] === "DEL") {
+      state.calibration.delete(body[1]);
+      result = 1;
+    } else if (body[0] === "EXISTS") result = state.calibration.has(body[1]) ? 1 : 0;
+    else if (body[0] === "HGETALL") result = hashEntries(state.capacity);
+    else if (body[0] === "EVAL" && String(body[1]).includes("CAPACITY_ROTATION_BLOCKED")) {
+      const nextGeneration = body[6];
+      const previousGeneration = String(state.capacity.capacity_generation || "");
+      if (previousGeneration && previousGeneration !== nextGeneration
+        && ["reserved_bytes", "live_reservations", "unfinalized_inventory"].some((key) => Number(state.capacity[key] || 0) !== 0)) {
+        result = ["CAPACITY_ROTATION_BLOCKED"];
+      } else {
+        const preserve = previousGeneration === nextGeneration;
+        state.capacity = {
+          schema: body[5],
+          capacity_generation: nextGeneration,
+          attestation_generation: body[7],
+          capacity_limit_bytes: body[8],
+          headroom_bytes: body[9],
+          worst_case_run_bytes: body[10],
+          reserved_bytes: preserve ? state.capacity.reserved_bytes || 0 : 0,
+          live_reservations: preserve ? state.capacity.live_reservations || 0 : 0,
+          unfinalized_inventory: preserve ? state.capacity.unfinalized_inventory || 0 : 0,
+        };
+        state.readiness = body[11];
+        result = ["INSTALLED", String(state.capacity.reserved_bytes), String(state.capacity.live_reservations), String(state.capacity.unfinalized_inventory)];
+      }
+    } else throw new Error(`UNEXPECTED_ATTESTOR_COMMAND:${body.join(":")}`);
+    return { ok: true, json: async () => ({ result }) };
+  };
+  return { env, state, fetchImpl, privateKey };
+}
+
+test("D36 default env factory verifies the signed Redis sentinel and performs START-only full inventory and capacity readback", async () => {
+  const fixture = runtimeLedgerFixture({ mode: "START" });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  const readiness = await ledger.assertProductionReady({ mode: "START", appScopeId: fixture.appScope, runId: fixture.runId });
+  assert.equal(readiness.runtime_attested, true);
+  assert.equal(readiness.capacity_generation, fixture.envelope.payload.capacity_generation);
+  assert.equal(readiness.physicalBytes, 2_000);
+  assert.equal(fixture.commands.filter((body) => body[0] === "SCAN").length, 1);
+  assert.equal(fixture.commands.filter((body) => body[0] === "DBSIZE").length, 2);
+  assert.equal(fixture.commands.filter((body) => body[0] === "MEMORY" && body[1] === "USAGE").length, 2);
+});
+
+test("D36 runtime-attested START atomically rechecks both generations and reserves worst-case capacity in the claim Lua", async () => {
+  const fixture = runtimeLedgerFixture({ mode: "START" });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  const readiness = await ledger.assertProductionReady({ mode: "START", appScopeId: fixture.appScope, runId: fixture.runId });
+  const result = await ledger.claimStart({
+    runId: fixture.runId,
+    appScopeId: fixture.appScope,
+    bootstrapNonce: "a".repeat(64),
+    inputSha256: "b".repeat(64),
+    snapshot: { schema: "xiaoshimei.image-operation-snapshot.v1", draft_record_id: "draft-runtime-reserve" },
+    referenceManifest: [],
+    accessExpiresAtMs: 1_788_192_360_000,
+    readiness,
+  });
+  assert.equal(result.status, "MATERIALIZING");
+  const claim = fixture.commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("capacity_generation"));
+  assert.ok(claim);
+  assert.equal(claim[2], "4");
+  assert.equal(claim[3].endsWith(`:run:${fixture.runId}:meta`), true);
+  assert.equal(claim[4].endsWith(`:run:${fixture.runId}:inventory`), true);
+  assert.equal(claim[5], fixture.capacityKey);
+  assert.equal(claim[6].endsWith(":expiry"), true);
+  assert.equal(claim.includes(readiness.attestation_generation), true);
+  assert.equal(claim.includes(readiness.capacity_generation), true);
+  assert.equal(claim.includes(String(readiness.worst_case_run_bytes)), true);
+  assert.match(String(claim[1]), /HINCRBY[\s\S]*reserved_bytes[\s\S]*live_reservations[\s\S]*unfinalized_inventory/);
+  assert.match(String(claim[1]), /ZADD[\s\S]*recoverable_until/);
+});
+
+test("D36 STEP revalidates the current signed sentinel and stable capacity generation without a full database scan", async () => {
+  const fixture = runtimeLedgerFixture({ mode: "STEP" });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  const readiness = await ledger.assertProductionReady({ mode: "STEP", appScopeId: fixture.appScope, runId: fixture.runId });
+  assert.equal(readiness.runtime_attested, true);
+  assert.equal(readiness.mode, "STEP");
+  assert.equal(fixture.commands.some((body) => body[0] === "SCAN" || body[0] === "DBSIZE"), false);
+
+  const rotated = signedRuntimeAttestation({
+    appScope: fixture.appScope,
+    overrides: {
+      capacity_generation: fixture.envelope.payload.capacity_generation,
+      attestation_generation: "8".repeat(64),
+    },
+  });
+  const compatible = runtimeLedgerFixture({ attestation: rotated, mode: "STEP" });
+  const compatibleLedger = createUpstashImageLedgerFromEnv(compatible.env, { fetchImpl: compatible.fetchImpl });
+  const compatibleReadiness = await compatibleLedger.assertProductionReady({ mode: "STEP", appScopeId: compatible.appScope, runId: compatible.runId });
+  assert.equal(compatibleReadiness.capacity_generation, fixture.envelope.payload.capacity_generation);
+  assert.equal(compatibleReadiness.attestation_generation, "8".repeat(64));
+});
+
+test("D36 missing trust, bad signature, wrong binding, expiry and capacity-generation drift all fail before a START scan or Provider", async () => {
+  const cases = [
+    {
+      name: "missing public key",
+      fixture: () => {
+        const value = runtimeLedgerFixture();
+        delete value.env.XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY;
+        return value;
+      },
+    },
+    { name: "bad signature", fixture: () => runtimeLedgerFixture({ mutateEnvelope: (value) => { value.signature = Buffer.alloc(64, 7).toString("base64"); } }) },
+    {
+      name: "wrong candidate",
+      fixture: () => {
+        const value = runtimeLedgerFixture();
+        value.env.XIAOSHIMEI_CANDIDATE_COMMIT = "f".repeat(40);
+        return value;
+      },
+    },
+    {
+      name: "expired",
+      fixture: () => {
+        const nowMs = 1_788_192_000_000;
+        const access = inspectServerAccessConfig({
+          XIAOSHIMEI_ACCESS_CODE_SHA256: "a".repeat(64),
+          XIAOSHIMEI_SESSION_SECRET: "s".repeat(64),
+          XIAOSHIMEI_APP_ORIGIN: "https://xiaoshimei.example",
+        });
+        const attestation = signedRuntimeAttestation({ nowMs, appScope: access.appScope, overrides: { renew_at_ms: nowMs - 1, hard_expiry_ms: nowMs } });
+        return runtimeLedgerFixture({ attestation, nowMs });
+      },
+    },
+  ];
+  for (const { name, fixture: makeFixture } of cases) {
+    const fixture = makeFixture();
+    const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+    if (!ledger) {
+      assert.equal(name, "missing public key");
+      continue;
+    }
+    await assert.rejects(
+      () => ledger.assertProductionReady({ mode: "START", appScopeId: fixture.appScope, runId: fixture.runId }),
+      /IMAGE_LEDGER_(READINESS|ATTESTATION)/,
+      name,
+    );
+    assert.equal(fixture.commands.some((body) => body[0] === "SCAN"), false, `${name} must stop before full scan`);
+  }
+
+  const drift = runtimeLedgerFixture({ mode: "STEP", runRecord: [
+    "app_scope", inspectServerAccessConfig({ XIAOSHIMEI_ACCESS_CODE_SHA256: "a".repeat(64), XIAOSHIMEI_SESSION_SECRET: "s".repeat(64), XIAOSHIMEI_APP_ORIGIN: "https://xiaoshimei.example" }).appScope,
+    "capacity_generation", "f".repeat(64),
+    "capacity_reservation_bytes", "10000000",
+    "capacity_released", "0",
+  ] });
+  const driftLedger = createUpstashImageLedgerFromEnv(drift.env, { fetchImpl: drift.fetchImpl });
+  await assert.rejects(
+    () => driftLedger.assertProductionReady({ mode: "STEP", appScopeId: drift.appScope, runId: drift.runId }),
+    /IMAGE_LEDGER_CAPACITY_RESERVATION_INVALID/,
+  );
+  assert.equal(drift.commands.some((body) => body[0] === "SCAN"), false);
+});
+
+test("D36 attestor binds the retained audit slice, signs exact control facts, and renews without rotating same capacity identity", async () => {
+  const fixture = attestorFixture();
+  const first = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(first.audit_entry_count, 1, "audit entries older than the retained seven-day slice must not poison the current receipt");
+  const publicKey = createPublicKey({ key: Buffer.from(first.public_key_spki_base64, "base64"), format: "der", type: "spki" });
+  assert.equal(verify(null, Buffer.from(canonicalAttestationJson(first.envelope.payload)), publicKey, Buffer.from(first.envelope.signature, "base64")), true);
+  assert.equal(first.envelope.payload.database_modifying, false, "the control plane string value 'false' must not be coerced to true");
+  assert.equal(first.envelope.payload.audit_high_water.log_id, "audit-current");
+  assert.equal(fixture.state.commands.some((body) => body[0] === "EVAL" && String(body[1]).includes("CAPACITY_ROTATION_BLOCKED")), true);
+  const firstCapacityGeneration = first.envelope.payload.capacity_generation;
+  const firstAttestationGeneration = first.envelope.payload.attestation_generation;
+
+  fixture.state.nowMs += 24 * 60 * 60 * 1000;
+  const second = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(second.envelope.payload.capacity_generation, firstCapacityGeneration, "fresh random calibration bytes with the same measured result must not rotate live capacity identity");
+  assert.notEqual(second.envelope.payload.attestation_generation, firstAttestationGeneration);
+  assert.equal(fixture.state.capacity.reserved_bytes, 0);
+});
+
+test("D36 attestor refuses missing audit continuity and changed capacity while reservations remain", async () => {
+  const continuity = attestorFixture();
+  await buildAndInstallAttestation({ env: continuity.env, fetchImpl: continuity.fetchImpl });
+  continuity.state.nowMs += 60_000;
+  continuity.state.audits = [{ id: "different-audit", timestamp: continuity.state.nowMs - 1_000, action: "read", resource_id: continuity.state.database.database_id }];
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: continuity.env, fetchImpl: continuity.fetchImpl }),
+    /ATTESTATION_AUDIT_CONTINUITY_UNKNOWN/,
+  );
+
+  const rotation = attestorFixture();
+  await buildAndInstallAttestation({ env: rotation.env, fetchImpl: rotation.fetchImpl });
+  rotation.state.capacity.reserved_bytes = 1_400_000;
+  rotation.state.capacity.live_reservations = 1;
+  rotation.state.capacity.unfinalized_inventory = 1;
+  rotation.state.calibrationUsage += 1;
+  rotation.state.nowMs += 60_000;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: rotation.env, fetchImpl: rotation.fetchImpl }),
+    /ATTESTATION_CAPACITY_ROTATION_BLOCKED/,
+  );
+});
+
 test("D36 real adapter maps one app_scope+bootstrap_nonce to one physical run root even when the input hash conflicts", async () => {
   const transact = d36Transaction();
   const nonce = "4".repeat(64);
@@ -631,7 +1004,7 @@ test("D36 real adapter maps one app_scope+bootstrap_nonce to one physical run ro
   assert.equal(claims[0][2], "2", "claimStart must atomically address meta plus inventory");
   assert.equal(claims[0][3], claims[1][3]);
   assert.equal(claims[0][4], claims[1][4]);
-  assert.match(claims[0][3], /^xiaoshimei:image-d36:\{images-[0-9TZ-]+-[0-9a-f]{8}\}:meta$/);
+  assert.match(claims[0][3], /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:run:images-[0-9TZ-]+-[0-9a-f]{8}:meta$/);
   assert.equal(claims[0][4], claims[0][3].replace(/:meta$/, ":inventory"));
   assert.equal(upstreamCalls, 0);
 });
@@ -1050,7 +1423,7 @@ test("D36 real adapter atomically inventories every meta, asset, and step physic
   }
   assert.match(String(asset[1]), /redis\.call\(['"]SET['"], KEYS\[3\]/);
   assert.match(String(step[1]), /redis\.call\(['"]HSET['"], KEYS\[3\]/);
-  assert.match(String(step[1]), /PEXPIREAT[\s\S]*KEYS\[3\][\s\S]*recoverable_until/);
+  assert.match(String(step[1]), /physical_expire_at[\s\S]*PEXPIREAT[\s\S]*KEYS\[3\][\s\S]*physical_expire_at/);
   assert.equal(asset[3].replace(/:meta$/, ":inventory"), asset[4]);
   assert.equal(step[3].replace(/:meta$/, ":inventory"), step[4]);
 });
@@ -1208,8 +1581,8 @@ test("D36 real reserve uses Redis TIME and aligned run/inventory/step TTL gates 
   assert.match(lua, /required_remaining = tonumber\(ARGV\[5\]\) \+ tonumber\(ARGV\[6\]\)/);
   assert.match(lua, /PTTL', KEYS\[1\]/);
   assert.match(lua, /PTTL', KEYS\[2\]/);
-  assert.match(lua, /PEXPIREAT', KEYS\[3\], recoverable_until/);
-  assert.match(lua, /PEXPIREAT', KEYS\[2\], recoverable_until/);
+  assert.match(lua, /PEXPIREAT', KEYS\[3\], physical_expire_at/);
+  assert.match(lua, /PEXPIREAT', KEYS\[2\], physical_expire_at/);
   assert.equal(upstreamCalls, 0);
 });
 
@@ -1311,7 +1684,7 @@ test("D36 physical capacity releases only after exact DEL and absence readback",
   assertOrdered(released.events, ["ledger:cleanup:DEL", "ledger:cleanup:ABSENCE_READBACK", "ledger:cleanup:RELEASE_CAPACITY"]);
 });
 
-test("D36 Upstash cleanup adapter performs physical DEL and absence readback before reporting capacity released", async () => {
+test("D36 direct cleanup helper proves only physical absence and never claims global capacity release", async () => {
   const commands = [];
   const runId = "images-2026-09-01T00-00-00-000Z-deadbeef";
   const root = `xiaoshimei:image-d36:{${runId}}`;
@@ -1332,8 +1705,9 @@ test("D36 Upstash cleanup adapter performs physical DEL and absence readback bef
   });
   assert.equal(typeof imageLedger.cleanupRun, "function", "Upstash image ledger must expose cleanupRun");
   const result = await imageLedger.cleanupRun({ runId });
-  assert.equal(result.status, "ABSENT_READBACK");
-  assert.equal(result.released, true);
+  assert.equal(result.status, "PHYSICAL_ABSENT_READBACK");
+  assert.equal(result.physicalReleased, true);
+  assert.equal(result.released, false);
   assert.deepEqual(result.keys, keys);
 
   const flatCommands = commands.map((body) => body[0]);
@@ -1346,6 +1720,78 @@ test("D36 Upstash cleanup adapter performs physical DEL and absence readback bef
   const atomicProof = luaDel >= 0 && luaExists > luaDel;
   assert.equal(separateProof || atomicProof, true, "cleanup must prove DEL precedes physical absence readback");
   assert.equal(flatCommands.filter((command) => command === "EXISTS").length, keys.length);
+});
+
+test("D36 signed expiry finalizer waits through 7d-1ms, then releases capacity only after exact DEL and root absence", async () => {
+  const nowMs = 1_788_192_000_000;
+  for (const due of [false, true]) {
+    const accessEnv = {
+      XIAOSHIMEI_ACCESS_CODE_SHA256: "a".repeat(64),
+      XIAOSHIMEI_SESSION_SECRET: "s".repeat(64),
+      XIAOSHIMEI_APP_ORIGIN: "https://xiaoshimei.example",
+    };
+    const appScope = inspectServerAccessConfig(accessEnv).appScope;
+    const signed = signedRuntimeAttestation({ nowMs, appScope });
+    const tag = createHash("sha256").update(appScope).digest("hex").slice(0, 32);
+    const appRoot = `xiaoshimei:image-d36:{${tag}}`;
+    const runId = "images-2026-09-01T00-00-00-000Z-deadbeef";
+    const runRoot = `${appRoot}:run:${runId}`;
+    const meta = `${runRoot}:meta`;
+    const inventory = `${runRoot}:inventory`;
+    const asset = `${runRoot}:asset:${"a".repeat(64)}`;
+    const keys = [asset, inventory, meta].sort();
+    const expiry = `${appRoot}:expiry`;
+    const readiness = `${appRoot}:readiness`;
+    const capacity = `${appRoot}:capacity`;
+    const member = `${meta}|${signed.envelope.payload.capacity_generation}|${signed.envelope.payload.worst_case_run_bytes}`;
+    const commands = [];
+    let physicalPresent = true;
+    let capacityReleased = false;
+    const ledger = createUpstashImageLedgerFromEnv({
+      ...accessEnv,
+      UPSTASH_REDIS_REST_URL: "https://fake.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "runtime-rest-token-123456",
+      XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: signed.publicKey,
+      XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: signed.envelope.payload.database_id_sha256,
+      XIAOSHIMEI_VERCEL_PROJECT_ID: signed.envelope.payload.vercel_project_id,
+      VERCEL_ENV: signed.envelope.payload.vercel_environment,
+      XIAOSHIMEI_CANDIDATE_COMMIT: signed.envelope.payload.candidate_commit,
+    }, {
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        commands.push(body);
+        let result;
+        if (body[0] === "TIME") result = [String(Math.floor(nowMs / 1000)), String((nowMs % 1000) * 1000)];
+        else if (body[0] === "GET" && body[1] === readiness) result = JSON.stringify(signed.envelope);
+        else if (body[0] === "ZRANGEBYSCORE") result = due ? [member] : [];
+        else if (body[0] === "EXISTS") result = physicalPresent && keys.includes(body[1]) ? 1 : 0;
+        else if (body[0] === "SCAN") result = ["0", physicalPresent ? [...keys].reverse() : []];
+        else if (body[0] === "DEL") { physicalPresent = false; result = keys.length; }
+        else if (body[0] === "EVAL" && String(body[1]).includes("cleanup_from_status")) result = ["FROZEN", ...keys];
+        else if (body[0] === "EVAL" && String(body[1]).includes("live_reservations")) { capacityReleased = true; result = ["RELEASED"]; }
+        else throw new Error(`UNEXPECTED_FINALIZER_COMMAND:${body.join(":")}`);
+        return { ok: true, json: async () => ({ result }) };
+      },
+    });
+    const result = await ledger.finalizeExpiredRuns({ appScopeId: appScope });
+    if (!due) {
+      assert.deepEqual(result, []);
+      assert.equal(commands.some((body) => body[0] === "DEL"), false, "7d-1ms must retain every physical key");
+      assert.equal(capacityReleased, false);
+      continue;
+    }
+    assert.equal(result.length, 1);
+    assert.equal(result[0].released, true);
+    assert.equal(capacityReleased, true);
+    const sequence = commands.map((body) => body[0]);
+    const delAt = sequence.indexOf("DEL");
+    const releaseAt = commands.findIndex((body) => body[0] === "EVAL" && String(body[1]).includes("live_reservations"));
+    assert.equal(delAt >= 0 && releaseAt > delAt, true);
+    assert.equal(commands.slice(delAt + 1, releaseAt).some((body) => body[0] === "EXISTS"), true);
+    assert.equal(commands.slice(delAt + 1, releaseAt).some((body) => body[0] === "SCAN"), true);
+    assert.equal(commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("live_reservations"))[3], capacity);
+    assert.equal(commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("live_reservations"))[4], expiry);
+  }
 });
 
 test("D36 Upstash cleanup freezes only terminal runs and refuses missing or physically incomplete inventory without DEL", async () => {
