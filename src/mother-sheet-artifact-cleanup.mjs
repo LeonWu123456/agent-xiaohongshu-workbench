@@ -26,20 +26,34 @@ function whitePixel(data, width, channels, x, y) {
   if (channels > 3) data[index + 3] = 255;
 }
 
-function edgeConnectedPaperPixel(data, width, channels, x, y) {
+function paperColor(data, width, channels, x, y) {
   const index = (y * width + x) * channels;
-  if (channels > 3 && data[index + 3] < 250) return false;
+  if (channels > 3 && data[index + 3] < 250) return null;
   const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
   const lightness = (red + green + blue) / 3;
   const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
-  // Seedream often returns a softly graded warm paper even when the prompt asks
-  // for #FFFFFF. Connectivity keeps the operation on the outside paper; this
-  // broader traversal threshold lets the later feather reach the full gradient
-  // instead of cutting a jagged hard boundary through it.
-  return lightness >= 185 && chroma <= 45;
+  return { lightness, chroma };
 }
 
-function paperSubjectBoundaryDistances(visited, width, height, queue, radius = 3) {
+function paperSeedPixel(data, width, channels, x, y) {
+  const color = paperColor(data, width, channels, x, y);
+  return Boolean(color && color.lightness >= 215 && color.chroma <= 55);
+}
+
+function edgeConnectedPaperPixel(data, width, channels, x, y) {
+  const color = paperColor(data, width, channels, x, y);
+  // Start only from pale edge paper, then traverse a broader warm-watercolor
+  // range. Dark outlines and strongly coloured subject pixels remain barriers,
+  // while connected beige washes can no longer become unvisited islands.
+  return Boolean(color && color.lightness >= 168 && color.chroma <= 72);
+}
+
+function subjectOutlinePixel(data, width, channels, x, y) {
+  const color = paperColor(data, width, channels, x, y);
+  return Boolean(color && (color.lightness < 168 || color.chroma > 72));
+}
+
+function paperSubjectBoundaryDistances(data, visited, width, height, channels, queue, radius = 3) {
   const distances = new Uint8Array(visited.length);
   let head = 0; let tail = 0;
   const inside = (x, y) => x >= 0 && x < width && y >= 0 && y < height;
@@ -50,7 +64,7 @@ function paperSubjectBoundaryDistances(visited, width, height, queue, radius = 3
     for (let dy = -1; dy <= 1 && !touchesSubject; dy += 1) {
       for (let dx = -1; dx <= 1; dx += 1) {
         if ((!dx && !dy) || !inside(x + dx, y + dy)) continue;
-        if (!visited[(y + dy) * width + x + dx]) { touchesSubject = true; break; }
+        if (!visited[(y + dy) * width + x + dx] && subjectOutlinePixel(data, width, channels, x + dx, y + dy)) { touchesSubject = true; break; }
       }
     }
     if (!touchesSubject) continue;
@@ -78,7 +92,7 @@ function paperSubjectBoundaryDistances(visited, width, height, queue, radius = 3
 }
 
 function paperBoundaryStrength(distance) {
-  if (distance === 1) return .36;
+  if (distance === 1) return .44;
   if (distance === 2) return .72;
   if (distance === 3) return .94;
   return 1;
@@ -105,8 +119,15 @@ function normalizeEdgeConnectedPaper(data, width, height, channels) {
     queue[tail] = offset;
     tail += 1;
   };
-  for (let x = 0; x < width; x += 1) { enqueue(x, 0); enqueue(x, height - 1); }
-  for (let y = 1; y < height - 1; y += 1) { enqueue(0, y); enqueue(width - 1, y); }
+  const seed = (x, y) => {
+    const offset = y * width + x;
+    if (visited[offset] || !paperSeedPixel(data, width, channels, x, y)) return;
+    visited[offset] = 1;
+    queue[tail] = offset;
+    tail += 1;
+  };
+  for (let x = 0; x < width; x += 1) { seed(x, 0); seed(x, height - 1); }
+  for (let y = 1; y < height - 1; y += 1) { seed(0, y); seed(width - 1, y); }
   while (head < tail) {
     const offset = queue[head]; head += 1;
     const x = offset % width; const y = Math.floor(offset / width);
@@ -115,7 +136,7 @@ function normalizeEdgeConnectedPaper(data, width, height, channels) {
     if (y > 0) enqueue(x, y - 1);
     if (y + 1 < height) enqueue(x, y + 1);
   }
-  const boundaryDistances = paperSubjectBoundaryDistances(visited, width, height, queue, 3);
+  const boundaryDistances = paperSubjectBoundaryDistances(data, visited, width, height, channels, queue, 3);
   let changed = 0;
   for (let offset = 0; offset < visited.length; offset += 1) {
     if (!visited[offset]) continue;

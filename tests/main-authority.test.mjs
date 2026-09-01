@@ -59,9 +59,10 @@ const authRuntimeSource = between(
 );
 const identitySource = namedFunctionSource(mainSource, "pageSemanticIdentity");
 const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockReason").replace(/^export\s+/, "");
+const imageLaneLockSource = namedFunctionSource(mainSource, "imageLaneLockReason").replace(/^export\s+/, "");
 const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
 const libraryProjectionSource = namedFunctionSource(mainSource, "currentLibraryProjection").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageRecoveryModeSource}\n${libraryProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageRecoveryClickMode, currentLibraryProjection };`).toString("base64")}`);
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${libraryProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentLibraryProjection };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -72,6 +73,7 @@ const {
   postCasWorkspaceSettlementPlan,
   pageSemanticIdentity,
   authoringInputLockReason,
+  imageLaneLockReason,
   imageRecoveryClickMode,
   currentLibraryProjection,
 } = runtimeModule;
@@ -286,12 +288,13 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null }), null);
   assert.equal(authoringInputLockReason({ workspaceReady: false, workspaceReadOnly: false, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: true, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
-  assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
-  assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-A", imageOperationDraftId: "draft-A" }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
-  assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-B", imageOperationDraftId: "draft-A" }), null);
+  assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), null);
+  assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
+  assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-A", imageOperationDraftId: "draft-A" }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
+  assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-B", imageOperationDraftId: "draft-A" }), null);
 
   const state = { topic: "editable", title: "editable", pageCount: 3, productionMode: "smart", refs: ["ref-a"] };
-  const reason = authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } });
+  const reason = imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } });
   Object.assign(state, { topic: "mutated", title: "mutated" });
   if (!reason) Object.assign(state, { pageCount: 8, productionMode: "free", refs: [] });
   assert.deepEqual(state, { topic: "mutated", title: "mutated", pageCount: 3, productionMode: "smart", refs: ["ref-a"] });
@@ -319,12 +322,16 @@ test("pending image authority freezes only the asset lane while text layout save
     assert.match(namedFunctionSource(mainSource, name), /imageLaneIsLocked\s*\(\s*\)/, `${name} must fail closed before changing asset input`);
   }
   assert.doesNotMatch(namedFunctionSource(mainSource, "authoringInputIsLocked"), /imageOperationDraftId|pending_image_operation/);
+  assert.doesNotMatch(namedFunctionSource(mainSource, "workspaceMutationIsLocked"), /imageOperationDraftId|pending_image_operation/);
   assert.match(namedFunctionSource(mainSource, "imageLaneIsLocked"), /imageOperationDraftId:\s*draftMutationLockRef\.current\?\.draft_id/);
   assert.match(mainSource, /const textLaneLocked = authoringInputLocked \|\| generationState === "TEXT_GENERATING";/);
   assert.match(mainSource, /const draftEditingLocked = workspaceReadOnly \|\| workspaceTransitioning;/);
   assert.match(namedFunctionSource(mainSource, "draftMutationIsLocked"), /return workspaceMutationIsLocked\(\)/);
   assert.doesNotMatch(mainSource, /liveDraft\?\.pending_image_operation|latestDraft\?\.pending_image_operation/, "pending assets must not suppress semantic autosave");
   assert.match(namedFunctionSource(mainSource, "saveDraft"), /^function saveDraft\(\) \{\s*if \(draftMutationIsLocked\(\)\) return;/);
+  assert.match(namedFunctionSource(mainSource, "copyPublicationCopy"), /^function copyPublicationCopy\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
+  assert.match(namedFunctionSource(mainSource, "downloadZip"), /^function downloadZip\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\) \|\| workspaceTransitionLock\.isLocked\(\)\) return;/);
+  assert.match(mainSource, /当前 .* 页成品与已确认文字一致，可以直接编辑、保存、复制和导出；另一条配图恢复只锁图片参数与新图片生成/);
 
   const creatorSource = namedFunctionSource(mainSource, "renderCreatorWorkflow");
   for (const handler of ["changeContentRoute", "confirmTextDraft", "changeProductionModeChoice", "changeImageCountModeChoice", "changeCustomImageCountValue", "changeActionReferenceNote"]) {
@@ -411,9 +418,9 @@ test("a visible-canvas lineage split has one explicit zero-provider repair that 
   assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
   assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
   assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
-  assert.match(mainSource, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
-  assert.match(mainSource, /data-last-image-response-status=\{imageOperationReadback\?\.response_status \|\| ""\}/);
-  assert.match(mainSource, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
+  assert.doesNotMatch(mainSource, /data-last-image-request-modes=/);
+  assert.doesNotMatch(mainSource, /data-last-image-response-status=/);
+  assert.doesNotMatch(mainSource, /data-last-image-upstream-calls=/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {

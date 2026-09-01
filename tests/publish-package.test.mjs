@@ -27,6 +27,59 @@ test("ZIP contains ordered PNGs, UTF-8 copy, reloadable content and matching man
   const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
   assert.equal(manifest.page_count, 2);
   assert.deepEqual(manifest.files, Object.keys(zip.files));
+  assert.equal(manifest.content_media_contract, "archive-relative-v1");
+  assert.deepEqual(manifest.content_media_files, []);
+});
+
+test("ZIP materializes runtime media as deduplicated package files and rewrites content refs", async () => {
+  const content = generateContentPackage({ topic: "自包含媒体" });
+  const firstRef = "blob:http://127.0.0.1:4184/first";
+  const duplicateRef = "blob:http://127.0.0.1:4184/duplicate";
+  const dataRef = "data:image/png;base64,fixture";
+  content.pages[0].image_style.src = firstRef;
+  content.pages[0].image_style.original_src = duplicateRef;
+  content.pages[1].image_style.src = dataRef;
+  const firstBytes = pngHeader(31, 41);
+  const secondBytes = pngHeader(51, 61);
+  const resolved = [];
+  const blob = await buildPublishZip(content, [pngHeader(1080, 1440), pngHeader(1080, 1440)], {
+    resolveMedia: async (ref) => {
+      resolved.push(ref);
+      return ref === dataRef ? secondBytes : firstBytes;
+    },
+  });
+  const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+  const portableText = await zip.file("content.json").async("string");
+  assert.equal(portableText.includes("blob:"), false);
+  assert.equal(portableText.includes("data:image/"), false);
+  const portable = JSON.parse(portableText);
+  assert.match(portable.pages[0].image_style.src, /^\.\/media\/[0-9a-f]{64}\.png$/);
+  assert.equal(portable.pages[0].image_style.original_src, portable.pages[0].image_style.src);
+  assert.match(portable.pages[1].image_style.src, /^\.\/media\/[0-9a-f]{64}\.png$/);
+  assert.notEqual(portable.pages[1].image_style.src, portable.pages[0].image_style.src);
+  assert.deepEqual(resolved.sort(), [dataRef, duplicateRef, firstRef].sort());
+  const referencedFiles = new Set([
+    portable.pages[0].image_style.src.slice(2),
+    portable.pages[0].image_style.original_src.slice(2),
+    portable.pages[1].image_style.src.slice(2),
+  ]);
+  assert.equal(referencedFiles.size, 2);
+  for (const name of referencedFiles) assert.ok(zip.file(name), `${name} must exist in the archive`);
+  const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
+  assert.equal(manifest.content_media_contract, "archive-relative-v1");
+  assert.deepEqual(manifest.content_media_files, [...referencedFiles].sort());
+  assert.deepEqual(manifest.files, Object.keys(zip.files));
+});
+
+test("ZIP refuses to emit content with an unreadable runtime media ref", async () => {
+  const content = generateContentPackage({ topic: "临时引用拒绝" });
+  content.pages[0].image_style.src = "blob:http://127.0.0.1:4184/missing";
+  await assert.rejects(
+    () => buildPublishZip(content, [pngHeader(1080, 1440), pngHeader(1080, 1440)], {
+      resolveMedia: async () => { throw new Error("gone"); },
+    }),
+    /PACKAGE_MEDIA_RESOLVE_FAILED: gone/,
+  );
 });
 
 test("ZIP creation rejects a partial render", async () => {

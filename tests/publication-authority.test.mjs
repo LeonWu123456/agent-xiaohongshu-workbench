@@ -70,6 +70,13 @@ test("an exact current canvas remains publishable while a separate image recover
   assert.equal(result.code, "CONFIRMED_TEXT_AUTHORITY_WITH_PENDING_RECOVERY");
   assert.equal(result.recovery_pending, true);
   assert.equal(result.resolved_assembled_draft_id, draftId);
+  const settled = derivePublicationAuthority({
+    ...pair,
+    activeDraftId,
+    pendingImageOperation: null,
+  });
+  assert.equal(settled.allowed, true);
+  assert.equal(result.token, settled.token, "asset-lane recovery state must not invalidate copy or a prepared export");
   assert.equal(derivePublicationAuthority({
     ...pair,
     content: { ...pair.content, visible_pages: 0 },

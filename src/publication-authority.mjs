@@ -8,7 +8,7 @@ function sameTags(left, right) {
     && left.every((value, index) => value === right[index]);
 }
 
-function authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId, pendingImageOperation) {
+function authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId) {
   return JSON.stringify([
     content?.id || null,
     content?.selectedTitle || "",
@@ -28,9 +28,6 @@ function authorityToken(content, textDraft, textConfirmed, assembledDraftId, act
     Boolean(textConfirmed),
     assembledDraftId || null,
     activeDraftId || null,
-    pendingImageOperation?.operation_nonce || null,
-    pendingImageOperation?.run_id || null,
-    pendingImageOperation?.protocol_state || null,
     Array.isArray(content?.pages) ? content.pages.length : 0,
   ]);
 }
@@ -44,7 +41,7 @@ export function derivePublicationAuthority({
   activeDraftId = null,
   pendingImageOperation = null,
 }) {
-  const token = authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId, pendingImageOperation);
+  const token = authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId);
   if (!content || typeof content !== "object") return { allowed: false, code: "CONTENT_MISSING", token };
 
   if (!textDraft) {
@@ -88,7 +85,7 @@ export function derivePublicationAuthority({
     mode: "TEXT_DRAFT_PROJECTION",
     recovery_pending: currentCanvasSurvivesPendingRecovery,
     resolved_assembled_draft_id: draftId,
-    token,
+    token: authorityToken(content, textDraft, textConfirmed, draftId, activeDraftId),
   };
 }
 

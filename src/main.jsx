@@ -642,8 +642,14 @@ function pageSemanticIdentity(page, pageIndex) {
   ]);
 }
 
-export function authoringInputLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, activeDraftId, imageOperationDraftId } = {}) {
+export function authoringInputLockReason({ workspaceReady, workspaceReadOnly } = {}) {
   if (!workspaceReady || workspaceReadOnly) return "WORKSPACE_MEDIA_READ_ONLY";
+  return null;
+}
+
+export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, activeDraftId, imageOperationDraftId } = {}) {
+  const workspaceReason = authoringInputLockReason({ workspaceReady, workspaceReadOnly });
+  if (workspaceReason) return workspaceReason;
   if (pendingImageOperation || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
   return null;
 }
@@ -1199,7 +1205,7 @@ function App() {
     const durablePending = workspaceReadyRef.current
       ? activeDraftRecordV3(workspaceEnvelopeRef.current)?.pending_image_operation
       : null;
-    const reason = authoringInputLockReason({
+    const reason = imageLaneLockReason({
       workspaceReady: workspaceReadyRef.current,
       workspaceReadOnly: workspaceWriteBlockedRef.current,
       pendingImageOperation: durablePending,
@@ -3313,7 +3319,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images">
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
@@ -3471,7 +3477,7 @@ function App() {
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>
-                  <small>{publicationAuthority.recovery_pending ? `当前 ${visiblePages.length} 页成品与已确认文字一致，可以直接发布；另一条配图恢复仍保留，编辑与保存暂时冻结。` : "标题、正文和标签均来自“文字草稿”里已确认的同一份内容；需要改字就回到上方修改并重新确认。"}</small>
+                  <small>{publicationAuthority.recovery_pending ? `当前 ${visiblePages.length} 页成品与已确认文字一致，可以直接编辑、保存、复制和导出；另一条配图恢复只锁图片参数与新图片生成。` : "标题、正文和标签均来自“文字草稿”里已确认的同一份内容；需要改字就回到上方修改并重新确认。"}</small>
                 </div> : <>
                   <label><span>发布标题</span><input value={content.selectedTitle} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => { const nextTitle = event.target.value; return { ...invalidateVisualReview(current), selectedTitle: nextTitle, titles: current.titles.map((title) => title === current.selectedTitle ? nextTitle : title), pages: current.pages.map((page, index) => index === 0 ? { ...page, title: nextTitle } : page) }; }, { group: "publish-title" })} /></label>
                   <label><span>发布正文</span><textarea rows="8" value={content.body} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>

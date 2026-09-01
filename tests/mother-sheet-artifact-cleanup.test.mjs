@@ -119,8 +119,9 @@ test("connected paper core becomes uniform white while only a three-pixel subjec
   const set = (x, y, rgb) => data.set([...rgb, 255], (y * width + x) * channels);
   for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
     const progress = x / (width - 1);
-    set(x, y, [244 - Math.round(progress * 25), 237 - Math.round(progress * 22), 224 - Math.round(progress * 18)]);
+    set(x, y, [246 - Math.round(progress * 48), 238 - Math.round(progress * 60), 226 - Math.round(progress * 72)]);
   }
+  for (let y = 5; y <= 13; y += 1) for (let x = 68; x <= 90; x += 1) set(x, y, [207, 177, 145]);
   for (let x = 34; x <= 61; x += 1) { set(x, 20, [49, 43, 38]); set(x, 55, [49, 43, 38]); }
   for (let y = 20; y <= 55; y += 1) { set(34, y, [49, 43, 38]); set(61, y, [49, 43, 38]); }
   for (let y = 21; y < 55; y += 1) for (let x = 35; x < 61; x += 1) set(x, y, [226, 190, 158]);
