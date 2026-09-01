@@ -39,36 +39,49 @@ function edgeConnectedPaperPixel(data, width, channels, x, y) {
   return lightness >= 185 && chroma <= 45;
 }
 
-function paperWhiteningStrength(data, width, channels, x, y) {
-  const index = (y * width + x) * channels;
-  const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
-  const lightness = (red + green + blue) / 3;
-  const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
-  const lightProgress = Math.max(0, Math.min(1, (lightness - 185) / 35));
-  const smoothLight = lightProgress * lightProgress * (3 - 2 * lightProgress);
-  const chromaWeight = Math.max(0, Math.min(1, (48 - chroma) / 18));
-  return smoothLight * chromaWeight;
+function paperSubjectBoundaryDistances(visited, width, height, queue, radius = 3) {
+  const distances = new Uint8Array(visited.length);
+  let head = 0; let tail = 0;
+  const inside = (x, y) => x >= 0 && x < width && y >= 0 && y < height;
+  for (let offset = 0; offset < visited.length; offset += 1) {
+    if (!visited[offset]) continue;
+    const x = offset % width; const y = Math.floor(offset / width);
+    let touchesSubject = false;
+    for (let dy = -1; dy <= 1 && !touchesSubject; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if ((!dx && !dy) || !inside(x + dx, y + dy)) continue;
+        if (!visited[(y + dy) * width + x + dx]) { touchesSubject = true; break; }
+      }
+    }
+    if (!touchesSubject) continue;
+    distances[offset] = 1;
+    queue[tail] = offset;
+    tail += 1;
+  }
+  while (head < tail) {
+    const offset = queue[head]; head += 1;
+    const distance = distances[offset];
+    if (distance >= radius) continue;
+    const x = offset % width; const y = Math.floor(offset / width);
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if ((!dx && !dy) || !inside(x + dx, y + dy)) continue;
+        const next = (y + dy) * width + x + dx;
+        if (!visited[next] || distances[next]) continue;
+        distances[next] = distance + 1;
+        queue[tail] = next;
+        tail += 1;
+      }
+    }
+  }
+  return distances;
 }
 
-function blurPaperMask(mask, width, height, radius) {
-  if (radius < 1) return mask;
-  const horizontal = new Uint8Array(mask.length);
-  const output = new Uint8Array(mask.length);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      let sum = 0;
-      for (let delta = -radius; delta <= radius; delta += 1) sum += mask[y * width + Math.max(0, Math.min(width - 1, x + delta))];
-      horizontal[y * width + x] = Math.round(sum / (radius * 2 + 1));
-    }
-  }
-  for (let x = 0; x < width; x += 1) {
-    for (let y = 0; y < height; y += 1) {
-      let sum = 0;
-      for (let delta = -radius; delta <= radius; delta += 1) sum += horizontal[Math.max(0, Math.min(height - 1, y + delta)) * width + x];
-      output[y * width + x] = Math.round(sum / (radius * 2 + 1));
-    }
-  }
-  return output;
+function paperBoundaryStrength(distance) {
+  if (distance === 1) return .36;
+  if (distance === 2) return .72;
+  if (distance === 3) return .94;
+  return 1;
 }
 
 function applyPaperStrength(data, channels, offset, strength) {
@@ -81,7 +94,7 @@ function applyPaperStrength(data, channels, offset, strength) {
   return changed;
 }
 
-function normalizeEdgeConnectedPaper(data, width, height, channels, { enforceWhitePaper = false } = {}) {
+function normalizeEdgeConnectedPaper(data, width, height, channels) {
   const visited = new Uint8Array(width * height);
   const queue = new Int32Array(width * height);
   let head = 0; let tail = 0;
@@ -102,23 +115,15 @@ function normalizeEdgeConnectedPaper(data, width, height, channels, { enforceWhi
     if (y > 0) enqueue(x, y - 1);
     if (y + 1 < height) enqueue(x, y + 1);
   }
-  const mask = new Uint8Array(width * height);
-  for (let offset = 0; offset < visited.length; offset += 1) {
-    if (!visited[offset]) continue;
-    const x = offset % width; const y = Math.floor(offset / width);
-    mask[offset] = Math.round(paperWhiteningStrength(data, width, channels, x, y) * 255);
-  }
-  const radius = Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 120)));
-  const softened = blurPaperMask(mask, width, height, radius);
+  const boundaryDistances = paperSubjectBoundaryDistances(visited, width, height, queue, 3);
   let changed = 0;
   for (let offset = 0; offset < visited.length; offset += 1) {
-    if (!visited[offset] || !softened[offset]) continue;
-    // Illustration paper is a delivery surface, not ambient scenery. When the
-    // caller knows this tile must sit directly on a white page, make every
-    // edge-connected warm-paper pixel visually white. Connectivity remains
-    // the subject boundary, so enclosed clothes, skin and props are preserved.
-    const strength = enforceWhitePaper ? Math.max(.96, softened[offset] / 255) : softened[offset] / 255;
-    if (applyPaperStrength(data, channels, offset, strength)) changed += 1;
+    if (!visited[offset]) continue;
+    // Flood-fill owns paper membership. Every connected interior pixel becomes
+    // exact white; only the three pixels nearest a non-paper subject use a
+    // fixed-distance feather. Original paper lightness never weakens the core
+    // cleanup, while dark outlines keep enclosed skin, clothes and props out.
+    if (applyPaperStrength(data, channels, offset, paperBoundaryStrength(boundaryDistances[offset]))) changed += 1;
   }
   return changed;
 }
@@ -192,7 +197,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, paperOnly = f
     }
     actions.push({ type: "VERTICAL_GRID_EDGE_BAND_REMOVED", edge, coordinate: rule.coordinate, ratio: rule.ratio, from, to });
   });
-  const normalizedPaperPixels = normalizeEdgeConnectedPaper(data, width, height, channels, { enforceWhitePaper: paperOnly || enforceWhitePaper });
+  const normalizedPaperPixels = normalizeEdgeConnectedPaper(data, width, height, channels);
   if (normalizedPaperPixels > 0) actions.push({ type: "EDGE_CONNECTED_PAPER_NORMALIZED", pixels: normalizedPaperPixels });
   return { data, width, height, channels, actions };
 }

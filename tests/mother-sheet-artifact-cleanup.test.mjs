@@ -112,3 +112,35 @@ test("automatic 3:4 illustration cleanup enforces white paper while preserving a
   assert.ok(outside.every((value) => value >= 252));
   assert.deepEqual([...result.data.slice((28 * width + 24) * channels, (28 * width + 24) * channels + 3)], [226, 196, 164]);
 });
+
+test("connected paper core becomes uniform white while only a three-pixel subject boundary feathers", () => {
+  const width = 96; const height = 72; const channels = 4;
+  const data = new Uint8Array(width * height * channels);
+  const set = (x, y, rgb) => data.set([...rgb, 255], (y * width + x) * channels);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const progress = x / (width - 1);
+    set(x, y, [244 - Math.round(progress * 25), 237 - Math.round(progress * 22), 224 - Math.round(progress * 18)]);
+  }
+  for (let x = 34; x <= 61; x += 1) { set(x, 20, [49, 43, 38]); set(x, 55, [49, 43, 38]); }
+  for (let y = 20; y <= 55; y += 1) { set(34, y, [49, 43, 38]); set(61, y, [49, 43, 38]); }
+  for (let y = 21; y < 55; y += 1) for (let x = 35; x < 61; x += 1) set(x, y, [226, 190, 158]);
+  const sourceSubject = [...data.slice((36 * width + 48) * channels, (36 * width + 48) * channels + 3)];
+
+  const result = cleanupGeneratedGridArtifacts({ data, width, height, channels }, { paperOnly: true });
+  const core = [];
+  for (let y = 4; y <= 12; y += 1) for (let x = 4; x < width - 4; x += 1) {
+    const offset = (y * width + x) * channels;
+    core.push(result.data[offset], result.data[offset + 1], result.data[offset + 2]);
+  }
+  assert.ok(core.every((value) => value >= 252), `paper core retained a ${Math.min(...core)} channel`);
+  assert.ok(Math.max(...core) - Math.min(...core) <= 3, "broad warm gradient remained visible in the paper core");
+  assert.deepEqual([...result.data.slice((36 * width + 48) * channels, (36 * width + 48) * channels + 3)], sourceSubject);
+  assert.deepEqual([...result.data.slice((20 * width + 48) * channels, (20 * width + 48) * channels + 3)], [49, 43, 38]);
+
+  const featherLightness = [16, 17, 18, 19].map((y) => {
+    const offset = (y * width + 48) * channels;
+    return (result.data[offset] + result.data[offset + 1] + result.data[offset + 2]) / 3;
+  });
+  const featherSteps = featherLightness.slice(1).map((value, index) => Math.abs(value - featherLightness[index]));
+  assert.ok(Math.max(...featherSteps) <= 14, `paper feather introduced a ${Math.max(...featherSteps)}-level hard step`);
+});
