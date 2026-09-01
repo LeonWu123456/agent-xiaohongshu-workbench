@@ -1508,6 +1508,28 @@ export function libraryContentsV3(value) {
   return libraryContentsFromNormalized(parseWorkspaceEnvelopeV3(value));
 }
 
+export function reconcilePersistentLibraryView({
+  persistentLibrary = [],
+  currentLibrary = [],
+  activeDraftId = null,
+  currentContent = null,
+} = {}) {
+  return persistentLibrary.map((item) => {
+    const isActiveSavedRecord = item.draft_record_id === activeDraftId
+      && currentContent?.saved_at === item.saved_at;
+    if (isActiveSavedRecord) {
+      return {
+        ...currentContent,
+        draft_record_id: item.draft_record_id,
+        id: item.id,
+        saved_at: item.saved_at,
+      };
+    }
+    const cached = currentLibrary.find((entry) => entry.draft_record_id === item.draft_record_id);
+    return cached?.saved_at === item.saved_at ? cached : item;
+  });
+}
+
 function v3WorkspaceFromNormalized({
   workspace,
   activeDraftId = workspace.active_draft_id,

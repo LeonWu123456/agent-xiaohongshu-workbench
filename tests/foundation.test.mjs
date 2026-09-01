@@ -4,7 +4,7 @@ import { generateContentPackage, importLocalEditableDraft, inspectImportContract
 import { createLocalHttpProvider } from "../src/provider-client.mjs";
 import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidateRequest, buildTextDraftRequest, canonicalImageGenerationInputPreimage, computeImageGenerationInputSha256, parseGenerationRequest, parseImageGenerationRequest, parseImageGenerationResponse, parsePageCandidateRequest, parsePageCandidateResponse, parseTextDraftRequest, parseTextDraftResponse } from "../src/provider-contract.mjs";
 import { createProfileV2 } from "../src/profile-v2.mjs";
-import { buildWorkspaceBackup, parseWorkspaceBackup, persistWorkspaceState, prepareFreshDraftWorkspace } from "../src/workspace-state.mjs";
+import { buildWorkspaceBackup, parseWorkspaceBackup, persistWorkspaceState, prepareFreshDraftWorkspace, reconcilePersistentLibraryView } from "../src/workspace-state.mjs";
 
 const IMAGE_NONCE = "a".repeat(64);
 const IMAGE_INPUT_SHA = "b".repeat(64);
@@ -181,6 +181,37 @@ test("new creation starts blank while preserving the previous draft in the asset
   assert.equal(result.library[0].id, "preserved-draft");
   assert.equal(result.library[0].source_input, "不能被新创作吞掉的旧稿");
   assert.equal(result.preservedPrevious, true);
+});
+
+test("asset-library reconciliation cannot reuse an older cached version after save", () => {
+  const stale = {
+    draft_record_id: "active-draft",
+    id: "active-draft",
+    selectedTitle: "保存前",
+    saved_at: "2026-09-01T07:00:00.000Z",
+  };
+  const persisted = {
+    ...stale,
+    selectedTitle: "保存后的成稿",
+    saved_at: "2026-09-01T07:45:00.000Z",
+  };
+  const reconciled = reconcilePersistentLibraryView({
+    persistentLibrary: [persisted],
+    currentLibrary: [stale],
+    activeDraftId: "active-draft",
+    currentContent: { ...stale, pages: [{ id: "stale-page" }] },
+  });
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0].selectedTitle, "保存后的成稿");
+  assert.equal(reconciled[0].saved_at, persisted.saved_at);
+
+  const hydratedActive = reconcilePersistentLibraryView({
+    persistentLibrary: [persisted],
+    currentLibrary: [stale],
+    activeDraftId: "active-draft",
+    currentContent: { ...persisted, pages: [{ id: "hydrated-page" }] },
+  });
+  assert.deepEqual(hydratedActive[0].pages, [{ id: "hydrated-page" }]);
 });
 
 test("restarting an untouched blank draft does not create asset-library litter", () => {

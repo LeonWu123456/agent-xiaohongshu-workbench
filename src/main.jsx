@@ -42,6 +42,7 @@ import {
   materializePersistentMediaRefsV3,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
+  reconcilePersistentLibraryView,
   rebuildPendingImageStartV3,
   readWorkspaceSnapshot,
   restoreWorkspaceBackupV3,
@@ -1080,12 +1081,11 @@ function App() {
       setLibrary(libraryContentsFromWorkspaceView(workspaceView.workspace));
     } else {
       const persistentLibrary = libraryContentsV3(nextWorkspace);
-      setLibrary((current) => persistentLibrary.map((item) => {
-        const cached = current.find((entry) => entry.draft_record_id === item.draft_record_id);
-        if (item.draft_record_id === nextWorkspace.active_draft_id && contentRef.current?.saved_at === item.saved_at) {
-          return { ...contentRef.current, draft_record_id: item.draft_record_id, id: item.id, saved_at: item.saved_at };
-        }
-        return cached || item;
+      setLibrary((current) => reconcilePersistentLibraryView({
+        persistentLibrary,
+        currentLibrary: current,
+        activeDraftId: nextWorkspace.active_draft_id,
+        currentContent: contentRef.current,
       }));
     }
     if (nextProfile) setProfile(nextProfile);
