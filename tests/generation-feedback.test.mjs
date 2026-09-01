@@ -63,13 +63,61 @@ test("partial mother-sheet failures report paid calls instead of pretending they
   assert.match(feedback.detail, /¥0\.22/);
 });
 
-test("public step failures state exactly what is saved and disclose when the current paid step may replay", () => {
+test("public step failures discover the same paid operation instead of offering a paid replay", () => {
   const error = new Error("provider request failed: MOTHER_SHEET_2_CALL_FAILED");
   error.providerStage = "image";
   error.providerDetails = { resume_run_id: "images-2026-08-31T08-00-00-000Z-abcdef12", completed_pages: 2, total_pages: 4, completed_image_steps: 1, total_image_steps: 3, failed_image_step: 2, actual_image_calls: 2, estimated_image_cost_cny: 0.44, current_step_may_replay: true };
   const feedback = generationFailureFeedback(error);
   assert.equal(feedback.code, "IMAGE_PARTIAL_RESULT_PRESERVED");
   assert.match(feedback.title, /1\/3/);
-  assert.match(feedback.detail, /可能再产生一次图片调用/);
-  assert.match(feedback.detail, /之前步骤不会重做/);
+  assert.match(feedback.detail, /发现|恢复.*同一/);
+  assert.doesNotMatch(feedback.detail, /可能再产生一次图片调用|可以重新生成|点击.*重新生成|直接重试/);
+  assert.equal(feedback.recovery_action, "DISCOVER_EXISTING_OPERATION");
+  assert.equal(feedback.expected_upstream_calls, 0);
+  assert.equal(feedback.direct_paid_retry_allowed, false);
+});
+
+test("image ledger and local media failures expose distinct, bounded recovery contracts", () => {
+  const cases = [
+    ["UNKNOWN", "DISCOVER_EXISTING_OPERATION", 0, true],
+    ["IN_FLIGHT", "WAIT_AND_DISCOVER_EXISTING_OPERATION", 0, true],
+    ["READY_RESPONSE_LOST", "READ_CACHED_RESULT", 0, true],
+    ["EXPIRY_WINDOW_TOO_SHORT", "REAUTHENTICATE_THEN_DISCOVER", 0, true],
+    ["PAID_CAPABILITY_EXPIRING", "REAUTHENTICATE_THEN_DISCOVER", 0, true],
+    ["LEDGER_CAPACITY_EXHAUSTED", "WAIT_FOR_CAPACITY_THEN_DISCOVER", 0, true],
+    ["IMAGE_LEDGER_RUN_MISSING", "CONFIRM_NOT_FOUND_BEFORE_NEW_OPERATION", 0, false],
+    ["LOCAL_MEDIA_WRITE_FAILED", "RESTORE_LOCAL_MEDIA_FROM_CACHED_MANIFEST", 0, true],
+    ["LOCAL_MEDIA_MISSING", "RESTORE_LOCAL_MEDIA_OR_BACKUP", 0, false],
+    ["REFERENCE_PAYLOAD_TOO_LARGE", "REDUCE_REFERENCES_BEFORE_START", 0, false],
+    ["MATERIALIZING", "RESUME_REFERENCE_MATERIALIZATION", 0, true],
+  ];
+  for (const [code, recoveryAction, expectedCalls, sevenDayRecoverable] of cases) {
+    const error = Object.assign(new Error(`provider request failed: ${code}`), { providerCode: code, providerStage: "image" });
+    const feedback = generationFailureFeedback(error);
+    assert.equal(feedback.code, code);
+    assert.equal(feedback.recovery_action, recoveryAction);
+    assert.equal(feedback.expected_upstream_calls, expectedCalls);
+    assert.equal(feedback.server_recoverable_within_7d, sevenDayRecoverable);
+    assert.equal(feedback.direct_paid_retry_allowed, false);
+  }
+});
+
+test("UNKNOWN, IN_FLIGHT and READY response loss never tell the user to create a new paid operation", () => {
+  for (const code of ["UNKNOWN", "IN_FLIGHT", "READY_RESPONSE_LOST"]) {
+    const feedback = generationFailureFeedback(Object.assign(new Error(code), { providerCode: code, providerStage: "image" }));
+    assert.match(feedback.detail, /同一.*操作|现有.*操作|缓存结果/);
+    assert.doesNotMatch(`${feedback.title}${feedback.detail}`, /可以重新生成|点击.*重新生成|新建.*操作|再付费|可能再次扣费|直接重试/);
+    assert.equal(feedback.expected_upstream_calls, 0);
+    assert.equal(feedback.server_recoverable_within_7d, true);
+  }
+});
+
+test("raw media transport failures recover the cached operation without another paid image call", () => {
+  for (const providerCode of ["IMAGE_MEDIA_FETCH_FAILED", "IMAGE_MEDIA_HEADER_HASH_MISMATCH", "IMAGE_MEDIA_BODY_HASH_MISMATCH"]) {
+    const feedback = generationFailureFeedback({ providerCode, providerStage: "image" });
+    assert.equal(feedback.code, "READY_RESPONSE_LOST");
+    assert.equal(feedback.recovery_action, "READ_CACHED_RESULT");
+    assert.equal(feedback.expected_upstream_calls, 0);
+    assert.equal(feedback.direct_paid_retry_allowed, false);
+  }
 });

@@ -9,24 +9,112 @@ export function providerHealthState(health) {
   return hasVerifiedSuccess ? "ONLINE" : "UNVERIFIED";
 }
 
+const IMAGE_RECOVERY_STATES = Object.freeze({
+  UNKNOWN: {
+    title: "这次配图操作的状态还不能确认",
+    detail: "不要重新生成。请先发现或恢复同一操作；这一步只查询现有账本和缓存，图片上游调用数为 0，七天恢复窗内仍可继续找回结果。",
+    recovery_action: "DISCOVER_EXISTING_OPERATION",
+    server_recoverable_within_7d: true,
+  },
+  IN_FLIGHT: {
+    title: "同一配图操作仍在处理中",
+    detail: "请等待后发现同一操作，不要另开付费步骤。发现操作只读现有进度，图片上游调用数为 0；结果在七天恢复窗内可继续读取。",
+    recovery_action: "WAIT_AND_DISCOVER_EXISTING_OPERATION",
+    server_recoverable_within_7d: true,
+  },
+  READY_RESPONSE_LOST: {
+    title: "结果已就绪，但刚才的响应丢失了",
+    detail: "请读取同一操作的缓存结果，不要重新生成。读取缓存的图片上游调用数为 0，结果在七天恢复窗内可取回。",
+    recovery_action: "READ_CACHED_RESULT",
+    server_recoverable_within_7d: true,
+  },
+  EXPIRY_WINDOW_TOO_SHORT: {
+    title: "当前登录剩余时间不足以安全完成本步",
+    detail: "先重新登录，再发现同一操作。登录和发现不会调用图片上游，现有操作在七天恢复窗内仍可恢复。",
+    recovery_action: "REAUTHENTICATE_THEN_DISCOVER",
+    server_recoverable_within_7d: true,
+  },
+  PAID_CAPABILITY_EXPIRING: {
+    title: "当前付费能力即将过期",
+    detail: "先重新登录，再发现同一操作；不要直接重做本步。该恢复路径图片上游调用数为 0，现有结果在七天恢复窗内可读取。",
+    recovery_action: "REAUTHENTICATE_THEN_DISCOVER",
+    server_recoverable_within_7d: true,
+  },
+  LEDGER_CAPACITY_EXHAUSTED: {
+    title: "配图恢复账本暂时没有安全容量",
+    detail: "系统已在图片上游前停住。等待容量释放后发现同一操作；查询调用数为 0，现有操作在七天恢复窗内仍可读取。",
+    recovery_action: "WAIT_FOR_CAPACITY_THEN_DISCOVER",
+    server_recoverable_within_7d: true,
+  },
+  IMAGE_LEDGER_RUN_MISSING: {
+    title: "服务器已找不到这次配图操作",
+    detail: "本机稿件和媒体仍保留，但服务器七天恢复结果已不可确认。只有明确读到 NOT_FOUND 并冻结本机旧操作后，才允许创建新的配图操作。",
+    recovery_action: "CONFIRM_NOT_FOUND_BEFORE_NEW_OPERATION",
+    server_recoverable_within_7d: false,
+  },
+  LOCAL_MEDIA_WRITE_FAILED: {
+    title: "结果尚未安全写入本机媒体库",
+    detail: "不要重新生成。请从同一操作的缓存清单恢复媒体并再次完成本机校验；恢复图片上游调用数为 0，缓存结果在七天窗口内可取回。",
+    recovery_action: "RESTORE_LOCAL_MEDIA_FROM_CACHED_MANIFEST",
+    server_recoverable_within_7d: true,
+  },
+  LOCAL_MEDIA_MISSING: {
+    title: "本机缺少这次操作需要的媒体",
+    detail: "图片上游尚未被重新调用。请先从本机备份恢复缺失媒体；不能把一个断图稿直接送进新的付费操作。",
+    recovery_action: "RESTORE_LOCAL_MEDIA_OR_BACKUP",
+    server_recoverable_within_7d: false,
+  },
+  REFERENCE_PAYLOAD_TOO_LARGE: {
+    title: "参考图体积超过安全传输上限",
+    detail: "请求已在联网前拦截，图片上游调用数为 0。减少参考图数量或重新压缩后，再从同一文字稿准备操作。",
+    recovery_action: "REDUCE_REFERENCES_BEFORE_START",
+    server_recoverable_within_7d: false,
+  },
+  MATERIALIZING: {
+    title: "正在补齐同一操作的参考媒体",
+    detail: "系统只会继续上传同一 nonce 缺少的已校验媒体，图片上游调用数为 0；不要重新选择参考图或新建操作，七天恢复窗内可继续。",
+    recovery_action: "RESUME_REFERENCE_MATERIALIZATION",
+    server_recoverable_within_7d: true,
+  },
+});
+
+function imageRecoveryFeedback(code, meta) {
+  const state = IMAGE_RECOVERY_STATES[code];
+  if (!state) return null;
+  return {
+    ...meta,
+    stage: "image",
+    code,
+    title: state.title,
+    detail: state.detail,
+    recovery_action: state.recovery_action,
+    expected_upstream_calls: 0,
+    server_recoverable_within_7d: state.server_recoverable_within_7d,
+    direct_paid_retry_allowed: false,
+  };
+}
+
 export function generationFailureFeedback(error) {
   const message = String(error?.message || error || "");
   const technicalCode = String(error?.providerCode || message.replace(/^provider request failed:\s*/i, "") || "GENERATION_FAILED").slice(0, 220);
   const inferredStage = error?.providerStage || (/IMAGE_|PAGE_PLAN|image/i.test(technicalCode) ? "image" : "text");
   const meta = { technical_code: technicalCode, stage: inferredStage, failure_id: error?.failureId || null, failed_at: new Date().toISOString() };
   const resume = error?.providerDetails;
+  const exactRecoveryCode = Object.keys(IMAGE_RECOVERY_STATES).find((code) => technicalCode === code || technicalCode.startsWith(`${code}:`));
+  const exactRecovery = imageRecoveryFeedback(exactRecoveryCode, meta);
+  if (exactRecovery) return exactRecovery;
+  if (/^IMAGE_MEDIA_(?:FETCH|HEADER|BODY)_/.test(technicalCode)) return imageRecoveryFeedback("READY_RESPONSE_LOST", meta);
   if (resume?.retry_scope === "CHANGE_VISUAL_INPUTS_THEN_RESTART") {
     return { ...meta, stage: "image", code: "IMAGE_REPAIR_EXHAUSTED", title: "剩余插画连续未过切片校验", detail: `已保存 ${resume.completed_pages || 0}/${resume.total_pages || 0} 页可用结果；本轮约发生 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。继续点重试不会盲目重复扣费，请先调整画面要求或动作参考，再重新开始配图。` };
   }
   if (resume?.resume_run_id && Number.isInteger(resume.completed_image_steps) && Number.isInteger(resume.total_image_steps)) {
-    const replayWarning = resume.current_step_may_replay ? "当前失败步骤已收到 Provider 图片但没完成回写；重试这一小步可能再产生一次图片调用，之前步骤不会重做。" : "重试只会执行当前图片步骤，之前步骤不会重做。";
-    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保存图片步骤 ${resume.completed_image_steps}/${resume.total_image_steps}`, detail: `停在第 ${resume.failed_image_step || resume.completed_image_steps + 1} 步；本轮约发生 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。${replayWarning}` };
+    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保存图片步骤 ${resume.completed_image_steps}/${resume.total_image_steps}`, detail: `停在第 ${resume.failed_image_step || resume.completed_image_steps + 1} 步；本轮约发生 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。请先发现并恢复同一操作，读取既有 checkpoint 或缓存结果；这一步图片上游调用数为 0，不会重新生成之前步骤。`, recovery_action: "DISCOVER_EXISTING_OPERATION", expected_upstream_calls: 0, server_recoverable_within_7d: true, direct_paid_retry_allowed: false };
   }
   if (resume?.resume_run_id && Number.isInteger(resume.completed_mother_sheets) && Number.isInteger(resume.total_mother_sheets)) {
-    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保留 ${resume.completed_mother_sheets}/${resume.total_mother_sheets} 张母图`, detail: `停在第 ${resume.failed_mother_sheet || resume.completed_mother_sheets + 1} 张母图；已发生约 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。继续时会从母图断点恢复，已切好的插画单元不会重做。` };
+    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保留 ${resume.completed_mother_sheets}/${resume.total_mother_sheets} 张母图`, detail: `停在第 ${resume.failed_mother_sheet || resume.completed_mother_sheets + 1} 张母图；已发生约 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。先发现并恢复同一操作，读取已有母图和断点；恢复查询的图片上游调用数为 0。`, recovery_action: "DISCOVER_EXISTING_OPERATION", expected_upstream_calls: 0, server_recoverable_within_7d: true, direct_paid_retry_allowed: false };
   }
   if (resume?.resume_run_id && Number.isInteger(resume.completed_pages) && Number.isInteger(resume.total_pages)) {
-    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保留 ${resume.completed_pages}/${resume.total_pages} 张图片`, detail: `停在第 ${resume.failed_page || resume.completed_pages + 1} 张；已发生约 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。点击“继续生成剩余图片”会从断点继续，不会重新生成前 ${resume.completed_pages} 张。` };
+    return { ...meta, stage: "image", code: "IMAGE_PARTIAL_RESULT_PRESERVED", title: `已保留 ${resume.completed_pages}/${resume.total_pages} 张图片`, detail: `停在第 ${resume.failed_page || resume.completed_pages + 1} 张；已发生约 ¥${Number(resume.estimated_image_cost_cny || 0).toFixed(2)}。先发现并恢复同一操作，读取已有结果；恢复查询的图片上游调用数为 0，不会重新生成前 ${resume.completed_pages} 张。`, recovery_action: "DISCOVER_EXISTING_OPERATION", expected_upstream_calls: 0, server_recoverable_within_7d: true, direct_paid_retry_allowed: false };
   }
   if (/ModelNotOpen/.test(message)) return { ...meta, code: "MODEL_NOT_OPEN", title: "当前模型尚未开通", detail: "请先在火山方舟开通当前模型；画布和旧稿没有改变。" };
   if (/PAGE_PLAN_MODEL_CALL_FAILED:NETWORK_FETCH_FAILED|fetch failed/i.test(message) && inferredStage === "image") return { ...meta, stage: "image", code: "ARK_NETWORK_UNAVAILABLE", title: "当前网络连不上火山方舟", detail: "本机工作台正常，但配图分镜请求没有到达方舟。本轮没有取得图片调用结果；请检查网络、代理或 VPN，稍后从这里重试。" };

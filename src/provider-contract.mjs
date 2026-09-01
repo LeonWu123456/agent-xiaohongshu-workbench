@@ -8,6 +8,23 @@ export const PAGE_CANDIDATE_RESPONSE_SCHEMA = "xiaoshimei.page-candidate-respons
 export const TEXT_DRAFT_REQUEST_SCHEMA = "xiaoshimei.text-draft-request.v1";
 export const TEXT_DRAFT_RESPONSE_SCHEMA = "xiaoshimei.text-draft-response.v1";
 export const IMAGE_GENERATION_REQUEST_SCHEMA = "xiaoshimei.image-generation-request.v1";
+export const IMAGE_OPERATION_SNAPSHOT_SCHEMA = "xiaoshimei.image-operation-snapshot.v1";
+export const IMAGE_MEDIA_MANIFEST_SCHEMA = "xiaoshimei.media-asset-manifest.v1";
+export const IMAGE_GENERATION_RESPONSE_SCHEMA = "xiaoshimei.image-generation-response.v1";
+
+export const IMAGE_REFERENCE_ASSET_MAX_BYTES = 900_000;
+export const IMAGE_REFERENCE_TOTAL_MAX_BYTES = 2_700_000;
+export const IMAGE_GENERATION_REQUEST_MAX_BYTES = 3_500_000;
+export const IMAGE_RESPONSE_ASSET_MAX_BYTES = 4_000_000;
+
+const IMAGE_OPERATION_SNAPSHOT_MAX_BYTES = 256_000;
+const IMAGE_CHECKPOINT_MAX_BYTES = 256_000;
+const IMAGE_CONTENT_PACKAGE_MAX_BYTES = 750_000;
+const IMAGE_GENERATION_RESPONSE_MAX_BYTES = 1_250_000;
+const IMAGE_REQUEST_MODES = new Set(["START", "DISCOVER", "STEP"]);
+const IMAGE_RESPONSE_STATUSES = new Set(["MATERIALIZING", "PLANNING", "READY", "READY_DISCOVERY", "PARTIAL", "COMPLETE", "IN_FLIGHT", "UNKNOWN", "ERROR", "COMMITTED_RESULT", "LATE_RESULT"]);
+const MEDIA_REF_PATTERN = /^xiaoshimei-media:\/\/sha256\/([0-9a-f]{64})$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 export function buildGenerationRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("generation input must be an object");
@@ -63,40 +80,304 @@ export function parseTextDraftResponse(value) {
   return { ...structuredClone(value), content_type: contentType, ...(styleLock ? { style_lock: styleLock } : {}), prompt_context: normalizePromptContext(value.prompt_context) };
 }
 
-function imageGenerationInput(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("IMAGE_GENERATION_INPUT_INVALID");
-  const draft = parseTextDraftResponse(input.draft);
-  const productionMode = normalizeProductionMode(input.production_mode, "IMAGE_GENERATION_PRODUCTION_MODE_INVALID");
-  const imageCount = input.image_count === "AUTO" ? "AUTO" : Number(input.image_count);
-  if (imageCount !== "AUTO" && (!Number.isInteger(imageCount) || imageCount < 1 || imageCount > 8)) throw new TypeError("IMAGE_GENERATION_COUNT_INVALID");
-  const resumeCheckpoint = input.resume_checkpoint == null ? null : input.resume_checkpoint;
-  if (resumeCheckpoint != null && (!resumeCheckpoint || typeof resumeCheckpoint !== "object" || Array.isArray(resumeCheckpoint) || resumeCheckpoint.schema !== "xiaoshimei.public-image-run.v1")) throw new TypeError("IMAGE_GENERATION_RESUME_CHECKPOINT_INVALID");
-  if (resumeCheckpoint != null && JSON.stringify(resumeCheckpoint).length > 3_800_000) throw new TypeError("IMAGE_GENERATION_RESUME_CHECKPOINT_TOO_LARGE");
-  const checkpointRunId = resumeCheckpoint == null ? null : requiredString(resumeCheckpoint.run_id, "IMAGE_GENERATION_RESUME_ID_INVALID", 120);
-  const resumeRunId = input.resume_run_id == null || input.resume_run_id === "" ? checkpointRunId : requiredString(input.resume_run_id, "IMAGE_GENERATION_RESUME_ID_INVALID", 120);
-  if (resumeRunId && !/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(resumeRunId)) throw new TypeError("IMAGE_GENERATION_RESUME_ID_INVALID");
-  if (checkpointRunId && resumeRunId !== checkpointRunId) throw new TypeError("IMAGE_GENERATION_RESUME_ID_MISMATCH");
-  const sourceReferences = input.reference_images == null ? [] : input.reference_images;
-  if (!Array.isArray(sourceReferences) || sourceReferences.length > 3) throw new TypeError("IMAGE_GENERATION_REFERENCES_INVALID");
-  const referenceImages = sourceReferences.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_INVALID`);
-    const dataUrl = typeof item.data_url === "string" ? item.data_url.trim() : "";
-    if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(dataUrl) || dataUrl.length > 4_500_000) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_DATA_INVALID`);
-    const name = typeof item.name === "string" && item.name.trim() ? item.name.trim().slice(0, 100) : `参考图${index + 1}`;
-    return { name, data_url: dataUrl };
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function assertExactFields(value, fields, code) {
+  if (!isPlainObject(value)) throw new TypeError(code);
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new TypeError(code);
+}
+
+function jsonByteLength(value, code) {
+  try { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
+  catch { throw new TypeError(code); }
+}
+
+function exactString(value, code, max, { allowEmpty = false } = {}) {
+  if (typeof value !== "string" || value.length > max || (!allowEmpty && !value.trim())) throw new TypeError(code);
+  return value;
+}
+
+function safeId(value, code, max = 160) {
+  const normalized = exactString(value, code, max);
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) throw new TypeError(code);
+  return normalized;
+}
+
+function sha256String(value, code) {
+  if (typeof value !== "string" || !SHA256_PATTERN.test(value)) throw new TypeError(code);
+  return value;
+}
+
+function exactStringArray(value, code, { length = null, maxItems = 40, maxItemLength = 2000 } = {}) {
+  if (!Array.isArray(value) || (length != null && value.length !== length) || value.length > maxItems) throw new TypeError(code);
+  return value.map((item) => exactString(item, code, maxItemLength));
+}
+
+function normalizeConfirmedImageDraft(value) {
+  assertExactFields(value, ["draft_id", "source_input", "pillar", "goal", "titles", "selected_title", "body", "tags", "recommended_image_count", "facts", "risks", "content_type", "style_lock", "prompt_context"], "IMAGE_GENERATION_CONFIRMED_DRAFT_FIELDS_INVALID");
+  const titles = exactStringArray(value.titles, "IMAGE_GENERATION_TITLES_INVALID", { length: 3, maxItems: 3, maxItemLength: 120 });
+  const selectedTitle = exactString(value.selected_title, "IMAGE_GENERATION_SELECTED_TITLE_INVALID", 120);
+  if (!titles.includes(selectedTitle)) throw new TypeError("IMAGE_GENERATION_SELECTED_TITLE_INVALID");
+  const tags = exactStringArray(value.tags, "IMAGE_GENERATION_TAGS_INVALID", { length: 5, maxItems: 5, maxItemLength: 80 });
+  const recommendedImageCount = Number(value.recommended_image_count);
+  if (!Number.isInteger(recommendedImageCount) || recommendedImageCount < 1 || recommendedImageCount > 8) throw new TypeError("IMAGE_GENERATION_RECOMMENDED_COUNT_INVALID");
+  return {
+    draft_id: safeId(value.draft_id, "IMAGE_GENERATION_DRAFT_ID_INVALID"),
+    source_input: exactString(value.source_input, "IMAGE_GENERATION_SOURCE_INVALID", 12_000),
+    pillar: exactString(value.pillar, "IMAGE_GENERATION_PILLAR_INVALID", 40),
+    goal: exactString(value.goal, "IMAGE_GENERATION_GOAL_INVALID", 40),
+    titles,
+    selected_title: selectedTitle,
+    body: exactString(value.body, "IMAGE_GENERATION_BODY_INVALID", 12_000),
+    tags,
+    recommended_image_count: recommendedImageCount,
+    facts: exactStringArray(value.facts, "IMAGE_GENERATION_FACTS_INVALID"),
+    risks: exactStringArray(value.risks, "IMAGE_GENERATION_RISKS_INVALID"),
+    content_type: normalizeXhsContentType(value.content_type, "IMAGE_GENERATION_CONTENT_TYPE_INVALID"),
+    style_lock: value.style_lock == null ? null : normalizeStyleLock(value.style_lock, "IMAGE_GENERATION_STYLE_LOCK_INVALID"),
+    prompt_context: normalizePromptContext(value.prompt_context),
+  };
+}
+
+function normalizeImageOperationSnapshot(value) {
+  assertExactFields(value, ["schema", "draft_record_id", "mutation_epoch", "confirmed_draft", "page_count", "production_mode", "reference_note"], "IMAGE_GENERATION_OPERATION_SNAPSHOT_FIELDS_INVALID");
+  if (value.schema !== IMAGE_OPERATION_SNAPSHOT_SCHEMA) throw new TypeError("IMAGE_GENERATION_OPERATION_SNAPSHOT_SCHEMA_INVALID");
+  const mutationEpoch = Number(value.mutation_epoch);
+  if (!Number.isSafeInteger(mutationEpoch) || mutationEpoch < 0) throw new TypeError("IMAGE_GENERATION_MUTATION_EPOCH_INVALID");
+  const pageCount = Number(value.page_count);
+  if (!Number.isInteger(pageCount) || pageCount < 1 || pageCount > 8) throw new TypeError("IMAGE_GENERATION_PAGE_COUNT_INVALID");
+  const snapshot = {
+    schema: IMAGE_OPERATION_SNAPSHOT_SCHEMA,
+    draft_record_id: safeId(value.draft_record_id, "IMAGE_GENERATION_DRAFT_RECORD_ID_INVALID"),
+    mutation_epoch: mutationEpoch,
+    confirmed_draft: normalizeConfirmedImageDraft(value.confirmed_draft),
+    page_count: pageCount,
+    production_mode: normalizeProductionMode(value.production_mode, "IMAGE_GENERATION_PRODUCTION_MODE_INVALID"),
+    reference_note: exactString(value.reference_note, "IMAGE_GENERATION_REFERENCE_NOTE_INVALID", 1000, { allowEmpty: true }),
+  };
+  if (jsonByteLength(snapshot, "IMAGE_GENERATION_OPERATION_SNAPSHOT_INVALID") > IMAGE_OPERATION_SNAPSHOT_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_OPERATION_SNAPSHOT_TOO_LARGE");
+  return snapshot;
+}
+
+function normalizeReferenceManifest(value, index, { response = false, runId = null } = {}) {
+  const baseFields = ["schema", "media_ref", "sha256", "size_bytes", "mime", "name", "width", "height"];
+  const hasAssetUrl = response && Object.prototype.hasOwnProperty.call(value || {}, "asset_url");
+  assertExactFields(value, hasAssetUrl ? [...baseFields, "asset_url"] : baseFields, `IMAGE_GENERATION_REFERENCE_${index + 1}_FIELDS_INVALID`);
+  if (value.schema !== IMAGE_MEDIA_MANIFEST_SCHEMA) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_SCHEMA_INVALID`);
+  const sha256 = sha256String(value.sha256, `IMAGE_GENERATION_REFERENCE_${index + 1}_SHA_INVALID`);
+  const mediaRefMatch = typeof value.media_ref === "string" ? MEDIA_REF_PATTERN.exec(value.media_ref) : null;
+  if (!mediaRefMatch || mediaRefMatch[1] !== sha256) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_REF_INVALID`);
+  const sizeBytes = Number(value.size_bytes);
+  const maxSizeBytes = response ? IMAGE_RESPONSE_ASSET_MAX_BYTES : IMAGE_REFERENCE_ASSET_MAX_BYTES;
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > maxSizeBytes) throw new TypeError(response ? "IMAGE_GENERATION_RESPONSE_ASSET_SIZE_INVALID" : "IMAGE_GENERATION_REFERENCE_SIZE_INVALID");
+  if (value.mime !== "image/jpeg") throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_MIME_INVALID`);
+  const width = Number(value.width);
+  const height = Number(value.height);
+  if (!Number.isInteger(width) || width < 1 || width > 20_000 || !Number.isInteger(height) || height < 1 || height > 20_000) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_DIMENSIONS_INVALID`);
+  const normalized = {
+    schema: IMAGE_MEDIA_MANIFEST_SCHEMA,
+    media_ref: value.media_ref,
+    sha256,
+    size_bytes: sizeBytes,
+    mime: "image/jpeg",
+    name: exactString(value.name, `IMAGE_GENERATION_REFERENCE_${index + 1}_NAME_INVALID`, 100),
+    width,
+    height,
+  };
+  if (hasAssetUrl) {
+    const assetUrlMatch = typeof value.asset_url === "string"
+      ? /^\/api\/provider\/assets\/([A-Za-z0-9._:-]{1,160})\/([0-9a-f]{64})$/.exec(value.asset_url)
+      : null;
+    if (!assetUrlMatch || assetUrlMatch[1] !== runId || assetUrlMatch[2] !== sha256) throw new TypeError(`IMAGE_GENERATION_REFERENCE_${index + 1}_ASSET_URL_INVALID`);
+    normalized.asset_url = value.asset_url;
+  }
+  return normalized;
+}
+
+function normalizeManifestArray(value, code, options = {}) {
+  if (!Array.isArray(value) || value.length > (options.maxItems ?? 8)) throw new TypeError(code);
+  const normalized = value.map((item, index) => normalizeReferenceManifest(item, index, options));
+  if (new Set(normalized.map((item) => item.media_ref)).size !== normalized.length) throw new TypeError(code);
+  return normalized;
+}
+
+export function canonicalImageGenerationInputPreimage({ operation_snapshot: operationSnapshot, reference_manifest: referenceManifest } = {}) {
+  const normalizedSnapshot = normalizeImageOperationSnapshot(operationSnapshot);
+  const normalizedManifest = normalizeManifestArray(referenceManifest, "IMAGE_GENERATION_REFERENCES_INVALID", { maxItems: 3 });
+  const totalBytes = normalizedManifest.reduce((total, item) => total + item.size_bytes, 0);
+  if (totalBytes > IMAGE_REFERENCE_TOTAL_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_REFERENCE_TOTAL_INVALID");
+  return JSON.stringify({ operation_snapshot: normalizedSnapshot, reference_manifest: normalizedManifest });
+}
+
+export async function computeImageGenerationInputSha256(value, { subtle = globalThis.crypto?.subtle } = {}) {
+  if (!subtle || typeof subtle.digest !== "function") throw new TypeError("IMAGE_GENERATION_SHA256_UNAVAILABLE");
+  const bytes = new TextEncoder().encode(canonicalImageGenerationInputPreimage(value));
+  const digest = await subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function decodedBase64Length(value, code) {
+  if (typeof value !== "string" || value.length < 4 || value.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new TypeError(code);
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+function normalizeMissingReferenceMedia(value, manifests) {
+  if (!Array.isArray(value) || value.length > 3) throw new TypeError("IMAGE_GENERATION_MISSING_MEDIA_INVALID");
+  const byRef = new Map(manifests.map((manifest) => [manifest.media_ref, manifest]));
+  const seen = new Set();
+  return value.map((item, index) => {
+    assertExactFields(item, ["media_ref", "sha256", "size_bytes", "mime", "bytes_base64"], `IMAGE_GENERATION_MISSING_MEDIA_${index + 1}_FIELDS_INVALID`);
+    const manifest = byRef.get(item.media_ref);
+    if (!manifest || seen.has(item.media_ref)) throw new TypeError("IMAGE_GENERATION_MISSING_MEDIA_INVALID");
+    seen.add(item.media_ref);
+    if (item.sha256 !== manifest.sha256 || item.size_bytes !== manifest.size_bytes || item.mime !== manifest.mime) throw new TypeError(`IMAGE_GENERATION_MISSING_MEDIA_${index + 1}_MANIFEST_MISMATCH`);
+    if (decodedBase64Length(item.bytes_base64, `IMAGE_GENERATION_MISSING_MEDIA_${index + 1}_BYTES_INVALID`) !== manifest.size_bytes) throw new TypeError(`IMAGE_GENERATION_MISSING_MEDIA_${index + 1}_SIZE_MISMATCH`);
+    return { media_ref: manifest.media_ref, sha256: manifest.sha256, size_bytes: manifest.size_bytes, mime: manifest.mime, bytes_base64: item.bytes_base64 };
   });
-  const referenceNote = typeof input.reference_note === "string" ? input.reference_note.trim().slice(0, 1000) : "";
-  return { draft, production_mode: productionMode, image_count: imageCount, resume_run_id: resumeRunId, resume_checkpoint: resumeCheckpoint == null ? null : structuredClone(resumeCheckpoint), reference_images: referenceImages, reference_note: referenceNote };
+}
+
+function assertSmallOpaqueState(value, code, maxBytes = IMAGE_CHECKPOINT_MAX_BYTES) {
+  if (!isPlainObject(value)) throw new TypeError(code);
+  const forbiddenKeys = new Set(["draft", "confirmed_draft", "reference_manifest", "reference_images", "missing_reference_media", "bytes_base64", "data_url"]);
+  const visit = (current) => {
+    if (typeof current === "string" && /^(?:data|blob):/i.test(current)) throw new TypeError(code);
+    if (!current || typeof current !== "object") return;
+    for (const [key, child] of Object.entries(current)) {
+      if (forbiddenKeys.has(key)) throw new TypeError(code);
+      visit(child);
+    }
+  };
+  visit(value);
+  if (jsonByteLength(value, code) > maxBytes) throw new TypeError(code);
+  return structuredClone(value);
+}
+
+function normalizeImageGenerationInput(input) {
+  if (!isPlainObject(input) || !IMAGE_REQUEST_MODES.has(input.mode)) throw new TypeError("IMAGE_GENERATION_MODE_INVALID");
+  if (input.mode === "DISCOVER") {
+    assertExactFields(input, ["mode", "bootstrap_nonce", "input_sha256"], "IMAGE_GENERATION_DISCOVER_FIELDS_INVALID");
+    return { mode: "DISCOVER", bootstrap_nonce: sha256String(input.bootstrap_nonce, "IMAGE_GENERATION_BOOTSTRAP_NONCE_INVALID"), input_sha256: sha256String(input.input_sha256, "IMAGE_GENERATION_INPUT_SHA_INVALID") };
+  }
+  if (input.mode === "STEP") {
+    assertExactFields(input, ["mode", "run_id", "checkpoint_preimage", "checkpoint_preimage_sha256", "logical_step_id", "attempt_nonce"], "IMAGE_GENERATION_STEP_FIELDS_INVALID");
+    return {
+      mode: "STEP",
+      run_id: safeId(input.run_id, "IMAGE_GENERATION_RUN_ID_INVALID"),
+      checkpoint_preimage: assertSmallOpaqueState(input.checkpoint_preimage, "IMAGE_GENERATION_CHECKPOINT_INVALID"),
+      checkpoint_preimage_sha256: sha256String(input.checkpoint_preimage_sha256, "IMAGE_GENERATION_CHECKPOINT_SHA_INVALID"),
+      logical_step_id: safeId(input.logical_step_id, "IMAGE_GENERATION_LOGICAL_STEP_ID_INVALID", 120),
+      attempt_nonce: sha256String(input.attempt_nonce, "IMAGE_GENERATION_ATTEMPT_NONCE_INVALID"),
+    };
+  }
+  assertExactFields(input, ["mode", "bootstrap_nonce", "operation_snapshot", "input_sha256", "reference_manifest", "missing_reference_media"], "IMAGE_GENERATION_START_FIELDS_INVALID");
+  const referenceManifest = normalizeManifestArray(input.reference_manifest, "IMAGE_GENERATION_REFERENCES_INVALID", { maxItems: 3 });
+  const totalBytes = referenceManifest.reduce((total, item) => total + item.size_bytes, 0);
+  if (totalBytes > IMAGE_REFERENCE_TOTAL_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_REFERENCE_TOTAL_INVALID");
+  const normalized = {
+    mode: "START",
+    bootstrap_nonce: sha256String(input.bootstrap_nonce, "IMAGE_GENERATION_BOOTSTRAP_NONCE_INVALID"),
+    operation_snapshot: normalizeImageOperationSnapshot(input.operation_snapshot),
+    input_sha256: sha256String(input.input_sha256, "IMAGE_GENERATION_INPUT_SHA_INVALID"),
+    reference_manifest: referenceManifest,
+    missing_reference_media: normalizeMissingReferenceMedia(input.missing_reference_media, referenceManifest),
+  };
+  const envelope = { schema: IMAGE_GENERATION_REQUEST_SCHEMA, input: normalized };
+  if (jsonByteLength(envelope, "IMAGE_GENERATION_REQUEST_INVALID") > IMAGE_GENERATION_REQUEST_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_REQUEST_TOO_LARGE");
+  return normalized;
 }
 
 export function buildImageGenerationRequest(input) {
-  return { schema: IMAGE_GENERATION_REQUEST_SCHEMA, input: imageGenerationInput(input) };
+  return { schema: IMAGE_GENERATION_REQUEST_SCHEMA, input: normalizeImageGenerationInput(input) };
 }
 
 export function parseImageGenerationRequest(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== IMAGE_GENERATION_REQUEST_SCHEMA) throw new TypeError("IMAGE_GENERATION_REQUEST_INVALID");
-  return imageGenerationInput(value.input);
+  assertExactFields(value, ["schema", "input"], "IMAGE_GENERATION_REQUEST_FIELDS_INVALID");
+  if (value.schema !== IMAGE_GENERATION_REQUEST_SCHEMA) throw new TypeError("IMAGE_GENERATION_REQUEST_INVALID");
+  const input = normalizeImageGenerationInput(value.input);
+  if (jsonByteLength({ schema: IMAGE_GENERATION_REQUEST_SCHEMA, input }, "IMAGE_GENERATION_REQUEST_INVALID") > IMAGE_GENERATION_REQUEST_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_REQUEST_TOO_LARGE");
+  return input;
 }
+
+function normalizeResponseError(value) {
+  if (value == null) return null;
+  const fields = Object.prototype.hasOwnProperty.call(value || {}, "details") ? ["code", "details"] : ["code"];
+  assertExactFields(value, fields, "IMAGE_GENERATION_RESPONSE_ERROR_INVALID");
+  const normalized = { code: safeId(value.code, "IMAGE_GENERATION_RESPONSE_ERROR_CODE_INVALID", 160) };
+  if (fields.includes("details")) normalized.details = assertSmallOpaqueState(value.details, "IMAGE_GENERATION_RESPONSE_ERROR_DETAILS_INVALID", 64_000);
+  return normalized;
+}
+
+function assertRefOnlyContentPackage(value) {
+  if (!isPlainObject(value)) throw new TypeError("IMAGE_GENERATION_RESPONSE_CONTENT_INVALID");
+  const visit = (current, key = "") => {
+    if (typeof current === "string") {
+      if (/^(?:data|blob):/i.test(current)) throw new TypeError("IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN");
+      if ((key === "src" || key === "imageSrc") && current && !MEDIA_REF_PATTERN.test(current)) throw new TypeError("IMAGE_GENERATION_RESPONSE_CONTENT_MEDIA_REF_INVALID");
+      return;
+    }
+    if (!current || typeof current !== "object") return;
+    if (current instanceof ArrayBuffer || ArrayBuffer.isView(current) || (typeof Blob !== "undefined" && current instanceof Blob)) {
+      throw new TypeError("IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN");
+    }
+    for (const [childKey, child] of Object.entries(current)) {
+      if (new Set(["bytes", "bytes_base64", "data_url", "blob", "blob_url", "asset_url"]).has(childKey)) {
+        throw new TypeError("IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN");
+      }
+      visit(child, childKey);
+    }
+  };
+  visit(value);
+  if (jsonByteLength(value, "IMAGE_GENERATION_RESPONSE_CONTENT_INVALID") > IMAGE_CONTENT_PACKAGE_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_RESPONSE_CONTENT_TOO_LARGE");
+  return structuredClone(value);
+}
+
+export function parseImageGenerationResponse(value) {
+  const fields = ["schema", "status", "bootstrap_nonce", "input_sha256", "run_id", "checkpoint_preimage", "checkpoint_preimage_sha256", "logical_step_id", "progress", "assets", "media_delta", "error", "cached", "recoverable_until", "upstream_calls"];
+  if (Object.prototype.hasOwnProperty.call(value || {}, "content_package")) fields.push("content_package");
+  assertExactFields(value, fields, "IMAGE_GENERATION_RESPONSE_FIELDS_INVALID");
+  if (value.schema !== IMAGE_GENERATION_RESPONSE_SCHEMA || !IMAGE_RESPONSE_STATUSES.has(value.status)) throw new TypeError("IMAGE_GENERATION_RESPONSE_INVALID");
+  const runId = safeId(value.run_id, "IMAGE_GENERATION_RESPONSE_RUN_ID_INVALID");
+  const assets = normalizeManifestArray(value.assets, "IMAGE_GENERATION_RESPONSE_ASSETS_INVALID", { maxItems: 8, response: true, runId });
+  const mediaDelta = normalizeManifestArray(value.media_delta, "IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_INVALID", { maxItems: 8, response: true, runId });
+  if (mediaDelta.some((item) => !item.asset_url)) throw new TypeError("IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_ASSET_URL_REQUIRED");
+  const normalized = {
+    schema: IMAGE_GENERATION_RESPONSE_SCHEMA,
+    status: value.status,
+    bootstrap_nonce: sha256String(value.bootstrap_nonce, "IMAGE_GENERATION_RESPONSE_NONCE_INVALID"),
+    input_sha256: sha256String(value.input_sha256, "IMAGE_GENERATION_RESPONSE_INPUT_SHA_INVALID"),
+    run_id: runId,
+    checkpoint_preimage: assertSmallOpaqueState(value.checkpoint_preimage, "IMAGE_GENERATION_RESPONSE_CHECKPOINT_INVALID"),
+    checkpoint_preimage_sha256: sha256String(value.checkpoint_preimage_sha256, "IMAGE_GENERATION_RESPONSE_CHECKPOINT_SHA_INVALID"),
+    logical_step_id: safeId(value.logical_step_id, "IMAGE_GENERATION_RESPONSE_LOGICAL_STEP_INVALID", 120),
+    progress: assertSmallOpaqueState(value.progress, "IMAGE_GENERATION_RESPONSE_PROGRESS_INVALID", 64_000),
+    assets,
+    media_delta: mediaDelta,
+    error: normalizeResponseError(value.error),
+    cached: typeof value.cached === "boolean" ? value.cached : (() => { throw new TypeError("IMAGE_GENERATION_RESPONSE_CACHED_INVALID"); })(),
+    recoverable_until: exactString(value.recoverable_until, "IMAGE_GENERATION_RESPONSE_RECOVERY_INVALID", 64, { allowEmpty: true }),
+    upstream_calls: Number(value.upstream_calls),
+  };
+  if (!Number.isInteger(normalized.upstream_calls) || normalized.upstream_calls < 0 || normalized.upstream_calls > 1) throw new TypeError("IMAGE_GENERATION_RESPONSE_UPSTREAM_INVALID");
+  if (value.status === "ERROR" && normalized.error == null) throw new TypeError("IMAGE_GENERATION_RESPONSE_ERROR_REQUIRED");
+  if (value.status !== "ERROR" && normalized.error != null) throw new TypeError("IMAGE_GENERATION_RESPONSE_ERROR_INVALID");
+  if (value.status === "COMPLETE") {
+    if (!Object.prototype.hasOwnProperty.call(value, "content_package")) throw new TypeError("IMAGE_GENERATION_RESPONSE_CONTENT_REQUIRED");
+    normalized.content_package = assertRefOnlyContentPackage(value.content_package);
+  } else if (Object.prototype.hasOwnProperty.call(value, "content_package")) {
+    throw new TypeError("IMAGE_GENERATION_RESPONSE_CONTENT_INVALID");
+  }
+  if (jsonByteLength(normalized, "IMAGE_GENERATION_RESPONSE_INVALID") > IMAGE_GENERATION_RESPONSE_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_RESPONSE_TOO_LARGE");
+  return normalized;
+}
+
+export const parsePublicImageStepResponse = parseImageGenerationResponse;
 
 function pageCandidateInput(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new TypeError("PAGE_CANDIDATE_INPUT_INVALID");

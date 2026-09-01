@@ -1,10 +1,10 @@
-import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidateRequest, buildTextDraftRequest, parsePageCandidateResponse, parseTextDraftResponse } from "./provider-contract.mjs";
+import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidateRequest, buildTextDraftRequest, IMAGE_MEDIA_MANIFEST_SCHEMA, IMAGE_RESPONSE_ASSET_MAX_BYTES, parseImageGenerationResponse, parsePageCandidateResponse, parseTextDraftResponse } from "./provider-contract.mjs";
+import { detectImageMime, sha256MediaBytes } from "./media-asset-store.mjs";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const CLOUD_SETTINGS_KEY = "xiaoshimei-studio.byok-provider.v1";
 const CLOUD_KEY = "xiaoshimei-studio.byok-api-key.v1";
 const CLOUD_VERIFIED_KEY = "xiaoshimei-studio.byok-verified.v1";
-const PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA = "xiaoshimei.public-image-step-response.v1";
 const CLOUD_DEFAULTS = Object.freeze({
   provider: "volcengine-ark",
   provider_label: "火山方舟",
@@ -13,6 +13,104 @@ const CLOUD_DEFAULTS = Object.freeze({
   image_model: "doubao-seedream-5-0-lite-260128",
   key_store: "当前标签页 sessionStorage",
 });
+
+function mediaTransportError(code, details = null) {
+  const error = new TypeError(code);
+  error.providerCode = code;
+  error.providerStage = "image";
+  error.providerDetails = details == null ? null : structuredClone(details);
+  return error;
+}
+
+function exactHeader(headers, name) {
+  if (typeof headers?.get === "function") return headers.get(name);
+  if (!headers || typeof headers !== "object") return null;
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry ? String(entry[1]) : null;
+}
+
+function verifiedDeltaManifest(value, index, expectedRunId) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_INVALID`);
+  const expectedFields = ["schema", "media_ref", "sha256", "size_bytes", "mime", "name", "width", "height", "asset_url"].sort();
+  const actualFields = Object.keys(value).sort();
+  if (actualFields.length !== expectedFields.length || actualFields.some((key, fieldIndex) => key !== expectedFields[fieldIndex])) {
+    throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_FIELDS_INVALID`);
+  }
+  if (value.schema !== IMAGE_MEDIA_MANIFEST_SCHEMA || !/^[0-9a-f]{64}$/.test(value.sha256 || "")) throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_INVALID`);
+  if (value.media_ref !== `xiaoshimei-media://sha256/${value.sha256}`) throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_REF_INVALID`);
+  if (value.mime !== "image/jpeg" || !Number.isInteger(value.size_bytes) || value.size_bytes < 1 || value.size_bytes > IMAGE_RESPONSE_ASSET_MAX_BYTES) {
+    throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_MANIFEST_INVALID`);
+  }
+  const route = /^\/api\/provider\/assets\/([A-Za-z0-9._:-]{1,160})\/([0-9a-f]{64})$/.exec(value.asset_url || "");
+  if (!route || route[2] !== value.sha256 || (expectedRunId != null && route[1] !== expectedRunId)) throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_ASSET_URL_INVALID`);
+  return { manifest: structuredClone(value), runId: route[1] };
+}
+
+export async function fetchVerifiedImageMediaDelta(mediaDelta, {
+  baseUrl,
+  fetchImpl = globalThis.fetch,
+  credentials = "same-origin",
+  cryptoApi = globalThis.crypto,
+  timeoutMs = 300000,
+} = {}) {
+  if (!Array.isArray(mediaDelta) || mediaDelta.length > 8) throw mediaTransportError("IMAGE_MEDIA_DELTA_INVALID");
+  if (!mediaDelta.length) return [];
+  if (typeof fetchImpl !== "function") throw mediaTransportError("IMAGE_MEDIA_FETCH_UNAVAILABLE");
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300000) throw mediaTransportError("IMAGE_MEDIA_TIMEOUT_INVALID");
+  let origin;
+  try {
+    const base = new URL(baseUrl);
+    if (!new Set(["http:", "https:"]).has(base.protocol)) throw new TypeError("unsupported protocol");
+    origin = base.origin;
+  }
+  catch { throw mediaTransportError("IMAGE_MEDIA_BASE_URL_INVALID"); }
+  const materialized = [];
+  let expectedRunId = null;
+  for (let index = 0; index < mediaDelta.length; index += 1) {
+    const verified = verifiedDeltaManifest(mediaDelta[index], index, expectedRunId);
+    expectedRunId = verified.runId;
+    const asset = verified.manifest;
+    const assetUrl = new URL(asset.asset_url, origin);
+    if (assetUrl.origin !== origin) throw mediaTransportError(`IMAGE_MEDIA_DELTA_${index + 1}_ASSET_URL_INVALID`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      let response;
+      try {
+        response = await fetchImpl(assetUrl, { method: "GET", cache: "no-store", redirect: "error", credentials, signal: controller.signal });
+      } catch (error) {
+        throw mediaTransportError("IMAGE_MEDIA_FETCH_FAILED", { index, cause: String(error?.message || error) });
+      }
+      if (!response?.ok) {
+        const error = mediaTransportError(`IMAGE_MEDIA_FETCH_HTTP_${response?.status || "UNKNOWN"}`, { index });
+        error.httpStatus = response?.status || null;
+        error.requiresAccess = response?.status === 401;
+        throw error;
+      }
+      if (String(exactHeader(response.headers, "content-type") || "").toLowerCase() !== asset.mime) throw mediaTransportError("IMAGE_MEDIA_HEADER_MIME_MISMATCH", { index });
+      if (exactHeader(response.headers, "content-length") !== String(asset.size_bytes)) throw mediaTransportError("IMAGE_MEDIA_HEADER_SIZE_MISMATCH", { index });
+      if (exactHeader(response.headers, "x-content-sha256") !== asset.sha256) throw mediaTransportError("IMAGE_MEDIA_HEADER_HASH_MISMATCH", { index });
+      const cacheControl = String(exactHeader(response.headers, "cache-control") || "").toLowerCase();
+      if (!cacheControl.split(",").map((item) => item.trim()).includes("private") || !cacheControl.includes("no-store")) throw mediaTransportError("IMAGE_MEDIA_HEADER_CACHE_INVALID", { index });
+      if (String(exactHeader(response.headers, "x-content-type-options") || "").toLowerCase() !== "nosniff") throw mediaTransportError("IMAGE_MEDIA_HEADER_NOSNIFF_REQUIRED", { index });
+      let bytes;
+      try { bytes = new Uint8Array(await response.arrayBuffer()); }
+      catch (error) { throw mediaTransportError("IMAGE_MEDIA_BODY_READ_FAILED", { index, cause: String(error?.message || error) }); }
+      if (bytes.byteLength !== asset.size_bytes) throw mediaTransportError("IMAGE_MEDIA_BODY_SIZE_MISMATCH", { index });
+      let detectedMime;
+      try { detectedMime = detectImageMime(bytes); }
+      catch { throw mediaTransportError("IMAGE_MEDIA_BODY_MIME_MISMATCH", { index }); }
+      if (detectedMime !== asset.mime) throw mediaTransportError("IMAGE_MEDIA_BODY_MIME_MISMATCH", { index });
+      const actualSha256 = await sha256MediaBytes(bytes, { cryptoApi });
+      if (actualSha256 !== asset.sha256) throw mediaTransportError("IMAGE_MEDIA_BODY_HASH_MISMATCH", { index });
+      const { asset_url: _transportLocator, ...persistentManifest } = asset;
+      materialized.push({ ...persistentManifest, bytes });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return materialized;
+}
 
 export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch, timeoutMs = 300000 } = {}) {
   let url;
@@ -25,6 +123,12 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300000) throw new TypeError("provider timeout is invalid");
 
   let publicServerSettings = null;
+  const publicProviderMetadata = (payload) => {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+    return Object.fromEntries(["provider", "provider_label", "base_url", "text_model", "image_model", "configured", "credential_mode", "key_store"]
+      .filter((key) => Object.prototype.hasOwnProperty.call(payload, key))
+      .map((key) => [key, structuredClone(payload[key])]));
+  };
   const cloudSettings = () => {
     if (isLoopback) return null;
     let stored = {};
@@ -99,24 +203,56 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
   const accessSessionUrl = new URL(url);
   accessSessionUrl.pathname = isLoopback ? "/access-session" : url.pathname.replace(/\/generate\/?$/, "/access-session");
 
-  const authenticateAccess = async (code) => {
+  const authenticateAccess = async (code, { generation = null } = {}) => {
     if (isLoopback) throw new TypeError("本机生成服务不使用公网访问会话");
     if (typeof code !== "string" || code.length < 1 || code.length > 256) throw new TypeError("请输入有效访问码");
+    let loginPayload = null;
+    let ambiguity = null;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetchImpl(accessSessionUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code }),
+          signal: controller.signal,
+          credentials: "same-origin",
+        });
+        if (new Set([401, 403, 503]).has(response?.status)) {
+          let explicitPayload = null;
+          try { explicitPayload = await response.json(); } catch { explicitPayload = null; }
+          throw providerFailure(response, explicitPayload);
+        }
+        if (!response?.ok) {
+          let explicitPayload = null;
+          try { explicitPayload = await response.json(); } catch { explicitPayload = null; }
+          throw providerFailure(response, explicitPayload);
+        }
+        try { loginPayload = await response.json(); }
+        catch { ambiguity = "BODY_AMBIGUOUS"; }
+      } finally { clearTimeout(timer); }
+    } catch (error) {
+      if (error?.httpStatus != null) throw error;
+      ambiguity = "TRANSPORT_AMBIGUOUS";
+    }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetchImpl(accessSessionUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code }),
-        signal: controller.signal,
-        credentials: "same-origin",
-      });
-      const payload = await response.json();
-      if (!response?.ok) throw providerFailure(response, payload);
-      if (payload?.authenticated !== true) throw new TypeError("ACCESS_SESSION_RESPONSE_INVALID");
-      if (publicServerSettings) publicServerSettings = { ...publicServerSettings, authenticated: true };
-      return payload;
+      const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store", signal: controller.signal, credentials: "same-origin" });
+      let configPayload = null;
+      try { configPayload = await response.json(); }
+      catch { throw new TypeError("ACCESS_SESSION_CONFIG_RESPONSE_INVALID"); }
+      if (!response?.ok) throw providerFailure(response, configPayload);
+      if (!configPayload || typeof configPayload !== "object" || Array.isArray(configPayload)) throw new TypeError("ACCESS_SESSION_CONFIG_RESPONSE_INVALID");
+      return {
+        generation,
+        outcome: ambiguity == null ? "CONFIG_RECONCILED" : "CONFIG_RECONCILED_AMBIGUOUS",
+        ambiguity,
+        login: loginPayload && typeof loginPayload === "object" && !Array.isArray(loginPayload) ? structuredClone(loginPayload) : null,
+        config: structuredClone(configPayload),
+      };
     } finally { clearTimeout(timer); }
   };
 
@@ -130,14 +266,16 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         const payload = await response.json();
         if (!response?.ok) throw new Error(`provider health failed: HTTP_${response?.status || "UNKNOWN"}`);
         if (isLoopback) return payload;
-        publicServerSettings = payload && typeof payload === "object" ? structuredClone(payload) : null;
+        publicServerSettings = publicProviderMetadata(payload);
         const settings = cloudSettings();
         const verified = cloudVerification(settings);
-        const accessRequired = settings.credential_mode === "SERVER_MANAGED" && settings.access_required === true && settings.authenticated !== true;
+        if (settings.credential_mode === "SERVER_MANAGED") {
+          return { ...settings, ...structuredClone(payload), last_success_at: payload?.last_success_at || verified?.verified_at || null };
+        }
         return {
           ...payload,
           ...settings,
-          status: accessRequired ? "ACCESS_SESSION_REQUIRED" : verified ? "LIVE_VERIFIED" : settings.configured ? "CONFIGURED_UNVERIFIED" : payload.status,
+          status: verified ? "LIVE_VERIFIED" : settings.configured ? "CONFIGURED_UNVERIFIED" : payload.status,
           last_success_at: verified?.verified_at || null,
         };
       } finally { clearTimeout(timer); }
@@ -147,8 +285,8 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
       const payload = await response.json();
       if (!response?.ok) throw new Error(`provider config failed: HTTP_${response?.status || "UNKNOWN"}`);
       if (isLoopback) return payload;
-      publicServerSettings = payload && typeof payload === "object" ? structuredClone(payload) : null;
-      return cloudSettings();
+      publicServerSettings = publicProviderMetadata(payload);
+      return { ...cloudSettings(), ...structuredClone(payload) };
     },
     async updateSettings(input) {
       if (!isLoopback) {
@@ -178,28 +316,19 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     async generateImages(input, onProgress) {
       let next = structuredClone(input);
       for (let step = 0; step < 64; step += 1) {
-        let payload;
-        try {
-          payload = await post(imageGenerationUrl, buildImageGenerationRequest(next));
-        } catch (error) {
-          const resume = error?.providerDetails;
-          if (resume?.resume_run_id && resume?.resume_checkpoint && typeof onProgress === "function") {
-            const decision = await onProgress(structuredClone(resume));
-            error.checkpointPersisted = true;
-            if (progressRequestsStop(decision)) error.intentionalStop = true;
-          }
-          throw error;
-        }
-        if (payload?.schema !== PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA || payload?.status !== "PARTIAL") return payload;
-        const resume = payload.resume;
-        if (!resume?.resume_run_id || !resume?.resume_checkpoint) throw new TypeError("PUBLIC_IMAGE_STEP_RESPONSE_INVALID");
-        if (typeof onProgress === "function") {
-          const decision = await onProgress(structuredClone(resume));
-          if (progressRequestsStop(decision)) throw stoppedAfterCheckpoint(resume);
-        }
-        next = { ...input, resume_run_id: resume.resume_run_id, resume_checkpoint: resume.resume_checkpoint };
+        const payload = parseImageGenerationResponse(await post(imageGenerationUrl, buildImageGenerationRequest(next)));
+        if (!new Set(["READY", "READY_DISCOVERY", "PARTIAL", "COMPLETE"]).has(payload.status)) return payload;
+        const decision = typeof onProgress === "function" ? await onProgress(structuredClone(payload)) : null;
+        if (progressRequestsStop(decision)) throw stoppedAfterCheckpoint(payload);
+        if (payload.status === "COMPLETE") return payload;
+        const nextRequest = decision?.request || decision?.next_request || null;
+        if (!nextRequest) return payload;
+        next = structuredClone(nextRequest);
       }
       throw new Error("PUBLIC_IMAGE_STEP_LIMIT_EXCEEDED");
+    },
+    async fetchImageMediaDelta(mediaDelta) {
+      return fetchVerifiedImageMediaDelta(mediaDelta, { baseUrl: url.origin, fetchImpl, credentials: isLoopback ? "omit" : "same-origin", timeoutMs });
     },
     async generatePageCandidates(input) {
       if (!isLoopback && cloudSettings()?.credential_mode === "SERVER_MANAGED") throw new Error("SERVER_MANAGED_PAGE_CANDIDATES_DISABLED");

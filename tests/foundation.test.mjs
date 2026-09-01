@@ -2,9 +2,108 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { generateContentPackage, importLocalEditableDraft, inspectImportContract } from "../src/content-engine.mjs";
 import { createLocalHttpProvider } from "../src/provider-client.mjs";
-import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidateRequest, buildTextDraftRequest, parseGenerationRequest, parseImageGenerationRequest, parsePageCandidateRequest, parsePageCandidateResponse, parseTextDraftRequest, parseTextDraftResponse } from "../src/provider-contract.mjs";
+import { buildGenerationRequest, buildImageGenerationRequest, buildPageCandidateRequest, buildTextDraftRequest, canonicalImageGenerationInputPreimage, computeImageGenerationInputSha256, parseGenerationRequest, parseImageGenerationRequest, parseImageGenerationResponse, parsePageCandidateRequest, parsePageCandidateResponse, parseTextDraftRequest, parseTextDraftResponse } from "../src/provider-contract.mjs";
 import { createProfileV2 } from "../src/profile-v2.mjs";
 import { buildWorkspaceBackup, parseWorkspaceBackup, persistWorkspaceState, prepareFreshDraftWorkspace } from "../src/workspace-state.mjs";
+
+const IMAGE_NONCE = "a".repeat(64);
+const IMAGE_INPUT_SHA = "b".repeat(64);
+const IMAGE_ASSET_SHA = "c".repeat(64);
+const IMAGE_ASSET_REF = `xiaoshimei-media://sha256/${IMAGE_ASSET_SHA}`;
+
+function confirmedImageDraft(overrides = {}) {
+  return {
+    draft_id: "draft-image-contract",
+    source_input: "眼睛休息方法",
+    pillar: "wellness",
+    goal: "save",
+    titles: ["刷完手机先让眼睛休息一会儿", "眼睛发紧时我会先做这几步", "给一直盯屏幕的眼睛一个暂停"],
+    selected_title: "眼睛发紧时我会先做这几步",
+    body: "这是一段经过用户确认的完整发布正文。".repeat(24),
+    tags: ["眼部放松", "生活方式", "屏幕休息", "日常养生", "轻缓练习"],
+    recommended_image_count: 2,
+    facts: [],
+    risks: [],
+    content_type: "knowledge_card",
+    style_lock: null,
+    prompt_context: {},
+    ...overrides,
+  };
+}
+
+function imageManifest(overrides = {}) {
+  return {
+    schema: "xiaoshimei.media-asset-manifest.v1",
+    media_ref: IMAGE_ASSET_REF,
+    sha256: IMAGE_ASSET_SHA,
+    size_bytes: 3,
+    mime: "image/jpeg",
+    name: "拳架参考",
+    width: 3,
+    height: 4,
+    ...overrides,
+  };
+}
+
+function imageStartInput(overrides = {}) {
+  return {
+    mode: "START",
+    bootstrap_nonce: IMAGE_NONCE,
+    operation_snapshot: {
+      schema: "xiaoshimei.image-operation-snapshot.v1",
+      draft_record_id: "draft-record-image-contract",
+      mutation_epoch: 7,
+      confirmed_draft: confirmedImageDraft(),
+      page_count: 2,
+      production_mode: "smart",
+      reference_note: "参考手脚关系",
+    },
+    input_sha256: IMAGE_INPUT_SHA,
+    reference_manifest: [imageManifest()],
+    missing_reference_media: [{
+      media_ref: IMAGE_ASSET_REF,
+      sha256: IMAGE_ASSET_SHA,
+      size_bytes: 3,
+      mime: "image/jpeg",
+      bytes_base64: Buffer.from("abc").toString("base64"),
+    }],
+    ...overrides,
+  };
+}
+
+function imageStepInput(overrides = {}) {
+  return {
+    mode: "STEP",
+    run_id: "image-run-contract-0001",
+    checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: 1 },
+    checkpoint_preimage_sha256: "d".repeat(64),
+    logical_step_id: "render-page-2",
+    attempt_nonce: "e".repeat(64),
+    ...overrides,
+  };
+}
+
+function imageGenerationResponse(status, overrides = {}) {
+  return {
+    schema: "xiaoshimei.image-generation-response.v1",
+    status,
+    bootstrap_nonce: IMAGE_NONCE,
+    input_sha256: IMAGE_INPUT_SHA,
+    run_id: "image-run-contract-0001",
+    checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: status === "PARTIAL" ? 1 : 2 },
+    checkpoint_preimage_sha256: status === "PARTIAL" ? "d".repeat(64) : "f".repeat(64),
+    logical_step_id: status === "PARTIAL" ? "render-page-1" : "render-page-2",
+    progress: { completed_steps: status === "PARTIAL" ? 1 : 2, total_steps: 2 },
+    assets: [imageManifest()],
+    media_delta: [imageManifest({ asset_url: `/api/provider/assets/image-run-contract-0001/${IMAGE_ASSET_SHA}` })],
+    error: null,
+    cached: false,
+    recoverable_until: "2026-09-08T00:00:00.000Z",
+    upstream_calls: status === "PARTIAL" ? 1 : 0,
+    ...(status === "COMPLETE" ? { content_package: { schema: "xiaoshimei.content-package.v2", pages: [{ image_style: { src: IMAGE_ASSET_REF } }] } } : {}),
+    ...overrides,
+  };
+}
 
 test("a normal 1–8 page local draft can resume without importing authority", () => {
   const draft = generateContentPackage({ topic: "安全续编" });
@@ -254,95 +353,284 @@ test("local Provider preserves a safe upstream failure code for the GUI", async 
   );
 });
 
-test("two-node provider client keeps text and image requests on separate endpoints", async () => {
-  const seen = [];
-  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
-  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-1", created_at: new Date(0).toISOString(), source_input: "眼睛休息方法", text_requirements: "语气生活化", pillar: "wellness", goal: "save", titles: ["刷完手机先让眼睛休息一会儿", "眼睛发紧时我会先做这几步", "给一直盯屏幕的眼睛一个暂停"], selected_title: "眼睛发紧时我会先做这几步", body, tags: ["眼部放松", "生活方式", "屏幕休息", "日常养生", "轻缓练习"], recommended_image_count: 4, facts: [], risks: [], generation: {} };
-  const provider = createLocalHttpProvider({ endpoint: "http://127.0.0.1:9909/generate", fetchImpl: async (url, options) => { seen.push({ url: String(url), body: JSON.parse(options.body) }); return { ok: true, json: async () => String(url).endsWith("/text-draft") ? draft : generateContentPackage({ topic: "完成" }) }; } });
-  const text = await provider.generateTextDraft({ topic: "眼睛休息方法", text_requirements: "语气生活化", pillar: "wellness", goal: "save", profile_contract: { schema: "xiaoshimei.generation-profile-contract.v2" } });
-  await provider.generateImages({ draft: text, image_count: "AUTO" });
-  assert.equal(seen[0].url, "http://127.0.0.1:9909/text-draft");
-  assert.equal(seen[1].url, "http://127.0.0.1:9909/generate-images");
-  assert.equal(parseTextDraftRequest(buildTextDraftRequest({ topic: "眼睛休息方法", text_requirements: "语气生活化", pillar: "wellness", goal: "save", profile_contract: {} })).text_requirements, "语气生活化");
-  assert.deepEqual(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: "AUTO" })), { draft: parseTextDraftResponse(draft), production_mode: "smart", image_count: "AUTO", resume_run_id: null, resume_checkpoint: null, reference_images: [], reference_note: "" });
-  assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, production_mode: "infographic", image_count: 4 })).production_mode, "infographic");
-  assert.throws(() => buildImageGenerationRequest({ draft, production_mode: "pretty", image_count: 4 }), /IMAGE_GENERATION_PRODUCTION_MODE_INVALID/);
-  assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 4, resume_run_id: "images-2026-08-15T00-00-00-000Z-1234abcd" })).resume_run_id, "images-2026-08-15T00-00-00-000Z-1234abcd");
-  assert.equal(parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 1, reference_images: [{ name: "拳架", data_url: "data:image/png;base64,AAAA" }], reference_note: "参考手脚关系" })).reference_images[0].name, "拳架");
-  assert.throws(() => parseImageGenerationRequest(buildImageGenerationRequest({ draft, image_count: 1, reference_images: [1, 2, 3, 4].map((index) => ({ name: `参考${index}`, data_url: "data:image/png;base64,AAAA" })) })), /IMAGE_GENERATION_REFERENCES_INVALID/);
+test("image transport is an exact START, DISCOVER or STEP union", () => {
+  const start = parseImageGenerationRequest(buildImageGenerationRequest(imageStartInput()));
+  assert.equal(start.mode, "START");
+  assert.equal(start.operation_snapshot.schema, "xiaoshimei.image-operation-snapshot.v1");
+  assert.equal(start.reference_manifest[0].media_ref, IMAGE_ASSET_REF);
+  assert.equal(start.missing_reference_media[0].bytes_base64, "YWJj");
+
+  const discoverInput = { mode: "DISCOVER", bootstrap_nonce: IMAGE_NONCE, input_sha256: IMAGE_INPUT_SHA };
+  assert.deepEqual(parseImageGenerationRequest(buildImageGenerationRequest(discoverInput)), discoverInput);
+  const step = parseImageGenerationRequest(buildImageGenerationRequest(imageStepInput()));
+  assert.equal(step.mode, "STEP");
+  assert.equal(step.logical_step_id, "render-page-2");
+
+  assert.throws(() => buildImageGenerationRequest({ ...imageStartInput(), typo: true }), /IMAGE_GENERATION_START_FIELDS_INVALID/);
+  assert.throws(() => buildImageGenerationRequest({ ...discoverInput, reference_manifest: [] }), /IMAGE_GENERATION_DISCOVER_FIELDS_INVALID/);
+  assert.throws(() => buildImageGenerationRequest({ ...imageStepInput(), draft: confirmedImageDraft() }), /IMAGE_GENERATION_STEP_FIELDS_INVALID/);
+  assert.throws(() => buildImageGenerationRequest({ ...imageStepInput(), reference_manifest: [] }), /IMAGE_GENERATION_STEP_FIELDS_INVALID/);
+  assert.throws(() => parseImageGenerationRequest({ schema: "xiaoshimei.image-generation-request.v1", input: imageStepInput(), extra: true }), /IMAGE_GENERATION_REQUEST_FIELDS_INVALID/);
+  assert.throws(() => buildImageGenerationRequest({ mode: "RESUME", bootstrap_nonce: IMAGE_NONCE, input_sha256: IMAGE_INPUT_SHA }), /IMAGE_GENERATION_MODE_INVALID/);
 });
 
-test("image client follows public step checkpoints until the final content and reports every saved step", async () => {
-  const seen = [];
-  const progress = [];
-  const events = [];
-  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
-  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-1", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
-  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-abcdef12" };
-  const finalContent = generateContentPackage({ topic: "分步完成" });
+test("image input identity hashes only the normalized immutable snapshot and ordered manifest", async () => {
+  const input = imageStartInput();
+  const preimage = canonicalImageGenerationInputPreimage({ operation_snapshot: input.operation_snapshot, reference_manifest: input.reference_manifest });
+  assert.deepEqual(Object.keys(JSON.parse(preimage)), ["operation_snapshot", "reference_manifest"]);
+  assert.doesNotMatch(preimage, /bytes_base64|YWJj|bootstrap_nonce/);
+  const hash = await computeImageGenerationInputSha256({ operation_snapshot: input.operation_snapshot, reference_manifest: input.reference_manifest });
+  assert.match(hash, /^[0-9a-f]{64}$/);
+  const sameWithDifferentTransferBytes = await computeImageGenerationInputSha256({ operation_snapshot: input.operation_snapshot, reference_manifest: input.reference_manifest, missing_reference_media: [{ bytes_base64: "different" }] });
+  assert.equal(sameWithDifferentTransferBytes, hash);
+  const second = imageManifest({ media_ref: `xiaoshimei-media://sha256/${"1".repeat(64)}`, sha256: "1".repeat(64), name: "第二张参考" });
+  const ordered = await computeImageGenerationInputSha256({ operation_snapshot: input.operation_snapshot, reference_manifest: [input.reference_manifest[0], second] });
+  const reversed = await computeImageGenerationInputSha256({ operation_snapshot: input.operation_snapshot, reference_manifest: [second, input.reference_manifest[0]] });
+  assert.notEqual(reversed, ordered);
+});
+
+test("START rejects reference and physical request limits before fetch while STEP stays media-size independent", () => {
+  const exactReferenceLimit = [1, 2, 3].map((index) => imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${String(index).repeat(64)}`,
+    sha256: String(index).repeat(64),
+    size_bytes: 900000,
+    name: `边界参考${index}`,
+  }));
+  assert.doesNotThrow(() => buildImageGenerationRequest(imageStartInput({ reference_manifest: exactReferenceLimit, missing_reference_media: [] })));
+  assert.throws(
+    () => buildImageGenerationRequest(imageStartInput({ reference_manifest: [imageManifest({ size_bytes: 900001 })], missing_reference_media: [] })),
+    /IMAGE_GENERATION_REFERENCE_SIZE_INVALID/,
+  );
+  const three = [0, 1, 2].map((index) => imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${String(index + 1).repeat(64)}`,
+    sha256: String(index + 1).repeat(64),
+    size_bytes: index === 2 ? 900001 : 900000,
+    name: `参考${index + 1}`,
+  }));
+  assert.throws(
+    () => buildImageGenerationRequest(imageStartInput({ reference_manifest: three, missing_reference_media: [] })),
+    /IMAGE_GENERATION_REFERENCE_(SIZE|TOTAL)_INVALID/,
+  );
+
+  const largeManifests = [1, 2, 3].map((index) => imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${String(index).repeat(64)}`,
+    sha256: String(index).repeat(64),
+    size_bytes: 875000,
+    name: `大参考${index}`,
+  }));
+  const largeMedia = largeManifests.map((manifest) => ({
+    media_ref: manifest.media_ref,
+    sha256: manifest.sha256,
+    size_bytes: manifest.size_bytes,
+    mime: manifest.mime,
+    bytes_base64: Buffer.alloc(manifest.size_bytes, 1).toString("base64"),
+  }));
+  const withinPhysicalLimit = largeManifests.map((manifest) => ({ ...manifest, size_bytes: 873000 }));
+  const withinPhysicalMedia = withinPhysicalLimit.map((manifest) => ({
+    media_ref: manifest.media_ref,
+    sha256: manifest.sha256,
+    size_bytes: manifest.size_bytes,
+    mime: manifest.mime,
+    bytes_base64: Buffer.alloc(manifest.size_bytes, 1).toString("base64"),
+  }));
+  assert.doesNotThrow(() => buildImageGenerationRequest(imageStartInput({ reference_manifest: withinPhysicalLimit, missing_reference_media: withinPhysicalMedia })));
+  assert.throws(
+    () => buildImageGenerationRequest(imageStartInput({ reference_manifest: largeManifests, missing_reference_media: largeMedia })),
+    /IMAGE_GENERATION_REQUEST_TOO_LARGE/,
+  );
+
+  const exactStep = JSON.stringify(buildImageGenerationRequest(imageStepInput()));
+  assert.equal(exactStep, JSON.stringify(buildImageGenerationRequest(imageStepInput())));
+  assert.doesNotMatch(exactStep, /reference_manifest|missing_reference_media|bytes_base64|confirmed_draft/);
+});
+
+test("image responses expose only small manifests and COMPLETE alone may carry a ref-only content package", () => {
+  const partial = parseImageGenerationResponse(imageGenerationResponse("PARTIAL"));
+  assert.equal(partial.media_delta[0].media_ref, IMAGE_ASSET_REF);
+  assert.equal("content_package" in partial, false);
+  const complete = parseImageGenerationResponse(imageGenerationResponse("COMPLETE"));
+  assert.equal(complete.content_package.pages[0].image_style.src, IMAGE_ASSET_REF);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("PARTIAL", { content_package: complete.content_package })), /IMAGE_GENERATION_RESPONSE_CONTENT_INVALID/);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("COMPLETE", { content_package: { pages: [{ image_style: { src: "data:image/jpeg;base64,AAAA" } }] } })), /IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN/);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("COMPLETE", { content_package: { pages: [{ image_style: { src: IMAGE_ASSET_REF, bytes: [1, 2, 3] } }] } })), /IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN/);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("COMPLETE", { content_package: { pages: [{ image_style: { src: IMAGE_ASSET_REF, asset_url: `/api/provider/assets/run-1/${IMAGE_ASSET_SHA}` } }] } })), /IMAGE_GENERATION_RESPONSE_MEDIA_INLINE_FORBIDDEN/);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("PARTIAL", { media_delta: [imageManifest()] })), /IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_ASSET_URL_REQUIRED/);
+  assert.throws(() => parseImageGenerationResponse(imageGenerationResponse("PARTIAL", { media_delta: [imageManifest({ asset_url: `/api/provider/assets/a-different-run/${IMAGE_ASSET_SHA}` })] })), /IMAGE_GENERATION_REFERENCE_1_ASSET_URL_INVALID/);
+  assert.throws(() => parseImageGenerationResponse({ ...imageGenerationResponse("COMPLETE"), extra: true }), /IMAGE_GENERATION_RESPONSE_FIELDS_INVALID/);
+});
+
+test("image media deltas are fetched from the same run and verified before local persistence", async () => {
+  const bytes = Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
+  const sha256 = "1d4d47030772999b01d3d1ba14be0f13ce77efc2860086dfaefdb0e8bacf6b2b";
+  const assetUrl = `/api/provider/assets/image-run-contract-0001/${sha256}`;
+  const calls = [];
   const provider = createLocalHttpProvider({
     endpoint: "http://127.0.0.1:9909/generate",
     fetchImpl: async (url, options) => {
-      const request = JSON.parse(options.body);
-      seen.push(request);
-      events.push(`fetch${seen.length}`);
-      if (seen.length === 1) return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
-      return { ok: true, status: 200, json: async () => finalContent };
+      calls.push({ url: String(url), options });
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "content-type": "image/jpeg",
+          "content-length": String(bytes.byteLength),
+          "x-content-sha256": sha256,
+          "cache-control": "private, no-store",
+          "x-content-type-options": "nosniff",
+        }),
+        arrayBuffer: async () => bytes.buffer.slice(0),
+      };
     },
   });
-  const result = await provider.generateImages({ draft, image_count: 2 }, async (value) => {
-    events.push("persist");
-    await Promise.resolve();
-    events.push("readback");
-    progress.push(value);
+  const materialized = await provider.fetchImageMediaDelta([imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${sha256}`,
+    sha256,
+    size_bytes: bytes.byteLength,
+    asset_url: assetUrl,
+  })]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, `http://127.0.0.1:9909${assetUrl}`);
+  assert.equal(calls[0].options.redirect, "error");
+  assert.equal("asset_url" in materialized[0], false);
+  assert.deepEqual(materialized[0].bytes, bytes);
+
+  const corruptProvider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "image/jpeg", "content-length": String(bytes.byteLength), "x-content-sha256": "0".repeat(64), "cache-control": "private, no-store", "x-content-type-options": "nosniff" }),
+      arrayBuffer: async () => bytes.buffer.slice(0),
+    }),
   });
-  assert.equal(result.selectedTitle, finalContent.selectedTitle);
-  assert.equal(seen.length, 2);
-  assert.equal(seen[1].input.resume_run_id, checkpoint.run_id);
-  assert.equal(seen[1].input.resume_checkpoint.run_id, checkpoint.run_id);
-  assert.equal(progress.length, 1);
-  assert.equal(progress[0].completed_image_steps, 1);
-  assert.deepEqual(events, ["fetch1", "persist", "readback", "fetch2"]);
+  await assert.rejects(() => corruptProvider.fetchImageMediaDelta([imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${sha256}`,
+    sha256,
+    size_bytes: bytes.byteLength,
+    asset_url: assetUrl,
+  })]), /IMAGE_MEDIA_HEADER_HASH_MISMATCH/);
+
+  const corruptBody = Uint8Array.from([0xff, 0xd8, 0xff, 0x01, 0xff, 0xd9]);
+  const corruptBodyProvider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "image/jpeg", "content-length": String(bytes.byteLength), "x-content-sha256": sha256, "cache-control": "private, no-store", "x-content-type-options": "nosniff" }),
+      arrayBuffer: async () => corruptBody.buffer.slice(0),
+    }),
+  });
+  await assert.rejects(() => corruptBodyProvider.fetchImageMediaDelta([imageManifest({
+    media_ref: `xiaoshimei-media://sha256/${sha256}`,
+    sha256,
+    size_bytes: bytes.byteLength,
+    asset_url: assetUrl,
+  })]), /IMAGE_MEDIA_BODY_HASH_MISMATCH/);
 });
 
-test("a failed checkpoint persist stops the image client before the next server request", async () => {
+test("image client advances only after the consumer returns an explicit next request", async () => {
+  const seen = [];
+  const observed = [];
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async (_url, options) => {
+      seen.push(JSON.parse(options.body));
+      return { ok: true, status: 200, json: async () => seen.length === 1 ? imageGenerationResponse("PARTIAL") : imageGenerationResponse("COMPLETE") };
+    },
+  });
+  const result = await provider.generateImages(imageStartInput(), async (payload) => {
+    observed.push(payload.media_delta.map((asset) => asset.media_ref));
+    return payload.status === "PARTIAL" ? { action: "CONTINUE", request: imageStepInput() } : { action: "COMPLETE" };
+  });
+  assert.equal(result.status, "COMPLETE");
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0].input.mode, "START");
+  assert.equal(seen[1].input.mode, "STEP");
+  assert.deepEqual(observed, [[IMAGE_ASSET_REF], [IMAGE_ASSET_REF]]);
+});
+
+test("image client STOP and cached replay both use the same consumer gate and never send a second request", async () => {
   let fetches = 0;
-  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
-  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-persist-fail", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
-  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-deadbeef" };
   const provider = createLocalHttpProvider({
     endpoint: "http://127.0.0.1:9909/generate",
     fetchImpl: async () => {
       fetches += 1;
-      return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
+      return { ok: true, status: 200, json: async () => imageGenerationResponse("PARTIAL", { cached: true, upstream_calls: 0 }) };
     },
   });
   await assert.rejects(
-    () => provider.generateImages({ draft, image_count: 2 }, async () => { throw new Error("READBACK_FAILED"); }),
-    /READBACK_FAILED/,
+    () => provider.generateImages(imageStartInput(), async (payload) => {
+      assert.equal(payload.cached, true);
+      assert.equal(payload.media_delta[0].media_ref, IMAGE_ASSET_REF);
+      return { action: "STOP" };
+    }),
+    (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT" && error.intentionalStop === true,
   );
   assert.equal(fetches, 1);
 });
 
-test("a resumable server error checkpoint is persisted before the original error reaches the UI", async () => {
-  const events = [];
-  const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
-  const draft = { schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-error", created_at: new Date(0).toISOString(), source_input: "分步生成", text_requirements: "", pillar: "wellness", goal: "save", titles: ["分步生成第一种清楚做法", "分步生成第二种清楚做法", "分步生成第三种清楚做法"], selected_title: "分步生成第一种清楚做法", body, tags: ["分步生成", "图片恢复", "生活方式", "日常记录", "小师妹"], recommended_image_count: 2, facts: [], risks: [], generation: {} };
-  const checkpoint = { schema: "xiaoshimei.public-image-run.v1", run_id: "images-2026-08-31T08-00-00-000Z-feedface" };
-  const provider = createLocalHttpProvider({
-    endpoint: "http://127.0.0.1:9909/generate",
-    fetchImpl: async () => {
-      events.push("fetch");
-      return { ok: false, status: 422, json: async () => ({ error: "ARK_PROBE_FAILED", code: "IMAGE_STEP_FAILED", stage: "image", details: { resume_run_id: checkpoint.run_id, resume_checkpoint: checkpoint, completed_image_steps: 1, total_image_steps: 2 } }) };
-    },
-  });
-  await assert.rejects(
-    () => provider.generateImages({ draft, image_count: 2 }, async () => {
-      events.push("persist");
-      await Promise.resolve();
-      events.push("readback");
-    }),
-    (error) => error.providerCode === "IMAGE_STEP_FAILED" && error.checkpointPersisted === true,
-  );
-  assert.deepEqual(events, ["fetch", "persist", "readback"]);
+test("READY, READY discovery and COMPLETE all pass through the same persistence consumer", async () => {
+  for (const status of ["READY", "READY_DISCOVERY", "COMPLETE"]) {
+    let fetches = 0;
+    let consumerCalls = 0;
+    const provider = createLocalHttpProvider({
+      endpoint: "http://127.0.0.1:9909/generate",
+      fetchImpl: async () => {
+        fetches += 1;
+        return { ok: true, status: 200, json: async () => imageGenerationResponse(status) };
+      },
+    });
+    await assert.rejects(
+      () => provider.generateImages(imageStartInput(), async () => {
+        consumerCalls += 1;
+        return { action: "STOP" };
+      }),
+      (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT",
+    );
+    assert.equal(consumerCalls, 1, `${status} must reach the persistence consumer`);
+    assert.equal(fetches, 1, `${status} STOP must not issue another request`);
+  }
+});
+
+test("access login reconciles 2xx and ambiguous outcomes exactly once, while explicit auth failures stay exact", async () => {
+  const previousLocation = globalThis.location;
+  const previousSessionStorage = globalThis.sessionStorage;
+  Object.defineProperty(globalThis, "location", { configurable: true, value: new URL("https://studio.example/") });
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: { getItem: () => null, setItem: () => {}, removeItem: () => {} } });
+  try {
+    for (const status of [401, 403, 503]) {
+      const calls = [];
+      const provider = createLocalHttpProvider({
+        endpoint: "https://studio.example/api/provider/generate",
+        fetchImpl: async (url) => {
+          calls.push(String(url));
+          return { ok: false, status, json: async () => ({ code: `EXPLICIT_${status}` }) };
+        },
+      });
+      await assert.rejects(() => provider.authenticateAccess("correct-code", { generation: status }), (error) => error.httpStatus === status && error.providerCode === `EXPLICIT_${status}`);
+      assert.equal(calls.filter((url) => url.endsWith("/config")).length, 0);
+    }
+
+    for (const kind of ["2xx", "transport", "body"]) {
+      const calls = [];
+      const provider = createLocalHttpProvider({
+        endpoint: "https://studio.example/api/provider/generate",
+        fetchImpl: async (url) => {
+          calls.push(String(url));
+          if (String(url).endsWith("/config")) return { ok: true, status: 200, json: async () => ({ authenticated: true, configured: true, credential_mode: "SERVER_MANAGED" }) };
+          if (kind === "transport") throw new TypeError("fetch failed");
+          if (kind === "body") return { ok: true, status: 200, json: async () => { throw new SyntaxError("bad json"); } };
+          return { ok: true, status: 200, json: async () => ({ authenticated: true }) };
+        },
+      });
+      const result = await provider.authenticateAccess("correct-code", { generation: 17 });
+      assert.equal(result.generation, 17);
+      assert.equal(result.config.authenticated, true);
+      assert.equal(result.outcome, kind === "2xx" ? "CONFIG_RECONCILED" : "CONFIG_RECONCILED_AMBIGUOUS");
+      assert.equal(calls.filter((url) => url.endsWith("/config")).length, 1);
+    }
+  } finally {
+    Object.defineProperty(globalThis, "location", { configurable: true, value: previousLocation });
+    Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: previousSessionStorage });
+  }
 });

@@ -44,9 +44,13 @@ import { cleanupGeneratedGridArtifacts } from "../src/mother-sheet-artifact-clea
 import { detectUniformEdgeInsets, exactThreeByFourCrop } from "../src/mother-sheet-trim.mjs";
 import { assertXhsPublishQuality } from "../src/xhs-publish-quality.mjs";
 import {
+  IMAGE_GENERATION_RESPONSE_SCHEMA,
+  IMAGE_MEDIA_MANIFEST_SCHEMA,
   PAGE_CANDIDATE_RESPONSE_SCHEMA,
   TEXT_DRAFT_RESPONSE_SCHEMA,
+  canonicalImageGenerationInputPreimage,
   parseImageGenerationRequest,
+  parseImageGenerationResponse,
   parsePageCandidateRequest,
   parseTextDraftRequest,
 } from "../src/provider-contract.mjs";
@@ -63,12 +67,21 @@ export const PUBLIC_GENERATION_RESPONSE_MAX_BYTES = 4_000_000;
 // wrapping is not resumable in production.
 const PUBLIC_TILE_PAYLOAD_BUDGET_BYTES = 2_300_000;
 const PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA = "xiaoshimei.public-image-step-response.v1";
-export const ACCESS_SESSION_COOKIE = "__Host-xiaoshimei_session";
+export const ACCESS_SESSION_COOKIE = "__Host-xiaoshimei_session_";
 export const ACCESS_SESSION_TTL_SECONDS = 12 * 60 * 60;
+export const ACCESS_COOKIE_HEADER_MAX_BYTES = 8_192;
+export const ACCESS_SESSION_MAX_PAIRS = 16;
+export const ACCESS_SESSION_PAID_MIN_REMAINING_MS = 270_000;
 export const IMAGE_LEDGER_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const IMAGE_LEDGER_IN_FLIGHT_LEASE_MS = 360_000;
+export const IMAGE_PLANNER_LEASE_MS = 240_000;
+export const IMAGE_LEDGER_COMMIT_MARGIN_MS = 30_000;
+export const IMAGE_TRANSACTION_RESPONSE_MAX_BYTES = 1_250_000;
+export const IMAGE_ASSET_SHA256_HEADER = "x-content-sha256";
 const SERVER_MANAGED_PROVIDER_ROUTES = new Set(["text-draft", "generate-images", "page-candidates"]);
 const IMAGE_LEDGER_MAX_CACHE_BYTES = PUBLIC_GENERATION_RESPONSE_MAX_BYTES + 64_000;
+const ACCESS_SESSION_COOKIE_PATTERN = /^__Host-xiaoshimei_session_([0-9a-f]{32})$/;
+const ACCESS_SESSION_HMAC_DOMAIN = Buffer.from("xiaoshimei-access-session-v1\0", "utf8");
 
 export function publicTileBudgetForResponse(unitCount) {
   const count = Math.max(1, Number(unitCount) || 1);
@@ -137,7 +150,8 @@ export function inspectServerAccessConfig(env = process.env) {
   const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
   const appOrigin = configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
   const ready = /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
-  return { ready, accessCodeSha256, sessionSecret, appOrigin };
+  const appScope = appOrigin ? `xiaoshimei-studio:${createHash("sha256").update(appOrigin).digest("hex").slice(0, 32)}` : "";
+  return { ready, accessCodeSha256, sessionSecret, appOrigin, appScope };
 }
 
 function imageLedgerEnv(env = process.env) {
@@ -153,18 +167,26 @@ function requestHeader(request, name) {
   return Array.isArray(value) ? "" : String(value || "");
 }
 
-function requestHasExactOrigin(request, expectedOrigin) {
-  return Boolean(expectedOrigin) && requestHeader(request, "origin") === expectedOrigin;
+function requestHasExactSameOriginWriteGate(request, expectedOrigin) {
+  if (!expectedOrigin || requestHeader(request, "origin") !== expectedOrigin) return false;
+  let expected;
+  try { expected = new URL(expectedOrigin); } catch { return false; }
+  return requestHeader(request, "sec-fetch-site") === "same-origin"
+    && requestHeader(request, "host") === expected.host
+    && requestHeader(request, "x-forwarded-host") === expected.host
+    && requestHeader(request, "x-forwarded-proto") === "https";
 }
 
-function cookieValue(request, name) {
-  const header = requestHeader(request, "cookie");
-  for (const part of header.split(";")) {
-    const separator = part.indexOf("=");
-    if (separator < 1) continue;
-    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
-  }
-  return "";
+function requestHasExactSameOriginReadGate(request, expectedOrigin) {
+  if (!expectedOrigin) return false;
+  let expected;
+  try { expected = new URL(expectedOrigin); } catch { return false; }
+  const origin = requestHeader(request, "origin");
+  return (origin === "" || origin === expectedOrigin)
+    && requestHeader(request, "sec-fetch-site") === "same-origin"
+    && requestHeader(request, "host") === expected.host
+    && requestHeader(request, "x-forwarded-host") === expected.host
+    && requestHeader(request, "x-forwarded-proto") === "https";
 }
 
 function safeEqual(left, right) {
@@ -174,34 +196,125 @@ function safeEqual(left, right) {
 export function mintAccessSession(configValue, { nowMs = Date.now(), sessionId = randomUUID() } = {}) {
   if (!configValue?.ready) throw new TypeError("ACCESS_CONFIGURATION_REQUIRED");
   const issuedAt = Math.floor(nowMs / 1000);
-  const payload = Buffer.from(JSON.stringify({ v: 1, sid: String(sessionId), iat: issuedAt, exp: issuedAt + ACCESS_SESSION_TTL_SECONDS })).toString("base64url");
-  const signature = createHmac("sha256", configValue.sessionSecret).update(payload).digest("base64url");
-  return { token: `${payload}.${signature}`, expiresAt: new Date((issuedAt + ACCESS_SESSION_TTL_SECONDS) * 1000) };
+  const claims = {
+    v: 1,
+    app_scope: configValue.appScope,
+    origin: configValue.appOrigin,
+    sid: String(sessionId),
+    iat: issuedAt,
+    exp: issuedAt + ACCESS_SESSION_TTL_SECONDS,
+  };
+  const payload = Buffer.from(canonicalJson(claims), "utf8").toString("base64url");
+  const signature = createHmac("sha256", configValue.sessionSecret).update(ACCESS_SESSION_HMAC_DOMAIN).update(payload).digest("base64url");
+  const token = `${payload}.${signature}`;
+  const tokenSha256 = createHash("sha256").update(token, "utf8").digest("hex");
+  return {
+    token,
+    cookieName: `${ACCESS_SESSION_COOKIE}${tokenSha256.slice(0, 32)}`,
+    tokenSha256,
+    claims,
+    expiresAt: new Date(claims.exp * 1000),
+  };
 }
 
-export function verifyAccessSession(token, configValue, { nowMs = Date.now() } = {}) {
-  if (!configValue?.ready || typeof token !== "string" || token.length > 1024) return false;
+function decodeCanonicalBase64Url(value, { exactBytes = null } = {}) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value) || value.includes("=")) return null;
+  let bytes;
+  try { bytes = Buffer.from(value, "base64url"); } catch { return null; }
+  if (!bytes.length || bytes.toString("base64url") !== value) return null;
+  if (exactBytes != null && bytes.length !== exactBytes) return null;
+  return bytes;
+}
+
+function parseAccessSession(token, configValue, { nowMs = Date.now() } = {}) {
+  if (!configValue?.ready || typeof token !== "string" || token.length > 2_048) return null;
   const parts = token.split(".");
-  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
-  let actualSignature;
+  if (parts.length !== 2 || !parts[0] || !parts[1] || parts[1].length !== 43) return null;
+  const payloadBytes = decodeCanonicalBase64Url(parts[0]);
+  const actualSignature = decodeCanonicalBase64Url(parts[1], { exactBytes: 32 });
+  if (!payloadBytes || !actualSignature) return null;
   let payload;
   try {
-    actualSignature = Buffer.from(parts[1], "base64url");
-    payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    payload = JSON.parse(payloadBytes.toString("utf8"));
   } catch {
-    return false;
+    return null;
   }
-  const expectedSignature = createHmac("sha256", configValue.sessionSecret).update(parts[0]).digest();
-  if (!safeEqual(actualSignature, expectedSignature)) return false;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const exactKeys = ["app_scope", "exp", "iat", "origin", "sid", "v"];
+  if (Object.keys(payload).sort().join("\0") !== exactKeys.join("\0")) return null;
+  if (canonicalJson(payload) !== payloadBytes.toString("utf8")) return null;
+  const expectedSignature = createHmac("sha256", configValue.sessionSecret).update(ACCESS_SESSION_HMAC_DOMAIN).update(parts[0]).digest();
+  if (!safeEqual(actualSignature, expectedSignature)) return null;
   const now = Math.floor(nowMs / 1000);
-  return payload?.v === 1
+  const valid = payload.v === 1
+    && payload.app_scope === configValue.appScope
+    && payload.origin === configValue.appOrigin
     && typeof payload.sid === "string" && payload.sid.length >= 8 && payload.sid.length <= 160
     && Number.isInteger(payload.iat) && Number.isInteger(payload.exp)
     && payload.iat <= now + 60 && payload.exp > now && payload.exp - payload.iat === ACCESS_SESSION_TTL_SECONDS;
+  return valid ? payload : null;
 }
 
-function requestHasValidAccessSession(request, accessConfig, nowMs = Date.now()) {
-  return verifyAccessSession(cookieValue(request, ACCESS_SESSION_COOKIE), accessConfig, { nowMs });
+export function verifyAccessSession(token, configValue, { nowMs = Date.now() } = {}) {
+  return Boolean(parseAccessSession(token, configValue, { nowMs }));
+}
+
+function parseCookiePairs(header) {
+  const pairs = [];
+  for (const part of String(header || "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1) continue;
+    const name = part.slice(0, separator).trim();
+    if (!name) continue;
+    pairs.push({ name, value: part.slice(separator + 1).trim() });
+  }
+  return pairs;
+}
+
+export function inspectAccessSessionCandidates(cookieHeader, accessConfig, { nowMs = Date.now(), allowFamilyOverflow = false } = {}) {
+  const header = String(cookieHeader || "");
+  const rawBytes = Buffer.byteLength(header, "utf8");
+  const pairs = parseCookiePairs(header);
+  const familyPairs = pairs.filter((pair) => ACCESS_SESSION_COOKIE_PATTERN.test(pair.name));
+  const headerTooLarge = rawBytes > ACCESS_COOKIE_HEADER_MAX_BYTES;
+  const familyOverflow = familyPairs.length > ACCESS_SESSION_MAX_PAIRS;
+  const valid = [];
+  if (!headerTooLarge && (!familyOverflow || allowFamilyOverflow)) {
+    for (const pair of familyPairs) {
+      const claims = parseAccessSession(pair.value, accessConfig, { nowMs });
+      if (!claims) continue;
+      const tokenSha256 = createHash("sha256").update(pair.value, "utf8").digest("hex");
+      if (pair.name !== `${ACCESS_SESSION_COOKIE}${tokenSha256.slice(0, 32)}`) continue;
+      valid.push({
+        cookieName: pair.name,
+        token: pair.value,
+        tokenSha256,
+        claims,
+      });
+    }
+  }
+  valid.sort((left, right) => {
+    const leftKey = [left.claims.iat, left.claims.exp, left.tokenSha256, left.cookieName];
+    const rightKey = [right.claims.iat, right.claims.exp, right.tokenSha256, right.cookieName];
+    for (let index = 0; index < leftKey.length; index += 1) {
+      if (leftKey[index] < rightKey[index]) return -1;
+      if (leftKey[index] > rightKey[index]) return 1;
+    }
+    return 0;
+  });
+  const preferred = valid.at(-1) || null;
+  const capabilityExpiresAtMs = valid.length ? Math.max(...valid.map((item) => item.claims.exp * 1_000)) : 0;
+  return {
+    rawBytes,
+    headerTooLarge,
+    familyPairCount: familyPairs.length,
+    familyOverflow,
+    familyPairs,
+    valid,
+    preferred,
+    capabilityExpiresAtMs,
+    authenticated: !headerTooLarge && !familyOverflow && Boolean(preferred),
+  };
 }
 
 function boundedAccessCode(body) {
@@ -220,8 +333,12 @@ function accessCodeMatches(code, accessConfig) {
   return safeEqual(actual, expected);
 }
 
-function accessSessionCookie(token, expiresAt) {
-  return `${ACCESS_SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ACCESS_SESSION_TTL_SECONDS}; Expires=${expiresAt.toUTCString()}`;
+function accessSessionCookie(session) {
+  return `${session.cookieName}=${session.token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ACCESS_SESSION_TTL_SECONDS}`;
+}
+
+function deleteAccessSessionCookie(cookieName) {
+  return `${cookieName}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
 }
 
 function requestConfig(request, env = process.env) {
@@ -243,7 +360,10 @@ function publicProviderConfig(request, { env = process.env, nowMs = Date.now() }
   const configured = configuredServerManaged(env);
   const access = inspectServerAccessConfig(env);
   const ledger = imageLedgerEnv(env);
-  const authenticated = configured && access.ready && requestHasValidAccessSession(request, access, nowMs);
+  const candidates = configured && access.ready
+    ? inspectAccessSessionCandidates(requestHeader(request, "cookie"), access, { nowMs })
+    : { authenticated: false };
+  const authenticated = Boolean(candidates.authenticated);
   return {
     status: configured ? access.ready ? authenticated ? "CONFIGURED_UNVERIFIED" : "ACCESS_SESSION_REQUIRED" : "ACCESS_CONFIGURATION_REQUIRED" : "AWAITING_BYOK",
     configured,
@@ -544,6 +664,163 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function sha256Json(value) {
+  return sha256Bytes(Buffer.from(canonicalJson(value), "utf8"));
+}
+
+function d36RunId(appScopeId, bootstrapNonce) {
+  const digest = sha256Bytes(Buffer.from(`xiaoshimei-image-run-v1\0${appScopeId}\0${bootstrapNonce}`, "utf8"));
+  return `images-${BigInt(`0x${digest}`).toString(10)}-${digest.slice(0, 8)}`;
+}
+
+function d36RunRoot(runId) {
+  if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(String(runId || ""))) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
+  return `xiaoshimei:image-d36:{${runId}}`;
+}
+
+function d36AssetKey(runId, sha256) {
+  if (!/^[0-9a-f]{64}$/.test(String(sha256 || ""))) throw new TypeError("IMAGE_ASSET_SHA_INVALID");
+  return `${d36RunRoot(runId)}:asset:${sha256}`;
+}
+
+function d36InventoryKey(runId) {
+  return `${d36RunRoot(runId)}:inventory`;
+}
+
+function d36StepActionId(runId, checkpointSha256, logicalStepId) {
+  return sha256Bytes(Buffer.from(`xiaoshimei-image-step-v1\0${runId}\0${checkpointSha256}\0${logicalStepId}`, "utf8"));
+}
+
+function d36CheckpointPreimage(compactRun, apiKey) {
+  const base = {
+    schema: "xiaoshimei.image-checkpoint.v1",
+    run_id: compactRun.run_id,
+    run_state_sha256: sha256Json(compactRun),
+    status: compactRun.status,
+    phase: compactRun.phase,
+    next_job_index: compactRun.next_job_index,
+    actual_image_calls: compactRun.actual_image_calls,
+  };
+  return {
+    ...base,
+    signature: createHmac("sha256", apiKey)
+      .update("xiaoshimei-image-checkpoint-v1\0", "utf8")
+      .update(canonicalJson(base), "utf8")
+      .digest("hex"),
+  };
+}
+
+export function createImageTransactionCheckpoint(compactRun, apiKey) {
+  return d36CheckpointPreimage(compactRun, apiKey);
+}
+
+export function imageTransactionCheckpointSha256(checkpointPreimage) {
+  return sha256Json(checkpointPreimage);
+}
+
+function verifyD36CheckpointPreimage(value, apiKey, expected = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("IMAGE_CHECKPOINT_INVALID");
+  const keys = Object.keys(value).sort();
+  const exact = ["actual_image_calls", "next_job_index", "phase", "run_id", "run_state_sha256", "schema", "signature", "status"].sort();
+  if (keys.length !== exact.length || keys.some((key, index) => key !== exact[index])) throw new TypeError("IMAGE_CHECKPOINT_INVALID");
+  if (value.schema !== "xiaoshimei.image-checkpoint.v1"
+    || !/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(value.run_id)
+    || !/^[0-9a-f]{64}$/.test(value.run_state_sha256)
+    || !/^[0-9a-f]{64}$/.test(value.signature)
+    || !Number.isInteger(value.next_job_index) || value.next_job_index < 0
+    || !Number.isInteger(value.actual_image_calls) || value.actual_image_calls < 0) throw new TypeError("IMAGE_CHECKPOINT_INVALID");
+  const base = { ...value };
+  delete base.signature;
+  const signature = createHmac("sha256", apiKey)
+    .update("xiaoshimei-image-checkpoint-v1\0", "utf8")
+    .update(canonicalJson(base), "utf8")
+    .digest("hex");
+  if (!safeEqual(Buffer.from(signature, "hex"), Buffer.from(value.signature, "hex"))) throw new TypeError("IMAGE_CHECKPOINT_SIGNATURE_INVALID");
+  if (expected.runId && value.run_id !== expected.runId) throw new TypeError("IMAGE_CHECKPOINT_RUN_MISMATCH");
+  if (expected.checkpointSha256 && sha256Json(value) !== expected.checkpointSha256) throw new TypeError("IMAGE_CHECKPOINT_HASH_MISMATCH");
+  return structuredClone(value);
+}
+
+function d36LogicalStepId(compactRun) {
+  if (compactRun.status === "COMPLETE") return "complete";
+  return `render-job-${String(compactRun.next_job_index + 1).padStart(2, "0")}`;
+}
+
+function d36RecoverableUntil(value) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : "";
+}
+
+function d36ManifestFromAsset(asset, runId) {
+  const sha256 = String(asset.sha256 || "");
+  return {
+    schema: IMAGE_MEDIA_MANIFEST_SCHEMA,
+    media_ref: `xiaoshimei-media://sha256/${sha256}`,
+    sha256,
+    size_bytes: Number(asset.size_bytes),
+    mime: "image/jpeg",
+    name: String(asset.name || asset.unit_id || `配图-${sha256.slice(0, 8)}`).slice(0, 100),
+    width: Number(asset.width),
+    height: Number(asset.height),
+    asset_url: `/api/provider/assets/${runId}/${sha256}`,
+  };
+}
+
+function stripAssetUrl(manifest) {
+  const value = structuredClone(manifest);
+  delete value.asset_url;
+  return value;
+}
+
+function assertExactJpegAsset(bytes, manifest) {
+  const value = Buffer.from(bytes);
+  if (sha256Bytes(value) !== manifest.sha256) throw new TypeError("IMAGE_ASSET_HASH_MISMATCH");
+  if (value.length !== manifest.size_bytes) throw new TypeError("IMAGE_ASSET_SIZE_MISMATCH");
+  const info = inspectImageBytes(value);
+  if (info.mime !== "image/jpeg" || manifest.mime !== "image/jpeg") throw new TypeError("IMAGE_ASSET_MIME_MISMATCH");
+  if (Number(manifest.width) !== info.width || Number(manifest.height) !== info.height) throw new TypeError("IMAGE_ASSET_DIMENSIONS_MISMATCH");
+  return value;
+}
+
+function compactPublicImageRun(run) {
+  const compact = structuredClone(run);
+  compact.assets = compact.assets.map((asset) => ({
+    ...asset,
+    src: `xiaoshimei-media://sha256/${asset.sha256}`,
+  }));
+  return compact;
+}
+
+async function hydrateCompactPublicImageRun(compactRun, imageLedger) {
+  const hydrated = structuredClone(compactRun);
+  hydrated.assets = [];
+  for (const asset of compactRun.assets || []) {
+    const stored = await imageLedger.readRunAsset({ runId: compactRun.run_id, sha256: asset.sha256 });
+    if (!stored || stored.status === "MISSING") throw new Error("IMAGE_ASSET_MISSING");
+    const bytes = Buffer.from(stored.bytes);
+    if (bytes.length !== asset.size_bytes || sha256Bytes(bytes) !== asset.sha256) throw new Error("IMAGE_ASSET_CORRUPT");
+    hydrated.assets.push({ ...asset, src: `data:image/jpeg;base64,${bytes.toString("base64")}` });
+  }
+  return parsePublicImageRun(hydrated);
+}
+
+function replaceInlineMediaWithRefs(value, manifests) {
+  const bySha = new Map(manifests.map((item) => [item.sha256, item.media_ref]));
+  const visit = (current) => {
+    if (typeof current === "string" && /^data:image\/jpeg;base64,/.test(current)) {
+      const comma = current.indexOf(",");
+      const sha256 = sha256Bytes(Buffer.from(current.slice(comma + 1), "base64"));
+      const mediaRef = bySha.get(sha256);
+      if (!mediaRef) throw new Error("IMAGE_CONTENT_MEDIA_REF_MISSING");
+      return mediaRef;
+    }
+    if (Array.isArray(current)) return current.map(visit);
+    if (!current || typeof current !== "object") return current;
+    return Object.fromEntries(Object.entries(current).map(([key, child]) => [key, visit(child)]));
+  };
+  return visit(value);
+}
+
 const IMAGE_LEDGER_INIT_LUA = `
 if redis.call('EXISTS', KEYS[1]) == 1 then
   if redis.call('HGET', KEYS[1], 'checkpoint_sha') == ARGV[1]
@@ -659,6 +936,278 @@ redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
 return {'UNKNOWN'}
 `;
 
+const D36_CLAIM_START_LUA = `
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if tonumber(ARGV[8]) - now_ms < tonumber(ARGV[9]) then return {'EXPIRY_WINDOW_TOO_SHORT'} end
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  if redis.call('HGET', KEYS[1], 'app_scope') ~= ARGV[1]
+    or redis.call('HGET', KEYS[1], 'bootstrap_nonce') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'input_sha') ~= ARGV[3]
+    or redis.call('HGET', KEYS[1], 'snapshot_sha') ~= ARGV[4]
+    or redis.call('HGET', KEYS[1], 'manifest_sha') ~= ARGV[5] then
+    return {'CONFLICT'}
+  end
+  if redis.call('EXISTS', KEYS[2]) == 0
+    or redis.call('HGET', KEYS[1], 'inventory_schema') ~= 'xiaoshimei.d36-key-inventory.v1'
+    or redis.call('SISMEMBER', KEYS[2], KEYS[1]) ~= 1
+    or redis.call('SISMEMBER', KEYS[2], KEYS[2]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+  local status = redis.call('HGET', KEYS[1], 'status') or 'UNKNOWN'
+  if status == 'PLANNING' then
+    local lease_until = tonumber(redis.call('HGET', KEYS[1], 'planner_lease_until_ms') or '0')
+    if now_ms > lease_until then
+      redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+      status = 'UNKNOWN'
+    end
+  end
+  return {status, redis.call('HGET', KEYS[1], 'planner_owner') or '', redis.call('HGET', KEYS[1], 'planner_fence') or '0', redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0'}
+end
+redis.call('SADD', KEYS[2], KEYS[1], KEYS[2])
+redis.call('HSET', KEYS[1],
+  'status', 'MATERIALIZING',
+  'app_scope', ARGV[1],
+  'bootstrap_nonce', ARGV[2],
+  'input_sha', ARGV[3],
+  'snapshot_sha', ARGV[4],
+  'manifest_sha', ARGV[5],
+  'snapshot_json', ARGV[6],
+  'manifest_json', ARGV[7],
+  'reservation_count', '0',
+  'inventory_schema', 'xiaoshimei.d36-key-inventory.v1',
+  'inventory_count', '2',
+  'recoverable_until_ms', tostring(now_ms + tonumber(ARGV[10])))
+redis.call('PEXPIRE', KEYS[1], ARGV[10])
+redis.call('PEXPIRE', KEYS[2], ARGV[10])
+return {'MATERIALIZING', '', '0', tostring(now_ms + tonumber(ARGV[10]))}
+`;
+
+const D36_DISCOVER_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'NOT_FOUND'} end
+if redis.call('HGET', KEYS[1], 'app_scope') ~= ARGV[1] then return {'CONFLICT'} end
+if ARGV[4] == '1' and (redis.call('HGET', KEYS[1], 'bootstrap_nonce') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'input_sha') ~= ARGV[3]) then return {'CONFLICT'} end
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+local status = redis.call('HGET', KEYS[1], 'status') or 'UNKNOWN'
+if status == 'PLANNING' then
+  local lease_until = tonumber(redis.call('HGET', KEYS[1], 'planner_lease_until_ms') or '0')
+  if now_ms > lease_until then
+    redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+  end
+end
+local record = redis.call('HGETALL', KEYS[1])
+local reply = {'FOUND'}
+for index = 1, #record do reply[#reply + 1] = record[index] end
+return reply
+`;
+
+const D36_PUT_ASSET_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('EXISTS', KEYS[2]) == 0
+  or redis.call('HGET', KEYS[1], 'inventory_schema') ~= 'xiaoshimei.d36-key-inventory.v1'
+  or redis.call('SISMEMBER', KEYS[2], KEYS[1]) ~= 1
+  or redis.call('SISMEMBER', KEYS[2], KEYS[2]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+local status = redis.call('HGET', KEYS[1], 'status') or 'UNKNOWN'
+if status == 'CLEANUP_FROZEN' or status == 'UNKNOWN' or status == 'COMPLETE' then return {'RUN_FROZEN'} end
+if redis.call('EXISTS', KEYS[3]) == 1 then
+  if redis.call('SISMEMBER', KEYS[2], KEYS[3]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+  if redis.call('GET', KEYS[3]) ~= ARGV[1] then return {'CAS_CONFLICT'} end
+  return {'EXISTING'}
+end
+local recoverable_until = tonumber(redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0')
+if recoverable_until <= 0 then return {'RECOVERY_DEADLINE_MISSING'} end
+redis.call('SET', KEYS[3], ARGV[1])
+local added = redis.call('SADD', KEYS[2], KEYS[3])
+if added == 1 then redis.call('HINCRBY', KEYS[1], 'inventory_count', 1) end
+redis.call('PEXPIREAT', KEYS[3], recoverable_until)
+redis.call('PEXPIREAT', KEYS[2], recoverable_until)
+return {'STORED'}
+`;
+
+const D36_CLAIM_PLANNER_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if tonumber(ARGV[4]) - now_ms < tonumber(ARGV[5]) then return {'EXPIRY_WINDOW_TOO_SHORT'} end
+local status = redis.call('HGET', KEYS[1], 'status')
+if status == 'PLANNING' then
+  local lease_until = tonumber(redis.call('HGET', KEYS[1], 'planner_lease_until_ms') or '0')
+  if now_ms > lease_until then
+    redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+    return {'UNKNOWN'}
+  end
+  return {'IN_FLIGHT'}
+end
+if status == 'READY' or status == 'PARTIAL' or status == 'COMPLETE' then return {status} end
+if status == 'UNKNOWN' then return {'UNKNOWN'} end
+if status ~= 'MATERIALIZING' then return {'CONFLICT'} end
+local fence = tonumber(redis.call('HGET', KEYS[1], 'planner_fence') or '0') + 1
+redis.call('HSET', KEYS[1],
+  'status', 'PLANNING',
+  'planner_owner', ARGV[1],
+  'planner_fence', tostring(fence),
+  'planner_lease_until_ms', tostring(now_ms + tonumber(ARGV[2])),
+  'materialized_manifest_sha', ARGV[3])
+return {'PLANNING', ARGV[1], tostring(fence)}
+`;
+
+const D36_COMMIT_PLANNER_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if redis.call('HGET', KEYS[1], 'status') ~= 'PLANNING'
+  or redis.call('HGET', KEYS[1], 'planner_owner') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'planner_fence') ~= ARGV[2] then return {'CONFLICT'} end
+if now_ms > tonumber(redis.call('HGET', KEYS[1], 'planner_lease_until_ms') or '0') then
+  redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+  return {'UNKNOWN'}
+end
+redis.call('HSET', KEYS[1],
+  'status', 'READY',
+  'run_json', ARGV[3],
+  'run_state_sha', ARGV[4],
+  'checkpoint_json', ARGV[5],
+  'checkpoint_sha', ARGV[6],
+  'logical_step_id', ARGV[7],
+  'cached_response_json', ARGV[8])
+return {'COMMITTED'}
+`;
+
+const D36_MARK_PLANNER_UNKNOWN_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[1], 'status') == 'READY' then return {'COMMITTED'} end
+if redis.call('HGET', KEYS[1], 'status') ~= 'PLANNING'
+  or redis.call('HGET', KEYS[1], 'planner_owner') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'planner_fence') ~= ARGV[2] then return {'CONFLICT'} end
+redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+return {'UNKNOWN'}
+`;
+
+const D36_RESERVE_STEP_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('EXISTS', KEYS[2]) == 0
+  or redis.call('HGET', KEYS[1], 'inventory_schema') ~= 'xiaoshimei.d36-key-inventory.v1'
+  or redis.call('SISMEMBER', KEYS[2], KEYS[1]) ~= 1
+  or redis.call('SISMEMBER', KEYS[2], KEYS[2]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if redis.call('EXISTS', KEYS[3]) == 1 then
+  if redis.call('SISMEMBER', KEYS[2], KEYS[3]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+  if redis.call('HGET', KEYS[3], 'checkpoint_sha') ~= ARGV[1]
+    or redis.call('HGET', KEYS[3], 'logical_step_id') ~= ARGV[2] then return {'ACTION_ID_CONFLICT'} end
+  if redis.call('HGET', KEYS[3], 'attempt_nonce') ~= ARGV[3] then return {'NONCE_CONFLICT'} end
+  local action_status = redis.call('HGET', KEYS[3], 'status')
+  if action_status == 'COMMITTED' or action_status == 'LATE_RESULT' then return {'CACHED', action_status} end
+  if action_status == 'UNKNOWN' then return {'UNKNOWN'} end
+  local lease_until = tonumber(redis.call('HGET', KEYS[3], 'lease_until_ms') or '0')
+  if now_ms > lease_until then
+    redis.call('HSET', KEYS[3], 'status', 'UNKNOWN')
+    redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+    return {'UNKNOWN'}
+  end
+  return {'IN_FLIGHT'}
+end
+local required_remaining = tonumber(ARGV[5]) + tonumber(ARGV[6])
+if tonumber(ARGV[8]) - now_ms < required_remaining then return {'EXPIRY_WINDOW_TOO_SHORT'} end
+local recoverable_until = tonumber(redis.call('HGET', KEYS[1], 'recoverable_until_ms') or '0')
+if recoverable_until - now_ms < required_remaining
+  or redis.call('PTTL', KEYS[1]) < required_remaining
+  or redis.call('PTTL', KEYS[2]) < required_remaining then return {'RUN_EXPIRY_WINDOW_TOO_SHORT'} end
+local run_status = redis.call('HGET', KEYS[1], 'status')
+if run_status == 'UNKNOWN' or run_status == 'CLEANUP_FROZEN' then return {'UNKNOWN'} end
+if run_status == 'COMPLETE' then return {'COMPLETE'} end
+if redis.call('HGET', KEYS[1], 'checkpoint_sha') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'logical_step_id') ~= ARGV[2] then return {'CHECKPOINT_CONFLICT'} end
+local count = tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '0')
+if count >= tonumber(ARGV[10]) then return {'BUDGET_EXHAUSTED'} end
+local fence = count + 1
+redis.call('HSET', KEYS[3],
+  'status', 'IN_FLIGHT',
+  'checkpoint_sha', ARGV[1],
+  'logical_step_id', ARGV[2],
+  'attempt_nonce', ARGV[3],
+  'owner_token', ARGV[4],
+  'fence', tostring(fence),
+  'lease_until_ms', tostring(now_ms + tonumber(ARGV[5])))
+local added = redis.call('SADD', KEYS[2], KEYS[3])
+if added == 1 then redis.call('HINCRBY', KEYS[1], 'inventory_count', 1) end
+redis.call('PEXPIREAT', KEYS[3], recoverable_until)
+redis.call('PEXPIREAT', KEYS[2], recoverable_until)
+redis.call('HSET', KEYS[1], 'status', 'IN_FLIGHT', 'reservation_count', tostring(fence))
+return {'RESERVED', ARGV[4], tostring(fence)}
+`;
+
+const D36_COMMIT_STEP_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[2], 'status') == 'COMMITTED' then
+  if redis.call('HGET', KEYS[2], 'result_sha') == ARGV[6] then return {'COMMITTED'} end
+  return {'COMMIT_CONFLICT'}
+end
+if redis.call('HGET', KEYS[2], 'status') ~= 'IN_FLIGHT'
+  or redis.call('HGET', KEYS[2], 'checkpoint_sha') ~= ARGV[1]
+  or redis.call('HGET', KEYS[2], 'logical_step_id') ~= ARGV[2]
+  or redis.call('HGET', KEYS[2], 'attempt_nonce') ~= ARGV[3]
+  or redis.call('HGET', KEYS[2], 'owner_token') ~= ARGV[4]
+  or redis.call('HGET', KEYS[2], 'fence') ~= ARGV[5] then return {'CONFLICT'} end
+local now = redis.call('TIME')
+local now_ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+if now_ms > tonumber(redis.call('HGET', KEYS[2], 'lease_until_ms') or '0') then
+  redis.call('HSET', KEYS[2],
+    'status', 'LATE_RESULT',
+    'result_sha', ARGV[6],
+    'result_json', ARGV[7],
+    'recovery_only', '1')
+  redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+  return {'LATE_RESULT'}
+end
+redis.call('HSET', KEYS[2], 'status', 'COMMITTED', 'result_sha', ARGV[6], 'result_json', ARGV[7])
+redis.call('HSET', KEYS[1],
+  'status', ARGV[8],
+  'run_json', ARGV[9],
+  'run_state_sha', ARGV[10],
+  'checkpoint_json', ARGV[11],
+  'checkpoint_sha', ARGV[12],
+  'logical_step_id', ARGV[13],
+  'cached_response_json', ARGV[7])
+return {'COMMITTED'}
+`;
+
+const D36_MARK_STEP_UNKNOWN_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[2], 'status') == 'COMMITTED' then return {'COMMITTED'} end
+if redis.call('HGET', KEYS[2], 'status') == 'LATE_RESULT' then return {'LATE_RESULT'} end
+if redis.call('HGET', KEYS[2], 'attempt_nonce') ~= ARGV[1]
+  or redis.call('HGET', KEYS[2], 'owner_token') ~= ARGV[2]
+  or redis.call('HGET', KEYS[2], 'fence') ~= ARGV[3] then return {'CONFLICT'} end
+redis.call('HSET', KEYS[2], 'status', 'UNKNOWN')
+redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+return {'UNKNOWN'}
+`;
+
+const D36_FREEZE_CLEANUP_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('EXISTS', KEYS[2]) == 0 then return {'INVENTORY_MISSING'} end
+if redis.call('HGET', KEYS[1], 'inventory_schema') ~= 'xiaoshimei.d36-key-inventory.v1'
+  or redis.call('SISMEMBER', KEYS[2], KEYS[1]) ~= 1
+  or redis.call('SISMEMBER', KEYS[2], KEYS[2]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+local status = redis.call('HGET', KEYS[1], 'status') or 'UNKNOWN'
+if status ~= 'COMPLETE' and status ~= 'UNKNOWN' and status ~= 'CLEANUP_FROZEN' then return {'NON_TERMINAL'} end
+if status == 'CLEANUP_FROZEN' then
+  local prior = redis.call('HGET', KEYS[1], 'cleanup_from_status') or ''
+  if prior ~= 'COMPLETE' and prior ~= 'UNKNOWN' then return {'INVENTORY_INCOMPLETE'} end
+else
+  redis.call('HSET', KEYS[1], 'cleanup_from_status', status, 'status', 'CLEANUP_FROZEN')
+end
+local members = redis.call('SMEMBERS', KEYS[2])
+if #members ~= tonumber(redis.call('HGET', KEYS[1], 'inventory_count') or '-1') then return {'INVENTORY_INCOMPLETE'} end
+for index = 1, #members do
+  if redis.call('EXISTS', members[index]) ~= 1 then return {'INVENTORY_INCOMPLETE'} end
+end
+local reply = {'FROZEN'}
+for index = 1, #members do reply[#reply + 1] = members[index] end
+return reply
+`;
+
 function imageLedgerKeys(runId, attemptIndex = null) {
   const normalized = String(runId || "");
   if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(normalized)) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
@@ -668,10 +1217,35 @@ function imageLedgerKeys(runId, attemptIndex = null) {
 
 function ledgerReplyStatus(value) {
   const result = Array.isArray(value) ? value : [value];
-  return { status: String(result[0] || "IMAGE_LEDGER_INVALID_REPLY"), value: result[1] == null ? null : result[1] };
+  return {
+    status: String(result[0] || "IMAGE_LEDGER_INVALID_REPLY"),
+    value: result[1] == null ? null : result[1],
+    values: result.slice(1),
+  };
 }
 
-export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fetch, timeoutMs = 5_000 } = {}) {
+function redisHashObject(value) {
+  if (!Array.isArray(value) || value.length % 2 !== 0) throw new Error("IMAGE_LEDGER_INVALID_REPLY");
+  const result = {};
+  for (let index = 0; index < value.length; index += 2) result[String(value[index])] = value[index + 1];
+  return result;
+}
+
+function assertProductionReadiness(value) {
+  const ready = value && typeof value === "object"
+    && value.dedicated === true
+    && (value.eviction === false || value.eviction === "off" || value.eviction === "noeviction")
+    && value.autoUpgrade === false
+    && value.foreignKeyCount === 0
+    && value.usageReadable === true
+    && value.calibrated === true
+    && value.capacityAvailable === true
+    && /^[0-9a-f]{64}$/.test(String(value.calibrationSha256 || ""));
+  if (!ready) throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
+  return structuredClone(value);
+}
+
+export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fetch, timeoutMs = 5_000, productionReadiness = null, readinessProbe = null } = {}) {
   let endpoint;
   try { endpoint = new URL(url); } catch { throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED"); }
   if (endpoint.protocol !== "https:" || typeof token !== "string" || token.length < 16 || typeof fetchImpl !== "function") throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
@@ -691,6 +1265,22 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     if (!response.ok || payload?.error || payload?.result == null) throw new Error("IMAGE_LEDGER_UNAVAILABLE");
     return ledgerReplyStatus(payload.result);
   };
+  const command = async (args) => {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(args.map((value) => Buffer.isBuffer(value) ? value.toString("base64") : String(value))),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+    }
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.error || !payload || !Object.prototype.hasOwnProperty.call(payload, "result")) throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+    return payload.result;
+  };
   const getCached = async (attemptKey) => {
     let response;
     try {
@@ -706,6 +1296,43 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     const payload = await response.json().catch(() => null);
     if (!response.ok || payload?.error || typeof payload?.result !== "string") throw new Error("IMAGE_LEDGER_CACHE_UNAVAILABLE");
     return payload.result;
+  };
+  const parseD36Discovery = (reply, runId) => {
+    if (reply.status !== "FOUND") return { status: reply.status, runId };
+    const record = redisHashObject(reply.values);
+    return {
+      status: String(record.status || "UNKNOWN"),
+      runId,
+      bootstrapNonce: record.bootstrap_nonce,
+      inputSha256: record.input_sha,
+      recoverableUntil: Number(record.recoverable_until_ms || 0),
+      snapshot: record.snapshot_json ? JSON.parse(record.snapshot_json) : null,
+      referenceManifest: record.manifest_json ? JSON.parse(record.manifest_json) : [],
+      compactRun: record.run_json ? JSON.parse(record.run_json) : null,
+      checkpointPreimage: record.checkpoint_json ? JSON.parse(record.checkpoint_json) : null,
+      checkpointPreimageSha256: record.checkpoint_sha || null,
+      logicalStepId: record.logical_step_id || null,
+      cachedResponse: record.cached_response_json ? JSON.parse(record.cached_response_json) : null,
+    };
+  };
+  const discoverD36 = async ({ runId, appScopeId, bootstrapNonce = "", inputSha256 = "", requireExternalIdentity = false } = {}) => {
+    const reply = await evalLua(
+      D36_DISCOVER_LUA,
+      [`${d36RunRoot(runId)}:meta`],
+      [appScopeId, bootstrapNonce, inputSha256, requireExternalIdentity ? "1" : "0"],
+    );
+    return parseD36Discovery(reply, runId);
+  };
+  const scanD36RootKeys = async (root) => {
+    const result = [];
+    let cursor = "0";
+    do {
+      const reply = await command(["SCAN", cursor, "MATCH", `${root}:*`, "COUNT", "1000"]);
+      if (!Array.isArray(reply) || reply.length !== 2 || !Array.isArray(reply[1])) throw new Error("IMAGE_LEDGER_SCAN_INVALID_REPLY");
+      cursor = String(reply[0]);
+      for (const key of reply[1]) result.push(String(key));
+    } while (cursor !== "0");
+    return [...new Set(result)].sort();
   };
   return {
     async assertReady() {
@@ -723,6 +1350,11 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       const payload = await response.json().catch(() => null);
       if (!response.ok || payload?.error || payload?.result !== "PONG") throw new Error("IMAGE_LEDGER_UNAVAILABLE");
       return true;
+    },
+    async assertProductionReady(context = {}) {
+      await this.assertReady();
+      const observed = typeof readinessProbe === "function" ? await readinessProbe(structuredClone(context)) : productionReadiness;
+      return assertProductionReadiness(observed);
     },
     async init(identity) {
       const keys = imageLedgerKeys(identity.runId);
@@ -743,6 +1375,130 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     async markUnknown(identity) {
       const keys = imageLedgerKeys(identity.runId, identity.attemptIndex);
       return evalLua(IMAGE_LEDGER_UNKNOWN_LUA, [keys.run, keys.attempt], [identity.checkpointSha256, identity.attemptNonce]);
+    },
+    async claimStart({ runId, appScopeId, bootstrapNonce, inputSha256, snapshot, referenceManifest, accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, ttlMs = IMAGE_LEDGER_RUN_TTL_MS } = {}) {
+      const root = d36RunRoot(runId);
+      const snapshotJson = canonicalJson(snapshot);
+      const manifestJson = canonicalJson(referenceManifest);
+      const reply = await evalLua(D36_CLAIM_START_LUA, [`${root}:meta`, `${root}:inventory`], [appScopeId, bootstrapNonce, inputSha256, sha256Bytes(Buffer.from(snapshotJson)), sha256Bytes(Buffer.from(manifestJson)), snapshotJson, manifestJson, accessExpiresAtMs, minRemainingMs, ttlMs]);
+      return {
+        status: reply.status,
+        runId,
+        ownerToken: reply.values[0] || null,
+        fence: Number(reply.values[1] || 0),
+        recoverableUntil: Number(reply.values[2] || 0),
+      };
+    },
+    async putRunAsset({ runId, manifest, bytes } = {}) {
+      const value = assertExactJpegAsset(bytes, manifest);
+      const root = d36RunRoot(runId);
+      const key = d36AssetKey(runId, manifest.sha256);
+      const encoded = value.toString("base64");
+      const stored = await evalLua(D36_PUT_ASSET_LUA, [`${root}:meta`, `${root}:inventory`, key], [encoded]);
+      if (stored.status === "CAS_CONFLICT") throw new Error("IMAGE_ASSET_CAS_CONFLICT");
+      if (!new Set(["STORED", "EXISTING"]).has(stored.status)) throw new Error(`IMAGE_ASSET_STORE_${stored.status}`);
+      const readback = await command(["GET", key]);
+      if (typeof readback !== "string" || !Buffer.from(readback, "base64").equals(value)) throw new Error("IMAGE_ASSET_READBACK_FAILED");
+      return { status: stored.status, manifest: structuredClone(manifest) };
+    },
+    async readRunAsset({ runId, sha256 } = {}) {
+      const value = await command(["GET", d36AssetKey(runId, sha256)]);
+      if (value == null) return { status: "MISSING" };
+      const bytes = Buffer.from(String(value), "base64");
+      if (sha256Bytes(bytes) !== sha256) return { status: "CORRUPT" };
+      return { status: "FOUND", bytes };
+    },
+    async claimPlanner({ runId, ownerToken = randomUUID(), materializedManifestSha256, accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_PLANNER_LEASE_MS } = {}) {
+      const reply = await evalLua(D36_CLAIM_PLANNER_LUA, [`${d36RunRoot(runId)}:meta`], [ownerToken, leaseMs, materializedManifestSha256, accessExpiresAtMs, minRemainingMs]);
+      return { status: reply.status, ownerToken: reply.values[0] || (reply.status === "PLANNING" ? ownerToken : null), fence: Number(reply.values[1] || 0) };
+    },
+    async commitPlanner({ runId, ownerToken, fence, compactRun, checkpointPreimage, checkpointPreimageSha256, logicalStepId, response } = {}) {
+      const root = d36RunRoot(runId);
+      const runJson = canonicalJson(compactRun);
+      const responseJson = canonicalJson(response);
+      const reply = await evalLua(D36_COMMIT_PLANNER_LUA, [`${root}:meta`], [ownerToken, fence, runJson, sha256Bytes(Buffer.from(runJson)), canonicalJson(checkpointPreimage), checkpointPreimageSha256, logicalStepId, responseJson]);
+      return { status: reply.status };
+    },
+    async markPlannerUnknown({ runId, ownerToken, fence } = {}) {
+      const reply = await evalLua(D36_MARK_PLANNER_UNKNOWN_LUA, [`${d36RunRoot(runId)}:meta`], [ownerToken, fence]);
+      return { status: reply.status };
+    },
+    async discover({ runId, appScopeId, bootstrapNonce, inputSha256 } = {}) {
+      return discoverD36({ runId, appScopeId, bootstrapNonce, inputSha256, requireExternalIdentity: true });
+    },
+    async discoverByRun({ runId, appScopeId } = {}) {
+      return discoverD36({ runId, appScopeId, requireExternalIdentity: false });
+    },
+    async reserveStep({ runId, checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken = randomUUID(), accessExpiresAtMs, minRemainingMs = ACCESS_SESSION_PAID_MIN_REMAINING_MS, leaseMs = IMAGE_LEDGER_IN_FLIGHT_LEASE_MS, maxCalls = 6 } = {}) {
+      const actionId = d36StepActionId(runId, checkpointPreimageSha256, logicalStepId);
+      const root = d36RunRoot(runId);
+      const stepKey = `${root}:step:${actionId}`;
+      const reply = await evalLua(D36_RESERVE_STEP_LUA, [`${root}:meta`, `${root}:inventory`, stepKey], [checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken, leaseMs, IMAGE_LEDGER_COMMIT_MARGIN_MS, "", accessExpiresAtMs, minRemainingMs, maxCalls]);
+      let cachedResponse = null;
+      if (reply.status === "CACHED") {
+        const value = await command(["HGET", stepKey, "result_json"]);
+        if (typeof value !== "string") throw new Error("IMAGE_LEDGER_CACHE_UNAVAILABLE");
+        cachedResponse = JSON.parse(value);
+      }
+      return {
+        status: reply.status,
+        actionId,
+        cacheKind: reply.status === "CACHED" ? String(reply.values[0] || "COMMITTED") : null,
+        ownerToken: reply.status === "RESERVED" ? (reply.values[0] || ownerToken) : null,
+        fence: reply.status === "RESERVED" ? Number(reply.values[1] || 0) : 0,
+        cachedResponse,
+      };
+    },
+    async commitStep({ runId, checkpointPreimageSha256, logicalStepId, attemptNonce, actionId, ownerToken, fence, compactRun, checkpointPreimage, nextCheckpointPreimageSha256, nextLogicalStepId, response, status } = {}) {
+      const root = d36RunRoot(runId);
+      const resultJson = canonicalJson(response);
+      const runJson = canonicalJson(compactRun);
+      const reply = await evalLua(D36_COMMIT_STEP_LUA, [`${root}:meta`, `${root}:step:${actionId}`], [checkpointPreimageSha256, logicalStepId, attemptNonce, ownerToken, fence, sha256Bytes(Buffer.from(resultJson)), resultJson, status, runJson, sha256Bytes(Buffer.from(runJson)), canonicalJson(checkpointPreimage), nextCheckpointPreimageSha256, nextLogicalStepId]);
+      return { status: reply.status };
+    },
+    async markStepUnknown({ runId, actionId, attemptNonce, ownerToken, fence } = {}) {
+      const root = d36RunRoot(runId);
+      const reply = await evalLua(D36_MARK_STEP_UNKNOWN_LUA, [`${root}:meta`, `${root}:step:${actionId}`], [attemptNonce, ownerToken, fence]);
+      let cachedResponse = null;
+      if (reply.status === "COMMITTED" || reply.status === "LATE_RESULT") {
+        const value = await command(["HGET", `${root}:step:${actionId}`, "result_json"]);
+        if (typeof value === "string") cachedResponse = JSON.parse(value);
+      }
+      return { status: reply.status, cachedResponse };
+    },
+    async readAsset({ runId, sha256, appScopeId } = {}) {
+      const discoveredRaw = await command(["HGETALL", `${d36RunRoot(runId)}:meta`]);
+      if (!Array.isArray(discoveredRaw) || discoveredRaw.length === 0) return { status: "RUN_MISSING" };
+      const record = redisHashObject(discoveredRaw);
+      if (record.app_scope !== appScopeId) return { status: "FORBIDDEN" };
+      const manifest = [
+        ...(record.manifest_json ? JSON.parse(record.manifest_json) : []),
+        ...((record.run_json ? JSON.parse(record.run_json).assets : []) || []).map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, runId))),
+      ].find((item) => item.sha256 === sha256);
+      if (!manifest) return { status: "NOT_MEMBER" };
+      const stored = await this.readRunAsset({ runId, sha256 });
+      if (stored.status !== "FOUND") return stored;
+      try { assertExactJpegAsset(stored.bytes, manifest); }
+      catch { return { status: "CORRUPT" }; }
+      return { status: "FOUND", bytes: Buffer.from(stored.bytes), manifest };
+    },
+    async cleanupRun({ runId, exactKeys = [] } = {}) {
+      const root = d36RunRoot(runId);
+      if (exactKeys.length) throw new TypeError("IMAGE_LEDGER_CLEANUP_CALLER_KEYS_FORBIDDEN");
+      const metaKey = `${root}:meta`;
+      const inventoryKey = d36InventoryKey(runId);
+      const frozen = await evalLua(D36_FREEZE_CLEANUP_LUA, [metaKey, inventoryKey], []);
+      if (frozen.status !== "FROZEN") return { status: frozen.status, released: false, keys: [] };
+      const keys = [...new Set(frozen.values.map(String))].sort();
+      if (!keys.length || !keys.includes(metaKey) || !keys.includes(inventoryKey)
+        || !keys.every((key) => key.startsWith(`${root}:`))) return { status: "INVENTORY_INCOMPLETE", released: false, keys };
+      const physicalKeys = await scanD36RootKeys(root);
+      if (physicalKeys.length !== keys.length || physicalKeys.some((key, index) => key !== keys[index])) {
+        return { status: "INVENTORY_INCOMPLETE", released: false, keys, physicalKeys };
+      }
+      await command(["DEL", ...keys]);
+      for (const key of keys) if (Number(await command(["EXISTS", key])) !== 0) return { status: "PHYSICAL_KEYS_REMAIN", released: false, keys };
+      return { status: "ABSENT_READBACK", released: true, keys };
     },
   };
 }
@@ -892,7 +1648,7 @@ function advancePublicImageRun(checkpoint) {
   return exhaustPublicImageRun(checkpoint);
 }
 
-async function createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint) {
+async function createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint, { runId = null } = {}) {
   let pages;
   let planError;
   const planAttempts = [];
@@ -921,7 +1677,7 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
   const units = buildIllustrationUnits(pages);
   const jobs = groupIllustrationUnits(units).map((job) => ({ ...job, job_kind: "mother_sheet" }));
   return createPublicImageRun({
-    runId: `images-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
+    runId: runId || `images-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
     draftId: input.draft.draft_id,
     draftSha256,
     productionMode: input.production_mode,
@@ -1029,7 +1785,450 @@ async function commitImageLedgerOutcome(imageLedger, identity, { outcome, nextId
   if (result?.status !== "COMMITTED") throw imageLedgerStateError(result?.status || "UNKNOWN", identity);
 }
 
-export async function generateImages(input, settings, { imageLedger = null, nowMs = Date.now(), ledgerReady = false } = {}) {
+function d36LegacyInput(snapshot, referenceDataUrls = []) {
+  const draft = {
+    schema: TEXT_DRAFT_RESPONSE_SCHEMA,
+    created_at: new Date(0).toISOString(),
+    text_requirements: "",
+    generation: {},
+    ...structuredClone(snapshot.confirmed_draft),
+  };
+  return {
+    draft,
+    production_mode: snapshot.production_mode,
+    image_count: snapshot.page_count,
+    reference_images: referenceDataUrls,
+    reference_note: snapshot.reference_note,
+  };
+}
+
+function d36Progress(run) {
+  const completedPages = new Set((run.assets || []).map((asset) => asset.page_index)).size;
+  return {
+    resume_run_id: run.run_id,
+    completed_pages: completedPages,
+    total_pages: run.final_page_count,
+    completed_image_steps: run.next_job_index,
+    total_image_steps: run.jobs.length,
+    actual_image_calls: run.actual_image_calls,
+    max_image_calls: run.max_image_calls,
+    remaining_image_calls: Math.max(0, run.max_image_calls - run.actual_image_calls),
+    estimated_image_cost_cny: Number((run.actual_image_calls * IMAGE_PRICE_CNY).toFixed(2)),
+  };
+}
+
+function d36PlaceholderCheckpoint(runId, status) {
+  const base = { schema: "xiaoshimei.image-checkpoint.v1", run_id: runId, state: status };
+  return { ...base, state_sha256: sha256Json(base) };
+}
+
+function d36Response({ status, bootstrapNonce, inputSha256, runId, checkpointPreimage, logicalStepId, progress = {}, assets = [], mediaDelta = [], cached = false, recoverableUntil = 0, upstreamCalls = 0, error = null, contentPackage = undefined }) {
+  const checkpoint = checkpointPreimage || d36PlaceholderCheckpoint(runId, status);
+  const response = {
+    schema: IMAGE_GENERATION_RESPONSE_SCHEMA,
+    status,
+    bootstrap_nonce: bootstrapNonce,
+    input_sha256: inputSha256,
+    run_id: runId,
+    checkpoint_preimage: checkpoint,
+    checkpoint_preimage_sha256: sha256Json(checkpoint),
+    logical_step_id: logicalStepId || "discover",
+    progress: structuredClone(progress),
+    assets: structuredClone(assets),
+    media_delta: structuredClone(mediaDelta),
+    error: error == null ? null : structuredClone(error),
+    cached: Boolean(cached),
+    recoverable_until: d36RecoverableUntil(recoverableUntil),
+    upstream_calls: upstreamCalls,
+    ...(contentPackage === undefined ? {} : { content_package: structuredClone(contentPackage) }),
+  };
+  const sizeBytes = Buffer.byteLength(JSON.stringify(response), "utf8");
+  if (sizeBytes > IMAGE_TRANSACTION_RESPONSE_MAX_BYTES) throw new Error("IMAGE_GENERATION_RESPONSE_TOO_LARGE");
+  return parseImageGenerationResponse(response);
+}
+
+function d36ResponseForCompactRun({ compactRun, bootstrapNonce, inputSha256, apiKey, mediaDelta = [], cached = false, recoverableUntil, upstreamCalls = 0, status = null, contentPackage = undefined, error = null }) {
+  const checkpoint = d36CheckpointPreimage(compactRun, apiKey);
+  const assets = (compactRun.assets || []).map((asset) => d36ManifestFromAsset(asset, compactRun.run_id));
+  return d36Response({
+    status: status || (compactRun.status === "COMPLETE" ? "COMPLETE" : "PARTIAL"),
+    bootstrapNonce,
+    inputSha256,
+    runId: compactRun.run_id,
+    checkpointPreimage: checkpoint,
+    logicalStepId: d36LogicalStepId(compactRun),
+    progress: d36Progress(compactRun),
+    assets,
+    mediaDelta,
+    cached,
+    recoverableUntil,
+    upstreamCalls,
+    error,
+    contentPackage,
+  });
+}
+
+function imageTransactionStateError(status, details = {}) {
+  const code = status === "EXPIRY_WINDOW_TOO_SHORT" ? "EXPIRY_WINDOW_TOO_SHORT"
+    : status === "RUN_EXPIRY_WINDOW_TOO_SHORT" ? "IMAGE_RUN_EXPIRY_WINDOW_TOO_SHORT"
+    : status === "BUDGET_EXHAUSTED" ? "IMAGE_CALL_BUDGET_EXHAUSTED"
+      : status === "IN_FLIGHT" ? "IMAGE_STEP_IN_FLIGHT"
+        : status === "UNKNOWN" ? "IMAGE_STEP_UNKNOWN"
+          : status === "RUN_MISSING" || status === "NOT_FOUND" ? "IMAGE_LEDGER_RUN_MISSING"
+            : status === "NONCE_CONFLICT" ? "IMAGE_STEP_NONCE_CONFLICT"
+              : status === "CHECKPOINT_CONFLICT" || status === "CONFLICT" ? "IMAGE_LEDGER_REPLAY_CONFLICT"
+              : status === "COMPLETE" ? "IMAGE_RUN_ALREADY_COMPLETE"
+                : "IMAGE_LEDGER_UNAVAILABLE";
+  const error = new Error(code);
+  error.details = { ledger_status: status, ...details };
+  return error;
+}
+
+async function readAndVerifyD36ReferenceAssets(imageLedger, runId, referenceManifest) {
+  const references = [];
+  for (const manifest of referenceManifest || []) {
+    const stored = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    if (!stored || stored.status !== "FOUND") throw new Error(stored?.status === "CORRUPT" ? "IMAGE_REFERENCE_MEDIA_CORRUPT" : "IMAGE_REFERENCE_MEDIA_MISSING");
+    const bytes = assertExactJpegAsset(stored.bytes, manifest);
+    references.push({ name: manifest.name, data_url: `data:image/jpeg;base64,${bytes.toString("base64")}` });
+  }
+  return references;
+}
+
+async function materializeD36References(input, imageLedger, runId) {
+  const missing = new Map(input.missing_reference_media.map((item) => [item.media_ref, item]));
+  for (const manifest of input.reference_manifest) {
+    const current = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    if (current?.status === "FOUND") {
+      assertExactJpegAsset(current.bytes, manifest);
+      continue;
+    }
+    if (current?.status === "CORRUPT") throw new Error("IMAGE_REFERENCE_MEDIA_CORRUPT");
+    const transfer = missing.get(manifest.media_ref);
+    if (!transfer) throw new Error("IMAGE_REFERENCE_MEDIA_MISSING");
+    const bytes = Buffer.from(transfer.bytes_base64, "base64");
+    assertExactJpegAsset(bytes, manifest);
+    await imageLedger.putRunAsset({ runId, manifest: stripAssetUrl(manifest), bytes });
+    const readback = await imageLedger.readRunAsset({ runId, sha256: manifest.sha256 });
+    if (!readback || readback.status !== "FOUND") throw new Error("IMAGE_REFERENCE_MEDIA_READBACK_FAILED");
+    assertExactJpegAsset(readback.bytes, manifest);
+  }
+  await readAndVerifyD36ReferenceAssets(imageLedger, runId, input.reference_manifest);
+}
+
+async function persistD36GeneratedAssets(imageLedger, runId, run, previousAssets = []) {
+  const previous = new Set(previousAssets.map((asset) => asset.sha256));
+  const mediaDelta = [];
+  for (const asset of run.assets || []) {
+    const match = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(asset.src || ""));
+    if (!match) throw new Error("IMAGE_GENERATED_ASSET_INLINE_MISSING");
+    const bytes = Buffer.from(match[1], "base64");
+    const manifest = stripAssetUrl(d36ManifestFromAsset(asset, runId));
+    assertExactJpegAsset(bytes, manifest);
+    await imageLedger.putRunAsset({ runId, manifest, bytes });
+    const readback = await imageLedger.readRunAsset({ runId, sha256: asset.sha256 });
+    if (!readback || readback.status !== "FOUND") throw new Error("IMAGE_GENERATED_ASSET_READBACK_FAILED");
+    assertExactJpegAsset(readback.bytes, manifest);
+    if (!previous.has(asset.sha256)) mediaDelta.push(d36ManifestFromAsset(asset, runId));
+  }
+  return { compactRun: compactPublicImageRun(run), mediaDelta };
+}
+
+async function readD36RunState(imageLedger, runId, appScopeId) {
+  const state = typeof imageLedger.discoverByRun === "function"
+    ? await imageLedger.discoverByRun({ runId, appScopeId })
+    : await imageLedger.discover({ runId, appScopeId });
+  if (!state || state.status === "NOT_FOUND" || state.status === "RUN_MISSING") throw imageTransactionStateError("RUN_MISSING", { run_id: runId });
+  if (state.status === "CONFLICT" || state.status === "FORBIDDEN") throw imageTransactionStateError("CONFLICT", { run_id: runId });
+  return state;
+}
+
+async function recoverD36CommittedResponse(imageLedger, runId, appScopeId) {
+  try {
+    const state = await readD36RunState(imageLedger, runId, appScopeId);
+    if (state.cachedResponse && new Set(["READY", "PARTIAL", "COMPLETE"]).has(state.status)) {
+      return parseImageGenerationResponse({ ...state.cachedResponse, cached: true, upstream_calls: 0 });
+    }
+  } catch (error) {
+    if (error?.message === "IMAGE_LEDGER_RUN_MISSING" || error?.message === "IMAGE_LEDGER_REPLAY_CONFLICT") return null;
+    throw error;
+  }
+  return null;
+}
+
+function returnOrThrowD36Response(value) {
+  const response = parseImageGenerationResponse(value);
+  if (response.status !== "ERROR") return response;
+  const cause = String(response.error?.details?.cause || "").slice(0, 180);
+  const code = `${response.error?.code || "IMAGE_STEP_FAILED"}${cause ? `:${cause}` : ""}`;
+  const error = new Error(code);
+  error.details = structuredClone(response);
+  throw error;
+}
+
+async function markPlannerUnknown(imageLedger, claim, cause) {
+  if (typeof imageLedger.markPlannerUnknown === "function") {
+    try { await imageLedger.markPlannerUnknown({ runId: claim.runId, ownerToken: claim.ownerToken, fence: claim.fence }); }
+    catch { /* Fail closed below. */ }
+  }
+  const error = imageTransactionStateError("UNKNOWN", { run_id: claim.runId, cause: String(cause?.message || cause || "PLANNER_UNKNOWN").slice(0, 180) });
+  error.cause = cause;
+  throw error;
+}
+
+export async function generateImagesTransaction(input, settings, { imageLedger, nowMs = Date.now(), accessExpiresAtMs = 0, appScopeId = "" } = {}) {
+  if (!input || !new Set(["START", "DISCOVER", "STEP"]).has(input.mode)) throw new TypeError("IMAGE_GENERATION_MODE_INVALID");
+  if (settings.credentialMode !== "SERVER_MANAGED") throw new Error("IMAGE_TRANSACTION_SERVER_MANAGED_REQUIRED");
+  if (!imageLedger) throw new Error("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
+  if (!appScopeId) throw new Error("IMAGE_LEDGER_APP_SCOPE_REQUIRED");
+
+  if (input.mode === "DISCOVER") {
+    const runId = d36RunId(appScopeId, input.bootstrap_nonce);
+    const state = await imageLedger.discover({ runId, appScopeId, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256 });
+    if (!state || state.status === "NOT_FOUND") {
+      return d36Response({ status: "ERROR", bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: {}, error: { code: "IMAGE_LEDGER_RUN_MISSING" } });
+    }
+    if (state.status === "CONFLICT") throw imageTransactionStateError("CONFLICT", { run_id: runId });
+    if (state.cachedResponse && new Set(["READY", "PARTIAL", "COMPLETE"]).has(state.status)) {
+      return parseImageGenerationResponse({
+        ...state.cachedResponse,
+        status: state.status === "READY" ? "READY_DISCOVERY" : state.cachedResponse.status,
+        cached: true,
+        upstream_calls: 0,
+      });
+    }
+    return d36Response({
+      status: new Set(["MATERIALIZING", "PLANNING", "IN_FLIGHT", "UNKNOWN"]).has(state.status) ? state.status : "UNKNOWN",
+      bootstrapNonce: input.bootstrap_nonce,
+      inputSha256: input.input_sha256,
+      runId,
+      checkpointPreimage: state.checkpointPreimage || null,
+      logicalStepId: state.logicalStepId || "discover",
+      progress: state.compactRun ? d36Progress(state.compactRun) : { state: state.status },
+      assets: state.compactRun ? state.compactRun.assets.map((asset) => d36ManifestFromAsset(asset, runId)) : [],
+      mediaDelta: [],
+      cached: true,
+      recoverableUntil: state.recoverableUntil,
+      upstreamCalls: 0,
+    });
+  }
+
+  if (!Number.isFinite(accessExpiresAtMs) || accessExpiresAtMs - nowMs < ACCESS_SESSION_PAID_MIN_REMAINING_MS) {
+    throw imageTransactionStateError("EXPIRY_WINDOW_TOO_SHORT");
+  }
+
+  if (typeof imageLedger.assertProductionReady !== "function") throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
+  await imageLedger.assertProductionReady({ appScopeId, nowMs });
+
+  if (input.mode === "START") {
+    const computedInputSha256 = sha256Bytes(Buffer.from(canonicalImageGenerationInputPreimage(input), "utf8"));
+    if (computedInputSha256 !== input.input_sha256) throw new TypeError("IMAGE_GENERATION_INPUT_SHA_MISMATCH");
+    const runId = d36RunId(appScopeId, input.bootstrap_nonce);
+    const claim = await imageLedger.claimStart({
+      runId,
+      appScopeId,
+      bootstrapNonce: input.bootstrap_nonce,
+      inputSha256: input.input_sha256,
+      snapshot: input.operation_snapshot,
+      referenceManifest: input.reference_manifest,
+      accessExpiresAtMs,
+      minRemainingMs: ACCESS_SESSION_PAID_MIN_REMAINING_MS,
+      ttlMs: IMAGE_LEDGER_RUN_TTL_MS,
+    });
+    claim.runId = runId;
+    if (claim.status === "EXPIRY_WINDOW_TOO_SHORT") throw imageTransactionStateError(claim.status, { run_id: runId });
+    if (claim.status === "CONFLICT") throw new Error("BOOTSTRAP_INPUT_CONFLICT");
+    if (new Set(["READY", "PARTIAL", "COMPLETE"]).has(claim.status)) {
+      const recovered = await recoverD36CommittedResponse(imageLedger, runId, appScopeId);
+      if (recovered) return recovered;
+      throw imageTransactionStateError("UNKNOWN", { run_id: runId, reason: "READY_WITHOUT_CACHE" });
+    }
+    if (new Set(["PLANNING", "IN_FLIGHT", "UNKNOWN"]).has(claim.status)) {
+      return d36Response({ status: claim.status === "PLANNING" ? "PLANNING" : claim.status, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: { state: claim.status }, cached: true, recoverableUntil: claim.recoverableUntil });
+    }
+    if (claim.status !== "MATERIALIZING") throw imageTransactionStateError(claim.status, { run_id: runId });
+
+    await materializeD36References(input, imageLedger, runId);
+    const plannerClaim = await imageLedger.claimPlanner({
+      runId,
+      ownerToken: randomUUID(),
+      materializedManifestSha256: sha256Json(input.reference_manifest),
+      accessExpiresAtMs,
+      minRemainingMs: ACCESS_SESSION_PAID_MIN_REMAINING_MS,
+      leaseMs: IMAGE_PLANNER_LEASE_MS,
+    });
+    if (plannerClaim.status === "EXPIRY_WINDOW_TOO_SHORT") throw imageTransactionStateError(plannerClaim.status, { run_id: runId });
+    if (new Set(["READY", "PARTIAL", "COMPLETE"]).has(plannerClaim.status)) {
+      const recovered = await recoverD36CommittedResponse(imageLedger, runId, appScopeId);
+      if (recovered) return recovered;
+      throw imageTransactionStateError("UNKNOWN", { run_id: runId, reason: "READY_WITHOUT_CACHE" });
+    }
+    if (new Set(["IN_FLIGHT", "UNKNOWN"]).has(plannerClaim.status)) {
+      return d36Response({ status: plannerClaim.status, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: { state: plannerClaim.status }, cached: true, recoverableUntil: claim.recoverableUntil });
+    }
+    if (plannerClaim.status !== "PLANNING") throw imageTransactionStateError(plannerClaim.status, { run_id: runId });
+    const plannerOwner = { ...plannerClaim, runId };
+
+    let compactRun;
+    let response;
+    try {
+      const referenceDataUrls = await readAndVerifyD36ReferenceAssets(imageLedger, runId, input.reference_manifest);
+      const legacyInput = d36LegacyInput(input.operation_snapshot, referenceDataUrls);
+      const draftSha256 = sha256Bytes(Buffer.from(JSON.stringify(legacyInput.draft)));
+      const referenceFingerprint = sha256Json({ references: input.reference_manifest, note: input.operation_snapshot.reference_note });
+      const run = await createInitialPublicImageRun(legacyInput, settings, input.operation_snapshot.page_count, draftSha256, referenceFingerprint, { runId });
+      compactRun = compactPublicImageRun(run);
+      response = d36ResponseForCompactRun({ compactRun, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, apiKey: settings.apiKey, recoverableUntil: claim.recoverableUntil, upstreamCalls: 1, status: "READY" });
+    } catch (error) {
+      await markPlannerUnknown(imageLedger, plannerOwner, error);
+    }
+    const checkpoint = response.checkpoint_preimage;
+    try {
+      const committed = await imageLedger.commitPlanner({
+        runId,
+        ownerToken: plannerClaim.ownerToken,
+        fence: plannerClaim.fence,
+        compactRun,
+        checkpointPreimage: checkpoint,
+        checkpointPreimageSha256: response.checkpoint_preimage_sha256,
+        logicalStepId: response.logical_step_id,
+        response,
+      });
+      if (committed?.status !== "COMMITTED") throw imageTransactionStateError(committed?.status || "UNKNOWN", { run_id: runId });
+    } catch (error) {
+      const recovered = await recoverD36CommittedResponse(imageLedger, runId, appScopeId);
+      if (recovered) return recovered;
+      await markPlannerUnknown(imageLedger, plannerOwner, error);
+    }
+    return response;
+  }
+
+  if (sha256Json(input.checkpoint_preimage) !== input.checkpoint_preimage_sha256) throw new TypeError("IMAGE_CHECKPOINT_HASH_MISMATCH");
+  const checkpoint = verifyD36CheckpointPreimage(input.checkpoint_preimage, settings.apiKey, { runId: input.run_id, checkpointSha256: input.checkpoint_preimage_sha256 });
+  const state = await readD36RunState(imageLedger, input.run_id, appScopeId);
+  const reservation = await imageLedger.reserveStep({
+    runId: input.run_id,
+    checkpointPreimageSha256: input.checkpoint_preimage_sha256,
+    logicalStepId: input.logical_step_id,
+    attemptNonce: input.attempt_nonce,
+    ownerToken: randomUUID(),
+    accessExpiresAtMs,
+    nowMs,
+    minRemainingMs: ACCESS_SESSION_PAID_MIN_REMAINING_MS,
+    leaseMs: IMAGE_LEDGER_IN_FLIGHT_LEASE_MS,
+    maxCalls: 6,
+  });
+  if (reservation?.status === "CACHED") {
+    if (reservation.cacheKind === "LATE_RESULT") {
+      return d36Response({
+        status: "LATE_RESULT",
+        bootstrapNonce: state.bootstrapNonce,
+        inputSha256: state.inputSha256,
+        runId: input.run_id,
+        checkpointPreimage: input.checkpoint_preimage,
+        logicalStepId: input.logical_step_id,
+        progress: { state: "LATE_RESULT", recovery_only: true },
+        assets: [],
+        mediaDelta: [],
+        cached: true,
+        recoverableUntil: state.recoverableUntil,
+        upstreamCalls: 0,
+      });
+    }
+    return returnOrThrowD36Response({ ...reservation.cachedResponse, cached: true, upstream_calls: 0 });
+  }
+  if (reservation?.status !== "RESERVED") throw imageTransactionStateError(reservation?.status || "UNKNOWN", { run_id: input.run_id, logical_step_id: input.logical_step_id });
+  const reservedStateConflict = !state.compactRun
+    || state.checkpointPreimageSha256 !== input.checkpoint_preimage_sha256
+    || state.logicalStepId !== input.logical_step_id
+    || sha256Json(state.compactRun) !== checkpoint.run_state_sha256;
+  if (reservedStateConflict) {
+    try { await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    catch { /* The paid lane remains fail closed. */ }
+    throw imageTransactionStateError("CHECKPOINT_CONFLICT", { run_id: input.run_id, reason: "RESERVED_STATE_MISMATCH" });
+  }
+
+  let compactRun;
+  let response;
+  try {
+    const hydratedRun = await hydrateCompactPublicImageRun(state.compactRun, imageLedger);
+    const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, state.referenceManifest || []);
+    const legacyInput = d36LegacyInput(state.snapshot, references);
+    try {
+      const advanced = await executePublicImageJob(hydratedRun, legacyInput, settings);
+      const persisted = await persistD36GeneratedAssets(imageLedger, input.run_id, advanced, state.compactRun.assets || []);
+      compactRun = persisted.compactRun;
+      let contentPackage;
+      if (advanced.status === "COMPLETE") {
+        const inlineContent = assemblePublicImageContent(advanced, legacyInput, settings);
+        const allManifests = compactRun.assets.map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, input.run_id)));
+        contentPackage = replaceInlineMediaWithRefs(inlineContent, allManifests);
+      }
+      response = d36ResponseForCompactRun({
+        compactRun,
+        bootstrapNonce: state.bootstrapNonce,
+        inputSha256: state.inputSha256,
+        apiKey: settings.apiKey,
+        mediaDelta: persisted.mediaDelta,
+        recoverableUntil: state.recoverableUntil,
+        upstreamCalls: 1,
+        status: advanced.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+        contentPackage,
+      });
+    } catch (error) {
+      const failedRun = error?.details?.resume_checkpoint ? parsePublicImageRun(error.details.resume_checkpoint) : null;
+      if (!failedRun) throw error;
+      compactRun = compactPublicImageRun(failedRun);
+      response = d36ResponseForCompactRun({
+        compactRun,
+        bootstrapNonce: state.bootstrapNonce,
+        inputSha256: state.inputSha256,
+        apiKey: settings.apiKey,
+        recoverableUntil: state.recoverableUntil,
+        upstreamCalls: 1,
+        status: "ERROR",
+        error: { code: "IMAGE_STEP_FAILED", details: { cause: String(error?.message || error).slice(0, 180) } },
+      });
+    }
+  } catch (error) {
+    try { await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    catch { /* UNKNOWN remains fail closed. */ }
+    throw imageTransactionStateError("UNKNOWN", { run_id: input.run_id, cause: String(error?.message || error).slice(0, 180) });
+  }
+
+  try {
+    const committed = await imageLedger.commitStep({
+      runId: input.run_id,
+      checkpointPreimageSha256: input.checkpoint_preimage_sha256,
+      logicalStepId: input.logical_step_id,
+      attemptNonce: input.attempt_nonce,
+      actionId: reservation.actionId,
+      ownerToken: reservation.ownerToken,
+      fence: reservation.fence,
+      compactRun,
+      checkpointPreimage: response.checkpoint_preimage,
+      nextCheckpointPreimageSha256: response.checkpoint_preimage_sha256,
+      nextLogicalStepId: response.logical_step_id,
+      response,
+      status: response.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+      runStatus: response.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+    });
+    if (committed?.status !== "COMMITTED") throw imageTransactionStateError(committed?.status || "UNKNOWN", { run_id: input.run_id });
+  } catch (error) {
+    const recovered = await recoverD36CommittedResponse(imageLedger, input.run_id, appScopeId);
+    if (recovered) return returnOrThrowD36Response(recovered);
+    let readback = null;
+    try { readback = await imageLedger.markStepUnknown({ runId: input.run_id, actionId: reservation.actionId, attemptNonce: input.attempt_nonce, ownerToken: reservation.ownerToken, fence: reservation.fence }); }
+    catch { /* UNKNOWN remains fail closed. */ }
+    if (readback?.status === "COMMITTED" && readback.cachedResponse) return returnOrThrowD36Response({ ...readback.cachedResponse, cached: true, upstream_calls: 0 });
+    throw imageTransactionStateError("UNKNOWN", { run_id: input.run_id, cause: String(error?.message || error).slice(0, 180) });
+  }
+  return returnOrThrowD36Response(response);
+}
+
+export async function generateImages(input, settings, options = {}) {
+  const { imageLedger = null, nowMs = Date.now(), ledgerReady = false } = options;
+  if (input?.mode) return generateImagesTransaction(input, settings, options);
   const serverManaged = settings.credentialMode === "SERVER_MANAGED";
   if (serverManaged && !imageLedger) throw new Error("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
   if (serverManaged && !ledgerReady && typeof imageLedger.assertReady === "function") await imageLedger.assertReady();
@@ -1149,14 +2348,50 @@ export function createProviderHandler(options = {}) {
     const nowMs = currentTime();
     if (request.method === "GET" && route === "health") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
     if (request.method === "GET" && route === "config") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
+    const rawAssetMatch = request.method === "GET" ? /^assets\/([^/]+)\/([0-9a-f]{64})$/.exec(route) : null;
+    if (rawAssetMatch) {
+      const serverManaged = configuredServerManaged(env);
+      const accessConfig = inspectServerAccessConfig(env);
+      if (!serverManaged || !accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      if (!requestHasExactSameOriginReadGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      const candidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
+      if (candidates.headerTooLarge || candidates.familyOverflow) return send(response, 431, { error: candidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED" });
+      if (!candidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      const imageLedger = await resolveImageLedger().catch(() => null);
+      if (!imageLedger || typeof imageLedger.readAsset !== "function") return send(response, 503, { error: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" });
+      let asset;
+      try {
+        asset = await imageLedger.readAsset({ runId: rawAssetMatch[1], sha256: rawAssetMatch[2], appScopeId: accessConfig.appScope });
+      } catch {
+        return send(response, 503, { error: "IMAGE_LEDGER_UNAVAILABLE" });
+      }
+      if (asset?.status !== "FOUND") {
+        const status = asset?.status === "FORBIDDEN" ? 403 : asset?.status === "CORRUPT" ? 409 : 404;
+        return send(response, status, { error: `IMAGE_ASSET_${String(asset?.status || "MISSING")}` });
+      }
+      const bytes = Buffer.from(asset.bytes);
+      if (sha256Bytes(bytes) !== rawAssetMatch[2] || bytes.length !== asset.manifest?.size_bytes || asset.manifest?.mime !== "image/jpeg") {
+        return send(response, 409, { error: "IMAGE_ASSET_CORRUPT" });
+      }
+      response.status(200)
+        .setHeader("content-type", "image/jpeg")
+        .setHeader("content-length", String(bytes.length))
+        .setHeader(IMAGE_ASSET_SHA256_HEADER, rawAssetMatch[2])
+        .setHeader("cache-control", "private, no-store, max-age=0")
+        .setHeader("x-content-type-options", "nosniff");
+      if (typeof response.send === "function") return response.send(bytes);
+      return response.end(bytes);
+    }
     if (request.method !== "POST") return send(response, 405, { error: "METHOD_NOT_ALLOWED" });
 
     const serverManaged = configuredServerManaged(env);
     const accessConfig = inspectServerAccessConfig(env);
     if (route === "access-session") {
       if (!serverManaged || !accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
-      if (!requestHasExactOrigin(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      if (!requestHasExactSameOriginWriteGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
       if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      const visibleCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs, allowFamilyOverflow: true });
+      if (visibleCandidates.headerTooLarge) return send(response, 431, { error: "COOKIE_HEADER_TOO_LARGE" });
       let code;
       try { code = boundedAccessCode(request.body); }
       catch { return send(response, 400, { error: "ACCESS_CODE_INVALID" }); }
@@ -1165,33 +2400,49 @@ export function createProviderHandler(options = {}) {
       if (typeof options.sessionId === "function") sessionOptions.sessionId = options.sessionId();
       else if (options.sessionId != null) sessionOptions.sessionId = options.sessionId;
       const session = mintAccessSession(accessConfig, sessionOptions);
-      response.setHeader("set-cookie", accessSessionCookie(session.token, session.expiresAt));
+      const staleNames = [...new Set(visibleCandidates.familyPairs.map((pair) => pair.name))]
+        .filter((name) => name !== session.cookieName)
+        .sort()
+        .slice(0, ACCESS_SESSION_MAX_PAIRS);
+      response.setHeader("set-cookie", [...staleNames.map(deleteAccessSessionCookie), accessSessionCookie(session)]);
       return send(response, 200, { authenticated: true, credential_mode: "SERVER_MANAGED", expires_at: session.expiresAt.toISOString() });
     }
 
     let imageLedger = null;
+    let accessCandidates = null;
     if (serverManaged) {
       if (!accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
-      if (!requestHasExactOrigin(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      if (!requestHasExactSameOriginWriteGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
       if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
-      if (!requestHasValidAccessSession(request, accessConfig, nowMs)) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      accessCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
+      if (accessCandidates.headerTooLarge || accessCandidates.familyOverflow) return send(response, 431, {
+        error: accessCandidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED",
+      });
+      if (!accessCandidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
       if (!SERVER_MANAGED_PROVIDER_ROUTES.has(route)) return send(response, 404, { error: "ROUTE_NOT_FOUND" });
       if (route === "page-candidates") return send(response, 403, { error: "SERVER_MANAGED_PAGE_CANDIDATES_DISABLED" });
-      if (route === "generate-images") {
-        imageLedger = await resolveImageLedger().catch(() => null);
-        if (!imageLedger) return send(response, 503, { error: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" });
-        try {
-          if (typeof imageLedger.assertReady === "function") await imageLedger.assertReady();
-        } catch {
-          return send(response, 503, { error: "IMAGE_LEDGER_UNAVAILABLE" });
-        }
-      }
     }
 
     try {
       const settings = requestConfig(request, env);
       if (route === "text-draft") return send(response, 200, await generateTextDraft(parseTextDraftRequest(request.body), settings));
-      if (route === "generate-images") return send(response, 200, await generateImages(parseImageGenerationRequest(request.body), settings, { imageLedger, nowMs, ledgerReady: true }));
+      if (route === "generate-images") {
+        // The paid-image lane must reject an invalid body before it touches the
+        // distributed ledger. Auth and same-origin admission have already run,
+        // so neither anonymous traffic nor malformed authenticated traffic can
+        // consume readiness/calibration capacity.
+        const parsedInput = parseImageGenerationRequest(request.body);
+        if (serverManaged) {
+          imageLedger = await resolveImageLedger().catch(() => null);
+          if (!imageLedger) return send(response, 503, { error: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" });
+        }
+        return send(response, 200, await generateImages(parsedInput, settings, {
+          imageLedger,
+          nowMs,
+          accessExpiresAtMs: accessCandidates?.capabilityExpiresAtMs || 0,
+          appScopeId: accessConfig.appScope || "",
+        }));
+      }
       if (route === "page-candidates") return send(response, 200, await generatePageCandidates(parsePageCandidateRequest(request.body), settings));
       return send(response, 404, { error: "ROUTE_NOT_FOUND" });
     } catch (error) {

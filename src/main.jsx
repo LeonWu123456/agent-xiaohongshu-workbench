@@ -14,6 +14,8 @@ import {
 } from "./content-engine.mjs";
 import { BENCHMARK_CLASS_LABELS, PROFILE_FIELDS, buildGenerationContract, createProfileV2, parseProfileV2 } from "./profile-v2.mjs";
 import { createLocalHttpProvider } from "./provider-client.mjs";
+import { persistActionReferences } from "./action-reference-media.mjs";
+import { createMediaAssetStore } from "./media-asset-store.mjs";
 import { loadLocalDraft } from "./draft-loader.mjs";
 import { createEditorHistory, redoEditorHistory, undoEditorHistory, updateEditorHistory } from "./editor-history.mjs";
 import {
@@ -22,30 +24,33 @@ import {
 } from "./layer-model.mjs";
 import {
   AUTHORING_SESSION_SCHEMA,
-  activateDraftRecord,
+  WORKSPACE_ENVELOPE_V3_STORAGE_KEY,
+  activateDraftRecordV3,
   activeDraftRecord,
-  beginNewDraft,
-  buildWorkspaceBackupV2,
-  createWorkspaceCoordinator,
+  activeDraftRecordV3,
+  beginNewDraftV3,
+  buildWorkspaceBackupV3,
+  commitDraftImageCompletionV3,
+  commitDraftImageProgressV3,
+  createRestartablePendingImageOperationV3,
+  createWorkspaceV3Coordinator,
   draftRecordToken,
+  hydrateWorkspaceV3View,
   libraryContents,
+  libraryContentsV3,
   loadOrMigrateWorkspaceEnvelope,
+  materializePersistentMediaRefsV3,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
-  parseWorkspaceBackup,
+  rebuildPendingImageStartV3,
   readWorkspaceSnapshot,
-  saveDraftRecord,
-  saveWorkspaceProfile,
-  workspaceEnvelopeToken,
+  restoreWorkspaceBackupV3,
+  saveDraftRecordV3,
+  saveWorkspaceProfileV3,
+  workspaceEnvelopeV3Token,
 } from "./workspace-state.mjs";
 import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
 import { buildHistoricalDraftAdoption, derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
-import {
-  claimDraftBoundImageOperation,
-  createDraftBoundImageOperation,
-  persistDraftBoundImageCompletion,
-  persistDraftBoundImageProgress,
-} from "./public-image-run.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
 import { REALITY_METRICS, REALITY_WINDOWS, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
@@ -82,6 +87,7 @@ const GENERATION_SESSION_KEY = "xiaoshimei-studio.generation-session.v1";
 const WORKSPACE_KEY = "xiaoshimei-studio.workspace.v2";
 const STORAGE_KEYS = {
   envelope: WORKSPACE_KEY,
+  envelopeV3: WORKSPACE_ENVELOPE_V3_STORAGE_KEY,
   content: STORAGE_KEY,
   library: LIBRARY_KEY,
   profile: PROFILE_KEY,
@@ -187,26 +193,157 @@ function loadProfile() {
 }
 
 function loadInitialWorkspace() {
-  const authoritySnapshot = readWorkspaceSnapshot(localStorage, WORKSPACE_KEY);
+  let authoritySnapshot;
+  try { authoritySnapshot = readWorkspaceSnapshot(localStorage, WORKSPACE_KEY); }
+  catch (error) { authoritySnapshot = { ok: false, code: "WORKSPACE_V2_READ_FAILED", error }; }
+  let serializedV2 = null;
+  try { serializedV2 = localStorage.getItem(WORKSPACE_KEY); } catch {}
   const fallbackContent = loadStored() || generateContentPackage({ topic: DEFAULT_TOPIC });
   const fallbackProfile = loadProfile();
   const fallbackLibrary = loadLibrary();
   let fallbackGenerationSession = null;
   try { fallbackGenerationSession = localStorage.getItem(GENERATION_SESSION_KEY); } catch {}
-  const loaded = loadOrMigrateWorkspaceEnvelope(localStorage, STORAGE_KEYS, {
-    activeDraftId: fallbackContent.id || crypto.randomUUID(),
-    fallbackContent,
-    fallbackLibrary,
-    fallbackProfile,
-    fallbackGenerationSession,
-  });
+  let loaded;
+  let loadDiagnostic = null;
+  try {
+    loaded = loadOrMigrateWorkspaceEnvelope(localStorage, STORAGE_KEYS, {
+      activeDraftId: fallbackContent.id || crypto.randomUUID(),
+      fallbackContent,
+      fallbackLibrary,
+      fallbackProfile,
+      fallbackGenerationSession,
+    });
+  } catch (error) {
+    loadDiagnostic = { code: "WORKSPACE_V2_CORRUPT_FALLBACK_MOUNTED", message: String(error?.message || error) };
+    loaded = {
+      workspace: migrateLegacyWorkspaceState({
+        profile: fallbackProfile,
+        currentContent: fallbackContent,
+        library: fallbackLibrary,
+        generationSession: fallbackGenerationSession,
+        activeDraftId: fallbackContent.id || crypto.randomUUID(),
+      }),
+      migrated: true,
+      source: "SAFE_IN_MEMORY_FALLBACK",
+    };
+  }
   return {
     ...loaded,
+    loadDiagnostic,
     authoritySnapshot,
-    persistence: authoritySnapshot.ok
+    serializedV2,
+    persistence: authoritySnapshot?.ok && !loadDiagnostic
       ? { ok: true, code: loaded.migrated ? "WORKSPACE_MIGRATION_PENDING_MOUNT_LOCK" : "WORKSPACE_ALREADY_V2" }
       : authoritySnapshot,
   };
+}
+
+function randomImageNonce() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function confirmedImageDraftSnapshot(draft, promptContext) {
+  return {
+    draft_id: draft.draft_id,
+    source_input: draft.source_input,
+    pillar: draft.pillar,
+    goal: draft.goal,
+    titles: [...draft.titles],
+    selected_title: draft.selected_title,
+    body: draft.body,
+    tags: [...draft.tags],
+    recommended_image_count: draft.recommended_image_count,
+    facts: Array.isArray(draft.facts) ? [...draft.facts] : [],
+    risks: Array.isArray(draft.risks) ? [...draft.risks] : [],
+    content_type: draft.content_type || "knowledge_card",
+    style_lock: draft.style_lock || null,
+    prompt_context: promptContext,
+  };
+}
+
+function imageOperationSnapshot({ draftRecordId, semanticEpoch, draft, pageCount, productionMode, referenceNote, promptContext }) {
+  return {
+    schema: "xiaoshimei.image-operation-snapshot.v1",
+    draft_record_id: draftRecordId,
+    mutation_epoch: semanticEpoch,
+    confirmed_draft: confirmedImageDraftSnapshot(draft, promptContext),
+    page_count: pageCount,
+    production_mode: productionMode,
+    reference_note: String(referenceNote || ""),
+  };
+}
+
+function imageResumeFromResponse(response, attemptNonce) {
+  const progress = response?.progress && typeof response.progress === "object" ? response.progress : {};
+  const resume = {
+    resume_run_id: response.run_id,
+    checkpoint_preimage_hash: response.checkpoint_preimage_sha256,
+    logical_step_id: response.logical_step_id,
+    attempt_nonce: attemptNonce,
+    local_media_refs: [...new Set((response.assets || []).map((asset) => asset.media_ref))],
+    status: response.status,
+  };
+  ["completed_image_steps", "total_image_steps", "max_image_calls", "actual_image_calls", "remaining_image_calls"].forEach((key) => {
+    if (progress[key] != null) resume[key] = progress[key];
+  });
+  return resume;
+}
+
+function nextImageStepRequest(response, attemptNonce) {
+  return {
+    mode: "STEP",
+    run_id: response.run_id,
+    checkpoint_preimage: response.checkpoint_preimage,
+    checkpoint_preimage_sha256: response.checkpoint_preimage_sha256,
+    logical_step_id: response.logical_step_id,
+    attempt_nonce: attemptNonce,
+  };
+}
+
+function imageDiscoveryRequest(pending) {
+  return {
+    mode: "DISCOVER",
+    bootstrap_nonce: pending.operation_nonce,
+    input_sha256: pending.input_hash,
+  };
+}
+
+function imageRecoveryDraftId(operationNonce) {
+  return `image-recovery-${operationNonce.slice(0, 32)}`;
+}
+
+function imageResponseFailure(response) {
+  const statusCode = response?.status === "PLANNING" || response?.status === "IN_FLIGHT"
+    ? "IN_FLIGHT"
+    : response?.status === "UNKNOWN"
+      ? "UNKNOWN"
+      : response?.status === "MATERIALIZING"
+        ? "MATERIALIZING"
+        : response?.error?.code || `IMAGE_RESPONSE_${response?.status || "INVALID"}`;
+  const error = new Error(statusCode);
+  error.providerCode = statusCode;
+  error.providerStage = "image";
+  error.providerDetails = response?.progress && typeof response.progress === "object" ? structuredClone(response.progress) : null;
+  return error;
+}
+
+async function resolveLocalBlobMedia(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new TypeError("WORKSPACE_BLOB_MEDIA_READ_FAILED");
+  const blob = await response.blob();
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type };
+}
+
+function libraryContentsFromWorkspaceView(workspace) {
+  return (workspace?.drafts || [])
+    .filter((draft) => Boolean(draft?.content_package?.saved_at))
+    .map((draft) => ({
+      ...draft.content_package,
+      draft_record_id: draft.draft_id,
+      id: draft.content_package.id || draft.draft_id,
+      saved_at: draft.content_package.saved_at || draft.updated_at,
+    }));
 }
 
 function loadPromptMemory() {
@@ -336,7 +473,159 @@ export function createMainAuthorityRuntime(readTarget) {
     },
   });
 }
+
+export async function settleImageBootstrapPersistence({
+  persist,
+  isCurrent,
+  readLatest,
+  targetDraftId,
+  operationNonce,
+} = {}) {
+  if (typeof persist !== "function" || typeof isCurrent !== "function" || typeof readLatest !== "function") {
+    throw new TypeError("IMAGE_BOOTSTRAP_SETTLEMENT_ADAPTER_INVALID");
+  }
+  const targetId = String(targetDraftId || "");
+  const nonce = String(operationNonce || "");
+  if (!targetId || !/^[0-9a-f]{64}$/.test(nonce)) throw new TypeError("IMAGE_BOOTSTRAP_SETTLEMENT_IDENTITY_INVALID");
+  const receipt = await persist();
+  const committedPending = receipt?.target_draft?.pending_image_operation;
+  if (!receipt?.ok || committedPending?.operation_nonce !== nonce) {
+    return Object.freeze({ code: "IMAGE_BOOTSTRAP_NOT_COMMITTED", receipt, latest: null });
+  }
+  if (isCurrent()) {
+    return Object.freeze({ code: "IMAGE_BOOTSTRAP_CURRENT", receipt, latest: null });
+  }
+  const latest = await readLatest();
+  const latestTarget = latest?.workspace?.drafts?.find((draft) => draft?.draft_id === targetId);
+  if (latest?.ok && latestTarget?.pending_image_operation?.operation_nonce === nonce) {
+    return Object.freeze({ code: "IMAGE_BOOTSTRAP_STALE_PENDING_SAVED", receipt, latest });
+  }
+  return Object.freeze({ code: "IMAGE_BOOTSTRAP_STALE_CONFLICT", receipt, latest });
+}
+
+export function createMainTransitionLock() {
+  let active = null;
+  return Object.freeze({
+    acquire(operation, draftId) {
+      if (!operation?.id || active) return false;
+      active = Object.freeze({ operationId: operation.id, draftId: String(draftId || "") });
+      return true;
+    },
+    release(operation) {
+      if (!active || active.operationId !== operation?.id) return false;
+      active = null;
+      return true;
+    },
+    isLocked() {
+      return active != null;
+    },
+    snapshot() {
+      return active;
+    },
+  });
+}
+
+export function workspaceTransitionReceiptDisposition({ operationApplied, candidateWorkspaceToken, receiptWorkspaceToken } = {}) {
+  if (operationApplied) return "APPLIED";
+  if (typeof candidateWorkspaceToken !== "string" || candidateWorkspaceToken !== receiptWorkspaceToken) {
+    return "STALE_NOOP_PRESERVE_LOCAL";
+  }
+  return "STALE_CANDIDATE_CURRENT_SETTLE";
+}
+
+export function postCasWorkspaceSettlementPlan({
+  latestOk,
+  latestWorkspaceToken,
+  receiptWorkspaceToken,
+  currentWorkspaceToken,
+  latestActiveDraftId,
+  dirtyDraftId,
+  preserveSameActive = false,
+} = {}) {
+  if (!latestOk || typeof latestWorkspaceToken !== "string" || !latestWorkspaceToken) return "LATEST_UNAVAILABLE";
+  if (currentWorkspaceToken === latestWorkspaceToken) return "LATEST_ALREADY_ADOPTED";
+  if (preserveSameActive) {
+    return latestActiveDraftId === dirtyDraftId
+      ? "LATEST_SAME_ACTIVE_PRESERVE_LOCAL"
+      : "LATEST_CHANGED_APPLY_AND_BLOCK";
+  }
+  if (latestWorkspaceToken === receiptWorkspaceToken) return "RECEIPT_STILL_CURRENT";
+  return "LATEST_CHANGED_APPLY_AND_BLOCK";
+}
 // MAIN_AUTHORITY_RUNTIME_END
+
+// MAIN_AUTH_TRANSACTION_START
+export function createMainAuthState(providerHealth = "CHECKING") {
+  return Object.freeze({
+    generation: 0,
+    phase: "IDLE",
+    providerHealth,
+    providerMeta: null,
+    accessRequired: false,
+    accessBusy: false,
+    accessError: "",
+  });
+}
+
+export function reduceMainAuthState(state, event) {
+  const current = state || createMainAuthState();
+  const type = String(event?.type || "");
+  if (type === "BEGIN_LOGIN") {
+    return Object.freeze({
+      ...current,
+      generation: current.generation + 1,
+      phase: "LOGIN_PENDING",
+      accessBusy: true,
+      accessError: "",
+    });
+  }
+  const generation = Number(event?.generation);
+  if (!Number.isInteger(generation) || generation !== current.generation) return current;
+  if (type === "BEGIN_RECONCILE") {
+    if (current.phase !== "LOGIN_PENDING") return current;
+    return Object.freeze({ ...current, phase: "CONFIG_RECONCILING", accessBusy: true });
+  }
+  if (type === "CONFIG_COMMIT" || type === "BACKGROUND_CONFIG") {
+    if (type === "BACKGROUND_CONFIG" && new Set(["LOGIN_PENDING", "CONFIG_RECONCILING"]).has(current.phase)) return current;
+    const providerMeta = event.providerMeta && typeof event.providerMeta === "object" ? event.providerMeta : {};
+    const accessRequired = providerMeta.credential_mode === "SERVER_MANAGED"
+      && providerMeta.authenticated !== true
+      && providerMeta.access_required === true;
+    return Object.freeze({
+      ...current,
+      phase: providerMeta.authenticated === true ? "AUTHENTICATED" : accessRequired ? "ACCESS_SESSION_REQUIRED" : "IDLE",
+      providerMeta,
+      providerHealth: String(event.providerHealth || current.providerHealth),
+      accessRequired,
+      accessBusy: false,
+      accessError: "",
+    });
+  }
+  if (type === "LOGIN_ERROR") {
+    return Object.freeze({
+      ...current,
+      phase: "LOGIN_ERROR",
+      accessRequired: true,
+      accessBusy: false,
+      accessError: String(event.message || "访问验证失败"),
+    });
+  }
+  if (type === "BACKGROUND_FAILURE") {
+    if (new Set(["LOGIN_PENDING", "CONFIG_RECONCILING"]).has(current.phase)) return current;
+    return Object.freeze({ ...current, providerHealth: "OFFLINE" });
+  }
+  if (type === "BUSINESS_SUCCESS") {
+    if (new Set(["LOGIN_PENDING", "CONFIG_RECONCILING"]).has(current.phase)) return current;
+    return Object.freeze({ ...current, providerHealth: "ONLINE" });
+  }
+  if (type === "BUSINESS_AUTH_REQUIRED") {
+    if (new Set(["LOGIN_PENDING", "CONFIG_RECONCILING"]).has(current.phase)) return current;
+    return Object.freeze({ ...current, phase: "ACCESS_SESSION_REQUIRED", accessRequired: true, accessError: String(event.message || "访问会话已失效，请重新输入访问码") });
+  }
+  if (type === "CLEAR_ERROR") return Object.freeze({ ...current, accessError: "" });
+  return current;
+}
+// MAIN_AUTH_TRANSACTION_END
 
 function pageSemanticIdentity(page, pageIndex) {
   if (!page || typeof page !== "object") return `missing-page:${pageIndex}`;
@@ -351,19 +640,25 @@ function pageSemanticIdentity(page, pageIndex) {
   ]);
 }
 
+export function authoringInputLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, activeDraftId, imageOperationDraftId } = {}) {
+  if (!workspaceReady || workspaceReadOnly) return "WORKSPACE_MEDIA_READ_ONLY";
+  if (pendingImageOperation || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
+  return null;
+}
 
-function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "", textareaId, textareaRef }) {
+
+function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "", textareaId, textareaRef, disabled = false }) {
   return <section className={`prompt-context-field ${className}`}>
     <label>
       <span>{field.label}</span>
       {field.helper && <small>{field.helper}</small>}
-      <textarea id={textareaId} ref={textareaRef} rows={rows} value={value} placeholder={field.placeholder || ""} onChange={(event) => onChange(event.target.value)} onBlur={() => onRemember(value)} />
+      <textarea id={textareaId} ref={textareaRef} rows={rows} value={value} disabled={disabled} placeholder={field.placeholder || ""} onChange={(event) => onChange(event.target.value)} onBlur={() => onRemember(value)} />
     </label>
     {history.length > 0 && <details className="prompt-history">
       <summary>历史记录 · {history.length} 条 <ChevronDown /></summary>
       <div className="prompt-history__list">{history.map((entry) => <article key={entry.id}>
-        <button className="prompt-history__use" type="button" aria-label={`使用${field.label}历史记录：${entry.value.slice(0, 36)}`} onClick={() => onUse(entry.value)}><span>{entry.value}</span><small>{new Date(entry.saved_at).toLocaleString("zh-CN", { hour12: false })}</small></button>
-        <button className="prompt-history__delete" type="button" aria-label={`删除${field.label}历史记录`} onClick={() => onDelete(entry.id)}><Trash2 /></button>
+        <button className="prompt-history__use" type="button" disabled={disabled} aria-label={`使用${field.label}历史记录：${entry.value.slice(0, 36)}`} onClick={() => onUse(entry.value)}><span>{entry.value}</span><small>{new Date(entry.saved_at).toLocaleString("zh-CN", { hour12: false })}</small></button>
+        <button className="prompt-history__delete" type="button" disabled={disabled} aria-label={`删除${field.label}历史记录`} onClick={() => onDelete(entry.id)}><Trash2 /></button>
       </article>)}</div>
     </details>}
   </section>;
@@ -406,14 +701,14 @@ function FailureNotice({ feedback, onRetry }) {
 }
 
 
-function ProfileEditor({ profile, onChange, onSave, onImport, importRef }) {
+function ProfileEditor({ profile, onChange, onSave, onImport, onDownloadProfile, onDownloadContract, importRef, readOnly = false }) {
   const setField = (field, value) => onChange({ ...profile, [field]: value, updated_at: new Date().toISOString() });
   const setPersona = (field, value) => onChange({ ...profile, persona: { ...profile.persona, [field]: value }, updated_at: new Date().toISOString() });
   const setPortfolio = (field, value) => onChange({ ...profile, content_portfolio: { ...profile.content_portfolio, [field]: value }, updated_at: new Date().toISOString() });
   const setBenchmark = (index, field, value) => onChange({ ...profile, updated_at: new Date().toISOString(), benchmark_pool: profile.benchmark_pool.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value } : item) });
   return <section className="profile-view">
-    <header><div><span>PROFILE v2</span><h1>小师妹账号生产合同</h1><p>人物 IP 固定；三类对标拥有不同权限，不会相互冒充。</p></div><div className="profile-actions"><button onClick={onSave}><Save />保存</button><button onClick={() => importRef.current?.click()}><Upload />回载</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={onImport} /><button onClick={() => downloadBlob("xiaoshimei-profile-v2.json", jsonBlob(profile))}><Download />档案 JSON</button><button onClick={() => downloadBlob("xiaoshimei-generation-contract-v2.json", jsonBlob(buildGenerationContract(profile)))}><Download />生成合同</button></div></header>
-    <div className="profile-grid">
+    <header><div><span>PROFILE v2</span><h1>小师妹账号生产合同</h1><p>人物 IP 固定；三类对标拥有不同权限，不会相互冒充。</p></div><div className="profile-actions"><button onClick={onSave} disabled={readOnly}><Save />保存</button><button onClick={() => importRef.current?.click()} disabled={readOnly}><Upload />回载</button><input ref={importRef} hidden type="file" accept="application/json,.json" onChange={onImport} /><button onClick={onDownloadProfile}><Download />档案 JSON</button><button onClick={onDownloadContract}><Download />生成合同</button></div></header>
+    <fieldset className="profile-grid" disabled={readOnly}>
       <section className="profile-card profile-card--persona"><h2>人格内核</h2><p className="profile-card__note">“小师妹是谁”与“今天讲什么”分开。人格稳定，栏目可以演化。</p>
         <label><span>角色定位</span><textarea rows="3" value={profile.persona.role} onChange={(event) => setPersona("role", event.target.value)} /></label>
         <label><span>聪明与观察</span><textarea rows="3" value={profile.persona.intelligence} onChange={(event) => setPersona("intelligence", event.target.value)} /></label>
@@ -427,7 +722,7 @@ function ProfileEditor({ profile, onChange, onSave, onImport, importRef }) {
       </section>
       <section className="profile-card profile-card--identity"><h2>品牌与事实合同</h2>{PROFILE_FIELDS.map(([field, label]) => <label key={field}><span>{label}</span><textarea rows={field === "account_owner" ? 2 : 4} value={profile[field]} onChange={(event) => setField(field, event.target.value)} /></label>)}<label><span>允许场景元素（每行一个）</span><textarea rows="5" value={profile.allowed_scene_elements.join("\n")} onChange={(event) => setField("allowed_scene_elements", event.target.value.split("\n").map((item) => item.trim()).filter(Boolean))} /></label><label><span>事实与表达边界（每行一个）</span><textarea rows="7" value={profile.claim_boundaries.join("\n")} onChange={(event) => setField("claim_boundaries", event.target.value.split("\n").map((item) => item.trim()).filter(Boolean))} /></label></section>
       <section className="profile-card profile-card--benchmarks"><div className="profile-card__head"><div><h2>Benchmark Pool</h2><p>只有已确认的现实同级对标可影响账号策略。</p></div></div>{profile.benchmark_pool.map((item, index) => <article key={`${item.class}-${index}`} className={`benchmark benchmark--${item.class.toLowerCase()}`}><div className="benchmark__head"><span>{BENCHMARK_CLASS_LABELS[item.class]}</span><select value={item.status} onChange={(event) => setBenchmark(index, "status", event.target.value)}><option value="CONFIRMED">已确认</option><option value="CANDIDATE">候选</option><option value="EVIDENCE_PENDING">待证据</option><option value="EXCLUDED">已排除</option></select></div><label><span>账号 / 样本</span><input value={item.account} onChange={(event) => setBenchmark(index, "account", event.target.value)} /></label><label><span>证据</span><textarea rows="3" value={item.evidence.join("\n")} onChange={(event) => setBenchmark(index, "evidence", event.target.value.split("\n").filter(Boolean))} /></label><label><span>可迁移机制</span><textarea rows="3" value={item.transferable_mechanism.join("\n")} onChange={(event) => setBenchmark(index, "transferable_mechanism", event.target.value.split("\n").filter(Boolean))} /></label><label><span>明确排除</span><textarea rows="3" value={item.exclusions.join("\n")} onChange={(event) => setBenchmark(index, "exclusions", event.target.value.split("\n").filter(Boolean))} /></label></article>)}</section>
-    </div>
+    </fieldset>
   </section>;
 }
 
@@ -532,37 +827,54 @@ function App() {
   const initialPromptMemory = useMemo(() => loadPromptMemory(), []);
   const [workspaceEnvelope, setWorkspaceEnvelope] = useState(initialWorkspace);
   const workspaceEnvelopeRef = useRef(initialWorkspace);
-  const workspaceCoordinator = useMemo(() => createWorkspaceCoordinator({ storage: localStorage, keys: STORAGE_KEYS }), []);
+  const mediaStore = useMemo(() => createMediaAssetStore(), []);
+  const workspaceCoordinator = useMemo(() => createWorkspaceV3Coordinator({ storage: localStorage, keys: STORAGE_KEYS, mediaStore }), [mediaStore]);
+  const workspaceHydrationRef = useRef(null);
   const authorityTargetRef = useRef({
     draftId: initialWorkspace.active_draft_id,
     pageId: pageSemanticIdentity(initial.pages?.[0], 0),
-    workspaceToken: workspaceEnvelopeToken(initialWorkspace),
+    workspaceToken: "WORKSPACE_V3_BOOTSTRAP",
   });
   const mainAuthority = useMemo(() => createMainAuthorityRuntime(() => authorityTargetRef.current), []);
+  const workspaceTransitionLock = useMemo(() => createMainTransitionLock(), []);
   const activeImageOperationRef = useRef(null);
+  const draftMutationLockRef = useRef(null);
   const candidateAuthorityOperationRef = useRef(null);
   const historicalAdoptionRef = useRef(false);
   const [workspaceReady, setWorkspaceReady] = useState(false);
+  const workspaceReadyRef = useRef(false);
   const [workspaceWriteBlocked, setWorkspaceWriteBlocked] = useState(false);
   const workspaceWriteBlockedRef = useRef(false);
-  const [previousDraftId, setPreviousDraftId] = useState(null);
+  const [workspaceTransitioning, setWorkspaceTransitioning] = useState(false);
+  const [autosaveRetryRevision, setAutosaveRetryRevision] = useState(0);
+  const [previousDraftId, setPreviousDraftId] = useState(initialWorkspace.previous_draft_id ?? null);
   const [activatedAsContentOnly, setActivatedAsContentOnly] = useState(initialGenerationSession == null);
   const [contentHistory, setContentHistory] = useState(() => createEditorHistory(initial));
   const [layoutRefreshToken, setLayoutRefreshToken] = useState(0);
   const content = contentHistory.present;
   const setContent = useCallback((updater, options = {}) => {
+    const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id;
+    const activeRecord = workspaceReadyRef.current
+      ? workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId)
+      : null;
+    if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) {
+      setToast(activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId
+        ? "同一次配图尚未收束；当前稿编辑已冻结"
+        : "工作台当前为只读；修改没有发生");
+      return;
+    }
     if (options.semantic !== false) mainAuthority.markSemanticMutation();
     setContentHistory((history) => {
       const next = typeof updater === "function" ? updater(history.present) : updater;
       return updateEditorHistory(history, next, options);
     });
-  }, [mainAuthority]);
+  }, [mainAuthority, workspaceTransitionLock]);
   const resetContent = useCallback((next, { semantic = true } = {}) => {
     if (semantic) mainAuthority.markSemanticMutation();
     setContentHistory(createEditorHistory(next));
   }, [mainAuthority]);
-  const undo = useCallback(() => { mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority]);
-  const redo = useCallback(() => { mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority]);
+  const undo = useCallback(() => { const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id; const activeRecord = workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId); if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
+  const redo = useCallback(() => { const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id; const activeRecord = workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId); if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
   const [topic, setTopic] = useState(initialGenerationSession?.topic || initialPromptMemory.defaults.source_topic || initial.source_input);
   const [pillar, setPillar] = useState(initialGenerationSession?.pillar || initial.pillar);
   const [goal, setGoal] = useState(initialGenerationSession?.goal || initial.goal);
@@ -597,7 +909,9 @@ function App() {
   const [profile, setProfile] = useState(initialWorkspace.profile);
   const [authorityAdmission, setAuthorityAdmission] = useState(null);
   const [toast, setToast] = useState("");
-  const [storageIssue, setStorageIssue] = useState(initialWorkspaceLoad.persistence.ok ? "" : "旧工作台已读入，但 v2 草稿权威尚未可靠落盘；请立即备份工作台。");
+  const [storageIssue, setStorageIssue] = useState(initialWorkspaceLoad.loadDiagnostic
+    ? "旧工作台数据损坏；已挂载安全只读稿，正在尝试读回 v3 权威，可使用恢复备份自救。"
+    : initialWorkspaceLoad.persistence.ok ? "" : "旧工作台已读入，但 v2 草稿权威尚未可靠落盘；请立即备份工作台。");
   const [exportState, setExportState] = useState("IDLE");
   const [preparedExport, setPreparedExport] = useState(null);
   const [generationState, setGenerationState] = useState("IDLE");
@@ -609,14 +923,21 @@ function App() {
   const [customImageCount, setCustomImageCount] = useState(initialGenerationSession?.custom_image_count || 3);
   const [productionMode, setProductionMode] = useState(initialGenerationSession?.production_mode || "smart");
   const [imageResume, setImageResume] = useState(initialGenerationSession?.image_resume || null);
-  const [actionReferences, setActionReferences] = useState([]);
-  const [actionReferenceNote, setActionReferenceNote] = useState("");
-  const [providerHealth, setProviderHealth] = useState(PROVIDER_URL ? "CHECKING" : "DEMO");
-  const [providerMeta, setProviderMeta] = useState(null);
-  const [accessRequired, setAccessRequired] = useState(false);
+  const [actionReferences, setActionReferences] = useState(initialGenerationSession?.action_reference_manifest || []);
+  const [actionReferencePreviewUrls, setActionReferencePreviewUrls] = useState({});
+  const actionReferenceHydrationsRef = useRef(new Map());
+  const [actionReferenceNote, setActionReferenceNote] = useState(initialGenerationSession?.action_reference_note || "");
   const [accessCode, setAccessCode] = useState("");
-  const [accessBusy, setAccessBusy] = useState(false);
-  const [accessError, setAccessError] = useState("");
+  const initialAuthState = useMemo(() => createMainAuthState(PROVIDER_URL ? "CHECKING" : "DEMO"), []);
+  const [authState, setAuthState] = useState(initialAuthState);
+  const authStateRef = useRef(initialAuthState);
+  const dispatchAuth = useCallback((event) => {
+    const next = reduceMainAuthState(authStateRef.current, event);
+    authStateRef.current = next;
+    setAuthState(next);
+    return next;
+  }, []);
+  const { providerHealth, providerMeta, accessRequired, accessBusy, accessError } = authState;
   const [historicalAdoptionBusy, setHistoricalAdoptionBusy] = useState(false);
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
@@ -662,9 +983,15 @@ function App() {
   const canUndo = contentHistory.past.length > 0;
   const canRedo = contentHistory.future.length > 0;
   const isGenerating = generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
-  const providerCanAttempt = !accessRequired && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
+  const pendingImageOperation = workspaceReady ? activeDraftRecordV3(workspaceEnvelopeRef.current)?.pending_image_operation : null;
+  const workspaceReadOnly = !workspaceReady || workspaceWriteBlocked;
+  const authoringInputLocked = workspaceReadOnly || workspaceTransitioning || Boolean(pendingImageOperation);
+  const draftEditingLocked = workspaceReadOnly || workspaceTransitioning || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
+  const providerCanAttempt = !workspaceReadOnly && !accessRequired
+    && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
   const providerStatusLabel = accessRequired ? "需要访问验证" : providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
   const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
+  const actionReferenceMediaKey = actionReferences.map((item) => item.media_ref).join("|");
   const reusableImageAssets = useMemo(() => collectReusableImageAssets(content, library), [content, library]);
   const resolvedPageCount = textDraft ? (imageCountMode === "AUTO" ? textDraft.recommended_image_count : Number(customImageCount)) : 0;
   const motherSheetEstimate = textDraft && resolvedPageCount ? estimateMotherSheetPlan(resolvedPageCount, productionMode) : null;
@@ -699,7 +1026,7 @@ function App() {
   authorityTargetRef.current = {
     draftId: workspaceEnvelopeRef.current.active_draft_id,
     pageId: pageSemanticIdentity(currentPage, pageIndex),
-    workspaceToken: workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+    workspaceToken: workspaceReady ? workspaceEnvelopeV3Token(workspaceEnvelopeRef.current) : "WORKSPACE_V3_BOOTSTRAP",
   };
   const editorAuthorityOperation = mainAuthority.capture("editor-callback", { pageScoped: true });
   contentRef.current = content;
@@ -720,25 +1047,56 @@ function App() {
       custom_image_count: customImageCount,
       production_mode: productionMode,
       image_resume: imageResumeOverride,
+      action_reference_manifest: actionReferences,
+      action_reference_note: actionReferenceNote,
     });
   }
 
-  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false } = {}) {
+  async function materializeForWorkspace(value) {
+    return materializePersistentMediaRefsV3({ value, mediaStore, resolveBlobUrl: resolveLocalBlobMedia });
+  }
+
+  async function hydrateWorkspaceForView(nextWorkspace) {
+    const hydrated = await hydrateWorkspaceV3View({ workspace: nextWorkspace, mediaStore });
+    if (!hydrated.ok || !hydrated.workspace) {
+      const error = new TypeError(hydrated.code || "WORKSPACE_V3_MEDIA_HYDRATION_FAILED");
+      error.mediaHydration = hydrated;
+      throw error;
+    }
+    return hydrated;
+  }
+
+  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false, workspaceView = null } = {}) {
     workspaceEnvelopeRef.current = nextWorkspace;
     authorityTargetRef.current = {
       ...authorityTargetRef.current,
       draftId: nextWorkspace.active_draft_id,
-      workspaceToken: workspaceEnvelopeToken(nextWorkspace),
+      workspaceToken: workspaceEnvelopeV3Token(nextWorkspace),
     };
     setWorkspaceEnvelope(nextWorkspace);
-    setLibrary(libraryContents(nextWorkspace));
+    if (workspaceView) {
+      workspaceHydrationRef.current?.release?.();
+      workspaceHydrationRef.current = workspaceView;
+      setLibrary(libraryContentsFromWorkspaceView(workspaceView.workspace));
+    } else {
+      const persistentLibrary = libraryContentsV3(nextWorkspace);
+      setLibrary((current) => persistentLibrary.map((item) => {
+        const cached = current.find((entry) => entry.draft_record_id === item.draft_record_id);
+        if (item.draft_record_id === nextWorkspace.active_draft_id && contentRef.current?.saved_at === item.saved_at) {
+          return { ...contentRef.current, draft_record_id: item.draft_record_id, id: item.id, saved_at: item.saved_at };
+        }
+        return cached || item;
+      }));
+    }
     if (nextProfile) setProfile(nextProfile);
-    if (previousId !== undefined) setPreviousDraftId(previousId);
+    setPreviousDraftId(previousId !== undefined ? previousId : (nextWorkspace.previous_draft_id ?? null));
     if (applyRecord) {
       const recordId = record?.draft_id || nextWorkspace.active_draft_id;
-      const persistedRecord = nextWorkspace.drafts.find((draft) => draft.draft_id === recordId);
-      if (persistedRecord) applyDraftRecord(persistedRecord);
+      const sourceWorkspace = workspaceView?.workspace || nextWorkspace;
+      const visibleRecord = sourceWorkspace.drafts.find((draft) => draft.draft_id === recordId);
+      if (visibleRecord) applyDraftRecord(visibleRecord);
     }
+    workspaceReadyRef.current = true;
     setWorkspaceReady(true);
   }
 
@@ -747,15 +1105,96 @@ function App() {
     setWorkspaceWriteBlocked(Boolean(value));
   }
 
+  function workspaceMutationIsLocked() {
+    if (workspaceTransitionLock.isLocked()) {
+      setToast("工作台正在原子切换或保存；当前输入保持不变，请稍候");
+      return true;
+    }
+    const reason = authoringInputLockReason({
+      workspaceReady: workspaceReadyRef.current,
+      workspaceReadOnly: workspaceWriteBlockedRef.current,
+      pendingImageOperation: null,
+    });
+    if (!reason) return false;
+    setToast("工作台当前为只读；可查看、尝试备份或恢复备份，不能产生未落盘修改");
+    return true;
+  }
+
+  function authoringInputIsLocked() {
+    if (workspaceTransitionLock.isLocked()) {
+      setToast("工作台正在原子切换或保存；当前输入保持不变，请稍候");
+      return true;
+    }
+    const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id;
+    const durablePending = workspaceReadyRef.current
+      ? activeDraftRecordV3(workspaceEnvelopeRef.current)?.pending_image_operation
+      : null;
+    const reason = authoringInputLockReason({
+      workspaceReady: workspaceReadyRef.current,
+      workspaceReadOnly: workspaceWriteBlockedRef.current,
+      pendingImageOperation: durablePending,
+      activeDraftId,
+      imageOperationDraftId: draftMutationLockRef.current?.draft_id,
+    });
+    if (!reason) return false;
+    setToast(reason === "PENDING_IMAGE_OPERATION_INPUT_FROZEN"
+      ? "同一次配图尚未恢复完成；原文、文字、页数和画面输入已冻结"
+      : "工作台当前为只读；可查看、尝试备份或恢复备份，不能产生未落盘修改");
+    return true;
+  }
+
+  function draftMutationIsLocked() {
+    if (workspaceMutationIsLocked()) return true;
+    const activeDraftId = workspaceEnvelopeRef.current.active_draft_id;
+    const activeRecord = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === activeDraftId);
+    if (!activeRecord?.pending_image_operation && draftMutationLockRef.current?.draft_id !== activeDraftId) return false;
+    setToast("同一次配图尚未收束；当前稿的编辑、保存和导入已冻结，可先切到另一稿继续工作");
+    return true;
+  }
+
+  function mediaWorkspaceIsUsable() {
+    if (!workspaceMutationIsLocked()) return true;
+    setToast("本机图片尚未通过回载校验；媒体编辑、模型调用和发布包已暂停");
+    return false;
+  }
+
   function handleWorkspaceConflict(receipt, fallbackMessage) {
     const latest = receipt?.workspace;
-    if (latest?.active_draft_id && latest.active_draft_id !== authorityTargetRef.current.draftId) {
-      const latestRecord = latest.drafts.find((draft) => draft.draft_id === latest.active_draft_id);
-      if (latestRecord) adoptWorkspaceState(latest, { record: latestRecord, applyRecord: true });
-      setToast("另一标签页已经切换稿件；这里已读回最新稿，旧数据没有覆盖它");
+    if (latest?.active_draft_id) {
+      const finalRecord = latest.drafts?.find((draft) => draft.draft_id === latest.active_draft_id);
+      adoptWorkspaceState(latest, { record: finalRecord, applyRecord: Boolean(finalRecord) });
+      setToast("已读回本机最新权威稿件；写入保持暂停，请核对后恢复");
     }
     setWorkspaceBlocked(true);
     setStorageIssue(fallbackMessage);
+  }
+
+  function reconcileStaleDraftWrite(receipt, { dirtyDraftId, issueLabel = "写入" } = {}) {
+    const latest = workspaceCoordinator.snapshot();
+    const plan = postCasWorkspaceSettlementPlan({
+      latestOk: latest.ok && Boolean(latest.workspace),
+      latestWorkspaceToken: latest.workspace_token,
+      receiptWorkspaceToken: receipt?.workspace_token,
+      currentWorkspaceToken: workspaceEnvelopeV3Token(workspaceEnvelopeRef.current),
+      latestActiveDraftId: latest.workspace?.active_draft_id,
+      dirtyDraftId,
+      preserveSameActive: true,
+    });
+    if (plan === "RECEIPT_STILL_CURRENT" || plan === "LATEST_SAME_ACTIVE_PRESERVE_LOCAL") {
+      adoptWorkspaceState(latest.workspace);
+      setAutosaveRetryRevision((value) => value + 1);
+    } else if (plan === "LATEST_ALREADY_ADOPTED") {
+      if (latest.workspace.active_draft_id === dirtyDraftId) setAutosaveRetryRevision((value) => value + 1);
+    } else if (plan === "LATEST_CHANGED_APPLY_AND_BLOCK") {
+      const latestRecord = latest.workspace.drafts.find((draft) => draft.draft_id === latest.workspace.active_draft_id);
+      adoptWorkspaceState(latest.workspace, { record: latestRecord, applyRecord: Boolean(latestRecord) });
+      setWorkspaceBlocked(true);
+      setStorageIssue(`${issueLabel}回执后权威继续前进；已读回最终稿并暂停写入，未采用过期回执。`);
+    } else {
+      setWorkspaceBlocked(true);
+      setStorageIssue(`${issueLabel}后无法读回最终权威；界面未采用过期回执，写入已暂停。`);
+    }
+    return plan;
   }
 
   useEffect(() => {
@@ -769,63 +1208,70 @@ function App() {
   useEffect(() => {
     let active = true;
     const boot = async () => {
-      const initialSnapshot = initialWorkspaceLoad.authoritySnapshot;
-      if (!initialSnapshot?.ok) {
-        if (active) handleWorkspaceConflict(initialSnapshot, "工作台权威无法读取；所有写入已暂停，请先下载备份并刷新。");
-        return;
-      }
-      let receipt = {
-        ok: true,
-        code: "WORKSPACE_ALREADY_V2",
-        workspace: initialWorkspace,
-        workspace_token: workspaceEnvelopeToken(initialWorkspace),
-      };
-      if (initialWorkspaceLoad.migrated) {
-        receipt = await workspaceCoordinator.fullCas({
-          expectedWorkspaceToken: initialSnapshot.workspace_token,
-          workspace: initialWorkspace,
-          reason: "BOOT_MIGRATION",
-        });
-      }
-      if (!active) return;
-      if (!receipt.ok || !receipt.workspace) {
-        handleWorkspaceConflict(receipt, "旧工作台已安全读入，但迁移未能在跨标签锁内落盘；写入已暂停。");
-        return;
-      }
-      const repaired = await workspaceCoordinator.repairLegacyArkSourceCas({ expectedWorkspaceToken: receipt.workspace_token });
-      if (!active) return;
-      const finalReceipt = repaired.ok ? repaired : receipt;
-      if (!repaired.ok && repaired.code !== "WORKSPACE_CAS_CONFLICT") {
-        handleWorkspaceConflict(repaired, "历史稿校验没有完成；写入已暂停，原稿仍保留。");
-        return;
-      }
-      const finalWorkspace = finalReceipt.workspace;
-      const finalRecord = finalWorkspace.drafts.find((draft) => draft.draft_id === finalWorkspace.active_draft_id);
-      adoptWorkspaceState(finalWorkspace, {
-        record: finalRecord,
-        applyRecord: Boolean(repaired.repaired),
+      const receipt = await workspaceCoordinator.bootstrap({
+        fallbackWorkspaceV2: initialWorkspace,
+        expectedV2Serialized: initialWorkspaceLoad.serializedV2,
       });
-      setWorkspaceBlocked(false);
-      setStorageIssue("");
+      if (!active) return;
+      if (!receipt.workspace) {
+        handleWorkspaceConflict(receipt, "旧工作台仍保留，但 v3 权威迁移未能在跨标签锁内落盘；写入已暂停。");
+        return;
+      }
+      const bootstrapReadOnly = !receipt.ok;
+      const finalRecord = receipt.workspace.drafts.find((draft) => draft.draft_id === receipt.workspace.active_draft_id);
+      let workspaceView;
+      try {
+        workspaceView = await hydrateWorkspaceForView(receipt.workspace);
+      } catch (error) {
+        console.warn(error);
+        if (!active) return;
+        adoptWorkspaceState(receipt.workspace, { record: finalRecord, applyRecord: true });
+        setWorkspaceBlocked(true);
+        const missing = error.mediaHydration?.missing_refs?.length || 0;
+        const corrupt = error.mediaHydration?.corrupt_refs?.length || 0;
+        setStorageIssue(`v3 稿件文字已读回，但本机图片校验失败（缺失 ${missing}，损坏 ${corrupt}）；媒体编辑、模型调用和发布包已暂停，请先恢复工作台备份。`);
+        return;
+      }
+      if (!active) {
+        workspaceView.release?.();
+        return;
+      }
+      adoptWorkspaceState(receipt.workspace, {
+        record: finalRecord,
+        applyRecord: true,
+        workspaceView,
+      });
+      setWorkspaceBlocked(bootstrapReadOnly);
+      setStorageIssue(bootstrapReadOnly ? "已读回现有 v3 稿件，但检测到旧写入漂移；当前以只读方式打开，未采用旧 v2 覆盖。" : "");
     };
     boot().catch((error) => {
       console.warn(error);
       if (active) handleWorkspaceConflict(null, "工作台启动事务失败；所有写入已暂停，原稿仍保留。");
     });
     return () => { active = false; };
-  }, [initialWorkspace, initialWorkspaceLoad, workspaceCoordinator]);
+  }, [initialWorkspace, initialWorkspaceLoad, workspaceCoordinator, mediaStore]);
 
   useEffect(() => {
-    if (!workspaceReady || workspaceWriteBlocked) return undefined;
+    if (!workspaceReady || workspaceWriteBlocked || workspaceTransitioning) return undefined;
     const timer = window.setTimeout(async () => {
+      if (workspaceTransitionLock.isLocked()) return;
+      const liveDraftId = workspaceEnvelopeRef.current.active_draft_id;
+      const liveDraft = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === liveDraftId);
+      if (liveDraft?.pending_image_operation || draftMutationLockRef.current?.draft_id === liveDraftId) return;
       const operation = mainAuthority.capture("autosave");
       try {
         const baseWorkspace = workspaceEnvelopeRef.current;
         const draftId = baseWorkspace.active_draft_id;
         const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
-        const next = saveDraftRecord(baseWorkspace, {
-          contentPackage: content,
-          generationSession: currentAuthoringSession(),
+        const materialized = await materializeForWorkspace({
+          content_package: content,
+          generation_session: currentAuthoringSession(),
+        });
+        const latestDraft = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === draftId);
+        if (!mainAuthority.isCurrent(operation) || workspaceTransitionLock.isLocked() || latestDraft?.pending_image_operation || draftMutationLockRef.current?.draft_id === draftId) return;
+        const next = saveDraftRecordV3(baseWorkspace, {
+          contentPackage: materialized.value.content_package,
+          generationSession: materialized.value.generation_session,
         });
         const replacementDraft = next.drafts.find((draft) => draft.draft_id === draftId);
         const receipt = await workspaceCoordinator.mergeDraftCas({
@@ -839,20 +1285,24 @@ function App() {
           mainAuthority.commit(operation, () => handleWorkspaceConflict(receipt, "当前编辑未能在跨标签锁内落盘；旧数据没有被覆盖，请先备份或刷新。"));
           return;
         }
-        mainAuthority.commit(operation, () => {
+        const committed = mainAuthority.commit(operation, () => {
           adoptWorkspaceState(receipt.workspace);
           setWorkspaceBlocked(false);
           setStorageIssue("");
         });
+        if (!committed.applied && receipt.workspace) {
+          reconcileStaleDraftWrite(receipt, { dirtyDraftId: draftId, issueLabel: "自动保存" });
+        }
       } catch (error) {
         console.warn(error);
         mainAuthority.commit(operation, () => setStorageIssue("当前稿结构无效，自动保存已暂停；原有草稿未被覆盖。"));
       }
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [content, topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume, activatedAsContentOnly, workspaceReady, workspaceWriteBlocked, workspaceCoordinator, mainAuthority]);
+  }, [content, topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume, actionReferences, actionReferenceNote, activatedAsContentOnly, workspaceReady, workspaceWriteBlocked, workspaceTransitioning, autosaveRetryRevision, workspaceCoordinator, workspaceTransitionLock, mainAuthority]);
 
   function beginImageCrop() {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     const imageSelected = selectedObject === "image" || infoObjectSelection(selectedObject)?.kind === "image";
     if (imageEditMode === "crop" || !imageSelected || layerIsLocked(currentPage, "image")) return;
     cropSessionRef.current = { pageIndex, history: contentHistory };
@@ -866,6 +1316,7 @@ function App() {
   }
 
   function cancelImageCrop() {
+    if (draftMutationIsLocked()) return;
     const snapshot = cropSessionRef.current;
     if (snapshot?.pageIndex === pageIndex) { mainAuthority.markSemanticMutation(); setContentHistory(snapshot.history); }
     cropSessionRef.current = null;
@@ -900,48 +1351,49 @@ function App() {
         image_model: settings.image_model || "",
         api_key: "",
       });
-      setProviderMeta(settings);
+      dispatchAuth({ type: "BACKGROUND_CONFIG", generation: authStateRef.current.generation, providerMeta: settings, providerHealth: providerHealthState(settings) });
       setProviderSettingsOpen(true);
     } catch {
       setToast("生成服务设置暂时不可读取");
     }
   }
 
-  function adoptProviderStatus(value) {
+  function adoptProviderStatus(value, { type = "BACKGROUND_CONFIG", generation = authStateRef.current.generation } = {}) {
     const next = value && typeof value === "object" ? value : {};
-    setProviderMeta(next);
-    setAccessRequired(next.credential_mode === "SERVER_MANAGED" && next.authenticated !== true && next.access_required === true);
-    setProviderHealth(providerHealthState(next));
+    return dispatchAuth({ type, generation, providerMeta: next, providerHealth: providerHealthState(next) });
   }
 
   async function loginProviderAccess(event) {
     event?.preventDefault?.();
     if (!provider?.authenticateAccess || accessBusy || !accessCode.trim()) return;
-    setAccessBusy(true);
-    setAccessError("");
+    const transaction = dispatchAuth({ type: "BEGIN_LOGIN" });
+    const generation = transaction.generation;
     try {
-      await provider.authenticateAccess(accessCode);
-      const health = await provider.checkHealth();
-      adoptProviderStatus(health);
-      setAccessCode("");
-      setProviderSettingsOpen(false);
-      setToast("访问验证已通过；现在可以使用服务器生成服务");
+      const result = await provider.authenticateAccess(accessCode, { generation });
+      dispatchAuth({ type: "BEGIN_RECONCILE", generation });
+      const committed = adoptProviderStatus(result.config, { type: "CONFIG_COMMIT", generation });
+      if (committed.generation === generation && committed.phase === "AUTHENTICATED") {
+        setAccessCode("");
+        setProviderSettingsOpen(false);
+        setToast("访问验证已通过；现在可以使用服务器生成服务");
+      }
     } catch (error) {
-      setAccessRequired(true);
-      setAccessError(error?.providerCode === "ACCESS_DENIED" ? "访问码不正确，请重新输入" : error?.providerCode === "ORIGIN_FORBIDDEN" ? "当前网页来源不受信任，已拒绝登录" : "访问服务尚未配置好，生成保持关闭");
-    } finally {
-      setAccessBusy(false);
+      dispatchAuth({
+        type: "LOGIN_ERROR",
+        generation,
+        message: error?.providerCode === "ACCESS_DENIED" ? "访问码不正确，请重新输入" : error?.providerCode === "ORIGIN_FORBIDDEN" ? "当前网页来源不受信任，已拒绝登录" : "访问服务尚未配置好，生成保持关闭",
+      });
     }
   }
 
   async function saveProviderSettings() {
+    if (workspaceMutationIsLocked()) return;
     if (!provider?.updateSettings || providerSettingsSaving) return;
     setProviderSettingsSaving(true);
     try {
       const settings = await provider.updateSettings(providerSettingsForm);
-      setProviderMeta(settings);
+      dispatchAuth({ type: "BACKGROUND_CONFIG", generation: authStateRef.current.generation, providerMeta: settings, providerHealth: settings.configured ? "UNVERIFIED" : "OFFLINE" });
       setProviderSettingsForm((current) => ({ ...current, api_key: "" }));
-      setProviderHealth(settings.configured ? "UNVERIFIED" : "OFFLINE");
       setProviderSettingsOpen(false);
       setToast(settings.credential_mode === "SERVER_MANAGED" ? "生产生成服务已接好；密钥仍由服务端保管" : IS_PUBLIC_RUNTIME ? "设置已保存；首次成功生成后会显示连接已验证。API Key 只保存在当前标签页" : "生成服务已切换；API Key 只保存在本机钥匙串");
     } catch (error) {
@@ -963,6 +1415,7 @@ function App() {
   }
 
   function setPromptFieldValue(fieldId, value) {
+    if (authoringInputIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setGenerationState("IDLE");
     setActivatedAsContentOnly(false);
@@ -975,11 +1428,13 @@ function App() {
   }
 
   function rememberPromptField(fieldId, value) {
+    if (authoringInputIsLocked()) return;
     if (!String(value || "").trim()) return;
     rememberPromptSnapshot({ [fieldId]: value });
   }
 
   function deletePromptEntry(fieldId, entryId) {
+    if (authoringInputIsLocked()) return;
     persistPromptMemory(deletePromptHistory(promptMemory, fieldId, entryId));
   }
 
@@ -988,14 +1443,15 @@ function App() {
   }
 
   useEffect(() => {
-    if (!provider?.checkHealth) { setProviderHealth("DEMO"); return undefined; }
+    if (!provider?.checkHealth) return undefined;
     let active = true;
     const check = async () => {
+      const generation = authStateRef.current.generation;
       try {
         const health = await provider.checkHealth();
-        if (active) adoptProviderStatus(health);
+        if (active) adoptProviderStatus(health, { type: "BACKGROUND_CONFIG", generation });
       }
-      catch { if (active) setProviderHealth("OFFLINE"); }
+      catch { if (active) dispatchAuth({ type: "BACKGROUND_FAILURE", generation }); }
     };
     check();
     const timer = setInterval(check, 30000);
@@ -1013,7 +1469,7 @@ function App() {
     let active = true;
     const operation = mainAuthority.capture("url-draft-import", { envelopeScoped: true });
     const baseWorkspace = workspaceEnvelopeRef.current;
-    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
     const currentContent = contentRef.current;
     const currentSession = currentAuthoringSession();
     loadLocalDraft(draft, { origin: window.location.origin })
@@ -1035,6 +1491,40 @@ function App() {
     const timer = setTimeout(() => setToast(""), 2200);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    let active = true;
+    const wanted = new Set(actionReferences.map((item) => item.media_ref));
+    for (const [mediaRef, hydrated] of actionReferenceHydrationsRef.current) {
+      if (!wanted.has(mediaRef)) {
+        try { mediaStore.releaseHydratedMedia(hydrated); } catch {}
+        actionReferenceHydrationsRef.current.delete(mediaRef);
+      }
+    }
+    setActionReferencePreviewUrls((current) => Object.fromEntries(Object.entries(current).filter(([mediaRef]) => wanted.has(mediaRef))));
+    const hydrate = async () => {
+      for (const mediaRef of wanted) {
+        if (actionReferenceHydrationsRef.current.has(mediaRef)) continue;
+        try {
+          const value = await mediaStore.hydrateMedia(mediaRef);
+          if (!active || !wanted.has(mediaRef)) { mediaStore.releaseHydratedMedia(value); continue; }
+          actionReferenceHydrationsRef.current.set(mediaRef, value);
+          setActionReferencePreviewUrls((current) => ({ ...current, [mediaRef]: value.url }));
+        } catch (error) {
+          console.warn(error);
+          if (active) setToast("本机参考图缺失或损坏；不会继续图片调用");
+        }
+      }
+    };
+    hydrate();
+    return () => { active = false; };
+  }, [actionReferenceMediaKey, mediaStore]);
+  useEffect(() => () => {
+    workspaceHydrationRef.current?.release?.();
+    for (const hydrated of actionReferenceHydrationsRef.current.values()) {
+      try { mediaStore.releaseHydratedMedia(hydrated); } catch {}
+    }
+    actionReferenceHydrationsRef.current.clear();
+  }, [mediaStore]);
   useEffect(() => { if (pageIndex >= visiblePages.length) setPageIndex(Math.max(0, visiblePages.length - 1)); }, [pageIndex, visiblePages.length]);
   useEffect(() => {
     const panelIndex = panelSelectionIndex(selectedObject);
@@ -1067,6 +1557,7 @@ function App() {
   }, [editingObject, imageEditMode, pageIndex, redo, selectedObject, undo]);
 
   function mutatePage(mutator, options = {}) {
+    if (draftMutationIsLocked()) return;
     setContent((current) => invalidateVisualReview({ ...current, pages: current.pages.map((page, index) => index === pageIndex ? mutator(page) : page) }), options);
   }
 
@@ -1106,6 +1597,7 @@ function App() {
   }
 
   function changeActiveImageStyle(patch, reason = "image") {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     if (selectedObject === "image" && !currentPage.info_panels?.length) {
       changeObject("image", "image", patch, { group: `context-image-${pageIndex}-${reason}` });
       return;
@@ -1139,6 +1631,7 @@ function App() {
   }
 
   function autoArrangeInfoPanels() {
+    if (draftMutationIsLocked()) return;
     mutatePage((page) => {
       if (!page.info_panels?.length || !page.layout_ir) return page;
       return { ...page, editor_state: null, layout_ir: buildEditablePanelLayout(page.info_panels, { pattern: page.layout_ir?.engine?.pattern }) };
@@ -1149,15 +1642,18 @@ function App() {
 
 
   function setInfoPanelImageHidden(panelIndex, hidden = true) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     changeInfoPanel(panelIndex, { image_style: { hidden: Boolean(hidden) } }, `panel-${pageIndex}-${panelIndex}-${hidden ? "delete" : "restore"}-image`);
   }
 
   function requestInfoPanelImageReplacement(panelIndex) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     setSelectedObject(`info-image-${panelIndex}`);
     requestAnimationFrame(() => infoPanelImageRef.current?.click());
   }
 
   function useInfoPanelAsset(panelIndex, imageStyle) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     changeInfoPanel(panelIndex, {
       image_style: {
         ...imageStyle,
@@ -1170,6 +1666,7 @@ function App() {
   function replaceInfoPanelImage(event) {
     const [file] = event.target.files;
     event.target.value = "";
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     if (!file || !file.type.startsWith("image/")) return;
     const operation = mainAuthority.capture("info-panel-image-reader", { pageScoped: true });
     const targetIndex = selectedInfoPanelIndex;
@@ -1180,6 +1677,7 @@ function App() {
   }
 
   function resetInfoPanelImage(panelIndex) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     const panel = currentPage.info_panels?.[panelIndex];
     if (!panel) return;
     const independent = panel.image_style.src !== currentPage.image_style.src;
@@ -1201,7 +1699,7 @@ function App() {
     authorityTargetRef.current = {
       draftId: record.draft_id,
       pageId: pageSemanticIdentity(nextContent.pages?.[0], 0),
-      workspaceToken: workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+      workspaceToken: workspaceEnvelopeV3Token(workspaceEnvelopeRef.current),
     };
     resetContent(nextContent, { semantic: false });
     setTopic(session?.topic ?? nextContent.source_input ?? "");
@@ -1218,8 +1716,12 @@ function App() {
     setActivatedAsContentOnly(session == null);
     setPageIndex(0);
     setSelectedObject("title");
-    setActionReferences([]);
-    setActionReferenceNote("");
+    setActionReferences(session?.action_reference_manifest
+      ?? record.pending_image_operation?.ordered_reference_manifest
+      ?? []);
+    setActionReferenceNote(session?.action_reference_note
+      ?? record.pending_image_operation?.operation_snapshot?.reference_note
+      ?? "");
     setCandidateState("IDLE");
     setImageCandidates([]);
     setCandidateLoadState({});
@@ -1240,7 +1742,7 @@ function App() {
     record = null,
     previousId,
     nextProfile,
-    expectedWorkspaceToken = workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+    expectedWorkspaceToken,
     reason = "WORKSPACE_REPLACE",
     operation: capturedOperation = null,
   } = {}) {
@@ -1248,45 +1750,111 @@ function App() {
       setToast("工作台写入已暂停；请先备份并刷新到最新稿件");
       return false;
     }
+    if (typeof expectedWorkspaceToken !== "string" || !expectedWorkspaceToken) throw new TypeError("EXPECTED_WORKSPACE_V3_TOKEN_REQUIRED");
     const operation = capturedOperation || mainAuthority.capture(reason, { envelopeScoped: true });
     if (!mainAuthority.isCurrent(operation)) return false;
-    const receipt = await workspaceCoordinator.fullCas({
-      expectedWorkspaceToken,
-      buildWorkspace: (latest) => mainAuthority.isCurrent(operation) ? nextWorkspace : latest,
-      reason,
-    });
-    if (!receipt.ok || !receipt.workspace) {
-      mainAuthority.commit(operation, () => {
-        handleWorkspaceConflict(receipt, "切换稿件失败：另一标签页或本机存储已变化，旧稿没有被覆盖。");
-        setToast("切换已暂停，旧稿没有丢失");
-      });
+    if (!workspaceTransitionLock.acquire(operation, workspaceEnvelopeRef.current.active_draft_id)) {
+      setToast("工作台已有切换或保存事务；本次操作没有开始");
       return false;
     }
-    const recordId = record?.draft_id || receipt.workspace.active_draft_id;
-    const persistedRecord = receipt.workspace.drafts.find((draft) => draft.draft_id === recordId);
-    const committed = mainAuthority.commit(operation, () => {
-      authorityTargetRef.current = {
-        ...authorityTargetRef.current,
-        draftId: receipt.workspace.active_draft_id,
-        pageId: record ? pageSemanticIdentity(persistedRecord?.content_package?.pages?.[0], 0) : authorityTargetRef.current.pageId,
-        workspaceToken: receipt.workspace_token,
-      };
-      adoptWorkspaceState(receipt.workspace, {
-        record: persistedRecord,
-        previousId,
-        nextProfile,
-        applyRecord: Boolean(record),
+    setWorkspaceTransitioning(true);
+    let candidateView = null;
+    try {
+      const recordId = record?.draft_id || nextWorkspace.active_draft_id;
+      const candidateWorkspaceToken = workspaceEnvelopeV3Token(nextWorkspace);
+      candidateView = record ? await hydrateWorkspaceForView(nextWorkspace) : null;
+      if (!mainAuthority.isCurrent(operation)) {
+        candidateView?.release?.();
+        candidateView = null;
+        return false;
+      }
+      const receipt = await workspaceCoordinator.fullCas({
+        expectedWorkspaceToken,
+        buildWorkspace: (latest) => mainAuthority.isCurrent(operation) ? nextWorkspace : latest,
+        reason,
       });
-      setWorkspaceBlocked(false);
-      setStorageIssue("");
-    });
-    return committed.applied;
+      if (!receipt.ok || !receipt.workspace) {
+        candidateView?.release?.();
+        candidateView = null;
+        mainAuthority.commit(operation, () => {
+          handleWorkspaceConflict(receipt, "切换稿件失败：另一标签页或本机存储已变化，旧稿没有被覆盖。");
+          setToast("切换已暂停，旧稿没有丢失");
+        });
+        return false;
+      }
+      const persistedRecord = receipt.workspace.drafts.find((draft) => draft.draft_id === recordId);
+      const visibleRecord = candidateView?.workspace?.drafts.find((draft) => draft.draft_id === recordId) || persistedRecord;
+      const committed = mainAuthority.commit(operation, () => {
+        authorityTargetRef.current = {
+          ...authorityTargetRef.current,
+          draftId: receipt.workspace.active_draft_id,
+          pageId: record ? pageSemanticIdentity(visibleRecord?.content_package?.pages?.[0], 0) : authorityTargetRef.current.pageId,
+          workspaceToken: receipt.workspace_token,
+        };
+        adoptWorkspaceState(receipt.workspace, {
+          record: persistedRecord,
+          previousId,
+          nextProfile,
+          applyRecord: Boolean(record),
+          workspaceView: candidateView,
+        });
+        setWorkspaceBlocked(false);
+        setStorageIssue("");
+      });
+      const disposition = workspaceTransitionReceiptDisposition({
+        operationApplied: committed.applied,
+        candidateWorkspaceToken,
+        receiptWorkspaceToken: receipt.workspace_token,
+      });
+      if (disposition === "STALE_NOOP_PRESERVE_LOCAL") {
+        candidateView?.release?.();
+        candidateView = null;
+        return false;
+      }
+      if (disposition === "STALE_CANDIDATE_CURRENT_SETTLE") {
+        const latest = workspaceCoordinator.snapshot();
+        const plan = postCasWorkspaceSettlementPlan({
+          latestOk: latest.ok && Boolean(latest.workspace),
+          latestWorkspaceToken: latest.workspace_token,
+          receiptWorkspaceToken: receipt.workspace_token,
+          currentWorkspaceToken: workspaceEnvelopeV3Token(workspaceEnvelopeRef.current),
+          latestActiveDraftId: latest.workspace?.active_draft_id,
+          dirtyDraftId: operation.draftId,
+        });
+        if (plan === "RECEIPT_STILL_CURRENT") {
+          const finalRecord = receipt.workspace.drafts.find((draft) => draft.draft_id === receipt.workspace.active_draft_id);
+          adoptWorkspaceState(receipt.workspace, {
+            record: finalRecord,
+            applyRecord: Boolean(finalRecord),
+            workspaceView: candidateView,
+          });
+          setWorkspaceBlocked(true);
+          setStorageIssue("工作台事务已落盘但界面目标发生变化；已读回最新权威并暂停继续写入。");
+        } else {
+          candidateView?.release?.();
+          candidateView = null;
+          if (plan === "LATEST_CHANGED_APPLY_AND_BLOCK") {
+            const latestRecord = latest.workspace.drafts.find((draft) => draft.draft_id === latest.workspace.active_draft_id);
+            adoptWorkspaceState(latest.workspace, { record: latestRecord, applyRecord: Boolean(latestRecord) });
+            setWorkspaceBlocked(true);
+            setStorageIssue("工作台事务落盘后权威继续前进；已读回最终稿并暂停写入，未采用过期回执。");
+          } else if (plan === "LATEST_UNAVAILABLE") {
+            setWorkspaceBlocked(true);
+            setStorageIssue("工作台事务落盘后无法读回最终权威；界面未采用过期回执，写入已暂停。");
+          }
+        }
+      }
+      return committed.applied;
+    } finally {
+      if (workspaceTransitionLock.release(operation)) setWorkspaceTransitioning(false);
+    }
   }
 
-  function workspaceWithCurrentSnapshot(baseWorkspace = workspaceEnvelopeRef.current, contentPackage = content, generationSession = currentAuthoringSession()) {
-    return saveDraftRecord(baseWorkspace, {
-      contentPackage,
-      generationSession,
+  async function workspaceWithCurrentSnapshot(baseWorkspace = workspaceEnvelopeRef.current, contentPackage = content, generationSession = currentAuthoringSession()) {
+    const materialized = await materializeForWorkspace({ content_package: contentPackage, generation_session: generationSession });
+    return saveDraftRecordV3(baseWorkspace, {
+      contentPackage: materialized.value.content_package,
+      generationSession: materialized.value.generation_session,
     });
   }
 
@@ -1294,17 +1862,21 @@ function App() {
     baseWorkspace = workspaceEnvelopeRef.current,
     currentContent = content,
     currentSession = currentAuthoringSession(),
-    expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace),
+    expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace),
     operation = null,
   } = {}) {
+    if (draftMutationIsLocked()) return false;
+    const capturedOperation = operation || mainAuthority.capture("CREATE_CONTENT_ONLY_DRAFT", { envelopeScoped: true });
     try {
-      const created = beginNewDraft(baseWorkspace, {
+      const materialized = await materializeForWorkspace({ current_content: currentContent, current_session: currentSession, next_content: nextContent });
+      if (!mainAuthority.isCurrent(capturedOperation)) return false;
+      const created = beginNewDraftV3(baseWorkspace, {
         newDraftId: crypto.randomUUID(),
-        currentContent,
-        currentSession,
-        contentPackage: nextContent,
+        currentContent: materialized.value.current_content,
+        currentSession: materialized.value.current_session,
+        contentPackage: materialized.value.next_content,
       });
-      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, reason: "CREATE_CONTENT_ONLY_DRAFT", operation })) return false;
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, reason: "CREATE_CONTENT_ONLY_DRAFT", operation: capturedOperation })) return false;
       setView("compose");
       setCreatorOpen(false);
       setToast(successMessage);
@@ -1317,6 +1889,12 @@ function App() {
   }
 
   async function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
+    if (workspaceMutationIsLocked()) return false;
+    const operation = mainAuthority.capture("CREATE_AUTHORING_DRAFT", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
       const contentPackage = {
         ...generateContentPackage({ topic: "", pillar: nextPillar, goal: nextGoal }),
@@ -1324,11 +1902,13 @@ function App() {
         pillar: nextPillar,
         goal: nextGoal,
       };
-      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+      const materialized = await materializeForWorkspace({ current_content: currentContent, current_session: currentSession, next_content: contentPackage });
+      if (!mainAuthority.isCurrent(operation)) return false;
+      const created = beginNewDraftV3(baseWorkspace, {
         newDraftId: crypto.randomUUID(),
-        currentContent: content,
-        currentSession: currentAuthoringSession(),
-        contentPackage,
+        currentContent: materialized.value.current_content,
+        currentSession: materialized.value.current_session,
+        contentPackage: materialized.value.next_content,
       });
       const session = normalizeAuthoringSession({
         schema: AUTHORING_SESSION_SCHEMA,
@@ -1344,12 +1924,12 @@ function App() {
         production_mode: "smart",
         image_resume: null,
       });
-      const nextWorkspace = saveDraftRecord(created.workspace, {
+      const nextWorkspace = saveDraftRecordV3(created.workspace, {
         draftId: created.activeDraft.draft_id,
         generationSession: session,
       });
-      const nextRecord = activeDraftRecord(nextWorkspace);
-      if (!await persistAndAdoptWorkspace(nextWorkspace, { record: nextRecord, previousId: created.previousDraftId, reason: "CREATE_AUTHORING_DRAFT" })) return false;
+      const nextRecord = activeDraftRecordV3(nextWorkspace);
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { record: nextRecord, previousId: created.previousDraftId, expectedWorkspaceToken, operation, reason: "CREATE_AUTHORING_DRAFT" })) return false;
       setView("compose");
       setCreatorOpen(true);
       setMobileInspectorOpen(true);
@@ -1363,10 +1943,17 @@ function App() {
   }
 
   async function activateWorkspaceDraft(draftId) {
+    if (workspaceMutationIsLocked()) return false;
+    const operation = mainAuthority.capture("ACTIVATE_DRAFT", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
-      const snapshotted = workspaceWithCurrentSnapshot();
-      const activated = activateDraftRecord(snapshotted, draftId);
-      if (!await persistAndAdoptWorkspace(activated.workspace, { record: activated.activeDraft, previousId: activated.previousDraftId, reason: "ACTIVATE_DRAFT" })) return false;
+      const snapshotted = await workspaceWithCurrentSnapshot(baseWorkspace, currentContent, currentSession);
+      if (!mainAuthority.isCurrent(operation)) return false;
+      const activated = activateDraftRecordV3(snapshotted, draftId);
+      if (!await persistAndAdoptWorkspace(activated.workspace, { record: activated.activeDraft, previousId: activated.previousDraftId, expectedWorkspaceToken, operation, reason: "ACTIVATE_DRAFT" })) return false;
       setRealityFeedbackId(null);
       setView("compose");
       setCreatorOpen(Boolean(activated.activeDraft.generation_session));
@@ -1380,6 +1967,7 @@ function App() {
   }
 
   async function adoptHistoricalDraft() {
+    if (draftMutationIsLocked()) return;
     if (publicationAuthorityRef.current?.code !== "HISTORICAL_CONFIRMATION_REQUIRED" || historicalAdoptionRef.current) return;
     const operation = mainAuthority.capture("historical-draft-adoption", { envelopeScoped: true });
     historicalAdoptionRef.current = true;
@@ -1394,15 +1982,17 @@ function App() {
         draftId,
         createdAt: sourceRecord.created_at,
       });
-      const nextWorkspace = saveDraftRecord(baseWorkspace, {
+      const materialized = await materializeForWorkspace({ content_package: adoption.content_package, generation_session: adoption.generation_session });
+      if (!mainAuthority.isCurrent(operation)) return;
+      const nextWorkspace = saveDraftRecordV3(baseWorkspace, {
         draftId,
-        contentPackage: adoption.content_package,
-        generationSession: adoption.generation_session,
+        contentPackage: materialized.value.content_package,
+        generationSession: materialized.value.generation_session,
       });
       const nextRecord = nextWorkspace.drafts.find((draft) => draft.draft_id === draftId);
       if (!await persistAndAdoptWorkspace(nextWorkspace, {
         record: nextRecord,
-        expectedWorkspaceToken: workspaceEnvelopeToken(baseWorkspace),
+        expectedWorkspaceToken: workspaceEnvelopeV3Token(baseWorkspace),
         reason: "ADOPT_HISTORICAL_DRAFT",
         operation,
       })) return;
@@ -1422,14 +2012,23 @@ function App() {
       scrollCreatorStage("creator-source");
       return;
     }
+    if (workspaceMutationIsLocked()) return;
+    const operation = mainAuthority.capture("BEGIN_NEW_DRAFT", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
-      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+      const blankContent = generateContentPackage({ topic: "", pillar: "wellness", goal: "save" });
+      const materialized = await materializeForWorkspace({ current_content: currentContent, current_session: currentSession, next_content: blankContent });
+      if (!mainAuthority.isCurrent(operation)) return;
+      const created = beginNewDraftV3(baseWorkspace, {
         newDraftId: crypto.randomUUID(),
-        currentContent: content,
-        currentSession: currentAuthoringSession(),
-        contentPackage: generateContentPackage({ topic: "", pillar: "wellness", goal: "save" }),
+        currentContent: materialized.value.current_content,
+        currentSession: materialized.value.current_session,
+        contentPackage: materialized.value.next_content,
       });
-      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, reason: "BEGIN_NEW_DRAFT" })) return;
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, operation, reason: "BEGIN_NEW_DRAFT" })) return;
       setView("compose");
       setCreatorOpen(true);
       setMobileInspectorOpen(true);
@@ -1454,6 +2053,7 @@ function App() {
   }
 
   async function generateTextNode() {
+    if (authoringInputIsLocked()) return;
     if (!provider?.generateTextDraft) {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "请打开模型设置，填入自己的火山方舟 API Key 后从当前节点重试。" : "工作台地址没有填错。请确认本机生成服务正在运行，然后从当前节点重试。" });
       return;
@@ -1464,6 +2064,7 @@ function App() {
       return;
     }
     const operation = mainAuthority.capture("text-generation");
+    const authGeneration = authStateRef.current.generation;
     try {
       setActivatedAsContentOnly(false);
       rememberAllPromptInputs();
@@ -1471,8 +2072,8 @@ function App() {
       clearGenerationFailure();
       setToast("请求已收到：现在只生成文字，不会产生图片费用");
       const draft = await provider.generateTextDraft({ topic, text_requirements: textRequirements, prompt_context: promptContextForProvider(promptValues), pillar, goal, profile_contract: buildGenerationContract(profile) });
+      dispatchAuth({ type: "BUSINESS_SUCCESS", generation: authGeneration });
       mainAuthority.commit(operation, () => {
-        setProviderHealth("ONLINE");
         setTextDraft(draft);
         setTextConfirmed(false);
         setAssembledDraftId(null);
@@ -1484,14 +2085,15 @@ function App() {
       });
     } catch (error) {
       console.warn(error);
+      if (error?.requiresAccess) dispatchAuth({ type: "BUSINESS_AUTH_REQUIRED", generation: authGeneration, message: "访问会话已失效，请重新输入访问码" });
       mainAuthority.commit(operation, () => {
-        if (error?.requiresAccess) { setAccessRequired(true); setAccessError("访问会话已失效，请重新输入访问码"); }
         failGeneration(generationFailureFeedback(error));
       });
     }
   }
 
   function editTextDraft(field, value, index = null) {
+    if (authoringInputIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setActivatedAsContentOnly(false);
     setImageResume(null);
@@ -1510,11 +2112,64 @@ function App() {
   }
 
   function chooseDraftTitle(title) {
+    if (authoringInputIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setActivatedAsContentOnly(false);
     setTextConfirmed(false);
     setAssembledDraftId(null);
     setTextDraft((current) => current ? { ...current, selected_title: title } : current);
+  }
+
+  function changeContentRoute(field, value) {
+    if (authoringInputIsLocked()) return;
+    mainAuthority.markSemanticMutation();
+    setActivatedAsContentOnly(false);
+    if (field === "pillar") setPillar(value);
+    else setGoal(value);
+    setTextConfirmed(false);
+    setImageResume(null);
+    setAssembledDraftId(null);
+  }
+
+  function confirmTextDraft() {
+    if (authoringInputIsLocked()) return;
+    if (!textDraftIsReady()) return;
+    mainAuthority.markSemanticMutation();
+    setTextConfirmed(true);
+    clearGenerationFailure();
+    setToast("文字已确认，现在可以决定页数与配图");
+  }
+
+  function changeProductionModeChoice(modeId) {
+    if (authoringInputIsLocked()) return;
+    mainAuthority.markSemanticMutation();
+    setProductionMode(modeId);
+    setImageResume(null);
+    setAssembledDraftId(null);
+  }
+
+  function changeImageCountModeChoice(mode) {
+    if (authoringInputIsLocked()) return;
+    mainAuthority.markSemanticMutation();
+    setImageCountMode(mode);
+    setImageResume(null);
+    setAssembledDraftId(null);
+  }
+
+  function changeCustomImageCountValue(value) {
+    if (authoringInputIsLocked()) return;
+    mainAuthority.markSemanticMutation();
+    setCustomImageCount(Number(value));
+    setImageResume(null);
+    setAssembledDraftId(null);
+  }
+
+  function changeActionReferenceNote(value) {
+    if (authoringInputIsLocked()) return;
+    mainAuthority.markSemanticMutation();
+    setActionReferenceNote(value);
+    setImageResume(null);
+    setAssembledDraftId(null);
   }
 
   function textDraftIsReady() {
@@ -1527,163 +2182,286 @@ function App() {
   async function addActionReferences(event) {
     const operation = mainAuthority.capture("action-reference-reader", { pageScoped: true });
     const files = [...event.target.files]; event.target.value = "";
+    if (authoringInputIsLocked()) return;
     const room = Math.max(0, 3 - actionReferences.length);
-    const accepted = files.filter((file) => new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type) && file.size <= 3_000_000).slice(0, room);
-    if (!accepted.length) { setToast(room ? "请选择 3MB 以内的 PNG、JPG 或 WebP" : "动作参考图最多 3 张"); return; }
-    const readDataUrl = (file) => new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
-    });
+    const accepted = files.filter((file) => new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type)).slice(0, room);
+    if (!accepted.length) { setToast(room ? "请选择 PNG、JPG 或 WebP 图片" : "动作参考图最多 3 张"); return; }
     try {
-      const next = await Promise.all(accepted.map(async (file) => ({ id: crypto.randomUUID(), name: file.name, size: file.size, data_url: await readDataUrl(file) })));
+      const next = await persistActionReferences(accepted, { mediaStore });
       mainAuthority.commit(operation, () => {
         mainAuthority.markSemanticMutation();
-        setActionReferences((current) => [...current, ...next].slice(0, 3));
+        setActionReferences((current) => {
+          const unique = new Map(current.map((item) => [item.media_ref, item]));
+          next.forEach((item) => { if (!unique.has(item.media_ref)) unique.set(item.media_ref, item); });
+          return [...unique.values()].slice(0, 3);
+        });
         setImageResume(null);
         setAssembledDraftId(null);
         setToast(`已加入 ${next.length} 张动作参考图`);
       });
-    } catch {
-      mainAuthority.commit(operation, () => setToast("参考图读取失败，原选择未改变"));
+    } catch (error) {
+      console.warn(error);
+      mainAuthority.commit(operation, () => setToast(error?.message === "ACTION_REFERENCE_CANONICAL_TOO_LARGE" ? "参考图压缩后仍超过 900KB，请换一张更简单的图" : "参考图校验失败，原选择未改变"));
     }
   }
 
-  function removeActionReference(id) {
+  function removeActionReference(mediaRef) {
+    if (authoringInputIsLocked()) return;
     mainAuthority.markSemanticMutation();
-    setActionReferences((current) => current.filter((item) => item.id !== id));
+    setActionReferences((current) => current.filter((item) => item.media_ref !== mediaRef));
     setImageResume(null);
     setAssembledDraftId(null);
   }
 
   async function generateImageNode() {
+    if (!mediaWorkspaceIsUsable()) return;
     if (!textConfirmed) { setToast("请先确认文字，再进入配图"); return; }
     if (!provider?.generateImages) {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "文字草稿和当前画布已经保留。请在模型设置中连接自己的火山方舟，再重试图片。" : "文字草稿和当前画布已经保留。请确认本机生成服务正在运行，然后重试图片。", stage: "image" });
       return;
     }
     if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
-    if (activeImageOperationRef.current) { setToast("当前稿已有图片步骤在保存，请稍后再试"); return; }
+    if (activeImageOperationRef.current || draftMutationLockRef.current) { setToast("已有图片步骤正在固定或保存，请等待同一次操作收束"); return; }
     if (!textDraftIsReady()) return;
     const mainOperation = mainAuthority.capture("image-generation");
-    let claimedOperation = null;
+    const authGeneration = authStateRef.current.generation;
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const targetDraftId = baseWorkspace.active_draft_id;
+    const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
+    if (!baseRecord) { setToast("当前稿件身份缺失，配图没有开始"); return; }
+    const frozenContent = contentRef.current;
+    const frozenSession = currentAuthoringSession(null);
+    const frozenTextDraft = textDraft;
+    const frozenPromptContext = promptContextForProvider(promptValues);
+    const frozenActionReferences = [...actionReferences];
+    const frozenActionReferenceNote = actionReferenceNote;
+    draftMutationLockRef.current = { draft_id: targetDraftId, operation_id: mainOperation.id };
+    setGenerationState("IMAGE_GENERATING");
+    clearGenerationFailure();
+    setToast("正在固定同稿恢复快照；尚未发起图片调用");
+    let imageOperation = null;
     try {
       rememberAllPromptInputs();
       const count = imageCountMode === "AUTO" ? "AUTO" : Number(customImageCount);
-      const resolvedCount = count === "AUTO" ? textDraft.recommended_image_count : count;
+      const resolvedCount = count === "AUTO" ? frozenTextDraft.recommended_image_count : count;
       const estimate = estimateMotherSheetPlan(resolvedCount, productionMode);
       const estimatedSheets = estimate.minMotherSheets === estimate.maxMotherSheets ? `${estimate.minMotherSheets}` : `${estimate.minMotherSheets}–${estimate.maxMotherSheets}`;
-      const draftForImages = { ...textDraft, prompt_context: promptContextForProvider(promptValues) };
-      const requestSnapshot = {
-        draft: draftForImages,
-        production_mode: productionMode,
-        image_count: count,
-        resume_run_id: imageResume?.resume_run_id || null,
-        resume_checkpoint: imageResume?.resume_checkpoint || null,
-        reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })),
-        reference_note: actionReferenceNote,
-      };
-      const baseWorkspace = workspaceEnvelopeRef.current;
-      const targetDraftId = baseWorkspace.active_draft_id;
-      const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
-      const snapshottedWorkspace = saveDraftRecord(baseWorkspace, {
-        contentPackage: contentRef.current,
-        generationSession: currentAuthoringSession(),
-      });
-      const replacementDraft = snapshottedWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
+      let initialRequest;
+      if (baseRecord.pending_image_operation) {
+        const pending = baseRecord.pending_image_operation;
+        imageOperation = {
+          operation_id: pending.operation_nonce,
+          draft_id: targetDraftId,
+          recovered_draft_id: imageRecoveryDraftId(pending.operation_nonce),
+          operation_snapshot: baseRecord,
+          expected_draft_token: draftRecordToken(baseRecord),
+        };
+        initialRequest = imageDiscoveryRequest(pending);
+      } else {
+        const materialized = await materializeForWorkspace({
+          content_package: frozenContent,
+          generation_session: frozenSession,
+        });
+        if (!mainAuthority.isCurrent(mainOperation)) return;
+        const operationNonce = randomImageNonce();
+        const pending = await createRestartablePendingImageOperationV3({
+          operationNonce,
+          operationSnapshot: imageOperationSnapshot({
+            draftRecordId: targetDraftId,
+            semanticEpoch: mainOperation.semanticEpoch,
+            draft: frozenTextDraft,
+            pageCount: resolvedCount,
+            productionMode,
+            referenceNote: frozenActionReferenceNote,
+            promptContext: frozenPromptContext,
+          }),
+          orderedReferenceManifest: frozenActionReferences,
+          protocolState: "BOOTSTRAP",
+          updatedAt: new Date().toISOString(),
+        });
+        const snapshottedWorkspace = saveDraftRecordV3(baseWorkspace, {
+          contentPackage: materialized.value.content_package,
+          generationSession: materialized.value.generation_session,
+          pendingImageOperation: pending,
+        });
+        const replacementDraft = snapshottedWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
+        const bootstrapSettlement = await settleImageBootstrapPersistence({
+          persist: () => workspaceCoordinator.mergeDraftCas({
+            draftId: targetDraftId,
+            expectedDraftToken: draftRecordToken(baseRecord),
+            buildDraft: (target) => mainAuthority.isCurrent(mainOperation) ? replacementDraft : target,
+            requireActiveDraftId: targetDraftId,
+            reason: `IMAGE_BOOTSTRAP_V3:${operationNonce}`,
+          }),
+          isCurrent: () => mainAuthority.isCurrent(mainOperation),
+          readLatest: () => workspaceCoordinator.snapshot(),
+          targetDraftId,
+          operationNonce,
+        });
+        const snapshotReceipt = bootstrapSettlement.receipt;
+        if (bootstrapSettlement.code === "IMAGE_BOOTSTRAP_NOT_COMMITTED") {
+          mainAuthority.commit(mainOperation, () => {
+            handleWorkspaceConflict(snapshotReceipt, "配图前的同稿快照与恢复身份没有可靠落盘；尚未发起图片调用。");
+            setToast("配图已暂停；尚未产生图片费用");
+          });
+          return;
+        }
+        if (bootstrapSettlement.code !== "IMAGE_BOOTSTRAP_CURRENT") {
+          const latest = bootstrapSettlement.latest;
+          if (bootstrapSettlement.code === "IMAGE_BOOTSTRAP_STALE_PENDING_SAVED" && latest?.workspace) {
+            const latestActive = latest.workspace.drafts.find((draft) => draft.draft_id === latest.workspace.active_draft_id);
+            const targetStillActive = latest.workspace.active_draft_id === targetDraftId;
+            if (targetStillActive) {
+              try {
+                const workspaceView = await hydrateWorkspaceForView(latest.workspace);
+                adoptWorkspaceState(latest.workspace, { record: latestActive, applyRecord: true, workspaceView });
+                setWorkspaceBlocked(false);
+              } catch (error) {
+                console.warn(error);
+                adoptWorkspaceState(latest.workspace, { record: latestActive, applyRecord: true });
+                setWorkspaceBlocked(true);
+                setStorageIssue("配图恢复快照已落盘，但本机图片回载校验失败；已暂停继续生产。");
+              }
+            } else {
+              adoptWorkspaceState(latest.workspace);
+            }
+            setGenerationState("IDLE");
+            setToast(targetStillActive
+              ? "同一次配图恢复入口已保存；输入变化后未发起图片调用"
+              : "原稿的配图恢复入口已保存；当前稿没有被替换，也未继续图片调用");
+          } else {
+            handleWorkspaceConflict(latest || snapshotReceipt, "配图恢复快照落盘后权威又发生变化；已停止图片调用并暂停写入。");
+          }
+          return;
+        }
+        mainAuthority.commit(mainOperation, () => adoptWorkspaceState(snapshotReceipt.workspace));
+        imageOperation = {
+          operation_id: operationNonce,
+          draft_id: targetDraftId,
+          recovered_draft_id: imageRecoveryDraftId(operationNonce),
+          operation_snapshot: snapshotReceipt.target_draft,
+          expected_draft_token: draftRecordToken(snapshotReceipt.target_draft),
+        };
+        initialRequest = await rebuildPendingImageStartV3({ pendingImageOperation: snapshotReceipt.target_draft.pending_image_operation, mediaStore });
+      }
+      if (!mainAuthority.isCurrent(mainOperation)) return;
       mainAuthority.commit(mainOperation, () => {
         setGenerationState("IMAGE_GENERATING");
         clearGenerationFailure();
-        setToast(imageResume?.completed_image_steps != null ? `正在从图片步骤 ${imageResume.completed_image_steps + 1} 继续，已回写的插画不会重做` : imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
+        setToast(baseRecord.pending_image_operation ? "正在发现并恢复同一次配图操作；查询不会产生新图片调用" : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       });
-      const snapshotReceipt = await workspaceCoordinator.mergeDraftCas({
-        draftId: targetDraftId,
-        expectedDraftToken: draftRecordToken(baseRecord),
-        buildDraft: (target) => mainAuthority.isCurrent(mainOperation) ? replacementDraft : target,
-        requireActiveDraftId: targetDraftId,
-        reason: "IMAGE_PRECALL_SNAPSHOT",
-      });
-      if (!snapshotReceipt.ok || !snapshotReceipt.target_draft) {
-        mainAuthority.commit(mainOperation, () => {
-          setGenerationState("IDLE");
-          handleWorkspaceConflict(snapshotReceipt, "配图前的稿件快照没有可靠落盘；尚未发起图片调用，旧稿没有被覆盖。");
-          setToast("配图已暂停；尚未产生图片费用");
-        });
-        return;
-      }
-      if (!mainAuthority.isCurrent(mainOperation)) return;
-      mainAuthority.commit(mainOperation, () => adoptWorkspaceState(snapshotReceipt.workspace));
-      claimedOperation = claimDraftBoundImageOperation(null, createDraftBoundImageOperation({
-        operationId: crypto.randomUUID(),
-        sourceDraftRecord: snapshotReceipt.target_draft,
-        requestSnapshot,
-      }));
-      activeImageOperationRef.current = claimedOperation;
-      const providerResult = await provider.generateImages(claimedOperation.request_snapshot, async (progress) => {
+      activeImageOperationRef.current = imageOperation;
+
+      const consumeImageResponse = async (response) => {
         const currentOperation = activeImageOperationRef.current;
-        if (!currentOperation || currentOperation.operation_id !== claimedOperation.operation_id) return { action: "STOP" };
-        const progressReceipt = await persistDraftBoundImageProgress({
-          operation: currentOperation,
+        if (!currentOperation || currentOperation.operation_id !== imageOperation.operation_id) return { action: "STOP" };
+        if (!mainAuthority.isCurrent(mainOperation) && workspaceEnvelopeRef.current.active_draft_id === currentOperation.draft_id) {
+          setGenerationState("IDLE");
+          setToast("当前稿在配图期间发生变化；已停止后续调用并保留同一次恢复入口");
+          return { action: "STOP" };
+        }
+        const mediaDelta = response.media_delta.length ? await provider.fetchImageMediaDelta(response.media_delta) : [];
+        if (response.status === "COMPLETE") {
+          const completionReceipt = await commitDraftImageCompletionV3({
+            coordinator: workspaceCoordinator,
+            mediaStore,
+            draftId: currentOperation.draft_id,
+            expectedDraftToken: currentOperation.expected_draft_token,
+            operationSnapshot: currentOperation.operation_snapshot,
+            recoveredDraftId: currentOperation.recovered_draft_id,
+            contentPackage: response.content_package,
+            mediaDelta,
+          });
+          if (completionReceipt.action !== "COMPLETE" || !completionReceipt.workspace) throw imageResponseFailure({ status: "ERROR", error: { code: completionReceipt.code || "LOCAL_MEDIA_WRITE_FAILED" }, progress: completionReceipt });
+          dispatchAuth({ type: "BUSINESS_SUCCESS", generation: authGeneration });
+          if (completionReceipt.adopt_current_ui && mainAuthority.isCurrent(mainOperation)) {
+            const workspaceView = await hydrateWorkspaceForView(completionReceipt.workspace);
+            const committed = mainAuthority.commit(mainOperation, () => {
+              adoptWorkspaceState(completionReceipt.workspace, { record: completionReceipt.target_draft, applyRecord: true, workspaceView });
+              setCreatorOpen(true); setView("compose"); setGenerationState("IDLE"); clearGenerationFailure();
+              setToast(`${productionModeLabel(productionMode)} · ${resolvedCount} 个画板已完成并写入同一稿件`);
+            });
+            if (!committed.applied) {
+              workspaceView.release?.();
+              adoptWorkspaceState(completionReceipt.workspace);
+              setGenerationState("IDLE");
+              setToast("原稿配图已保存；当前界面已切换，因此没有替换正在查看的稿件");
+            }
+          } else {
+            adoptWorkspaceState(completionReceipt.workspace);
+            setGenerationState("IDLE");
+            setToast("图片结果已保存到恢复稿；当前编辑没有被替换");
+          }
+          return { action: "COMPLETE" };
+        }
+        const previousPending = currentOperation.operation_snapshot.pending_image_operation;
+        const attemptNonce = previousPending?.checkpoint_preimage_hash === response.checkpoint_preimage_sha256
+          && previousPending?.logical_step_id === response.logical_step_id
+          && /^[0-9a-f]{64}$/.test(previousPending?.attempt_nonce || "")
+          ? previousPending.attempt_nonce
+          : randomImageNonce();
+        const resume = imageResumeFromResponse(response, attemptNonce);
+        const progressReceipt = await commitDraftImageProgressV3({
           coordinator: workspaceCoordinator,
-          imageResume: progress,
+          mediaStore,
+          draftId: currentOperation.draft_id,
+          expectedDraftToken: currentOperation.expected_draft_token,
+          operationSnapshot: currentOperation.operation_snapshot,
+          recoveredDraftId: currentOperation.recovered_draft_id,
+          imageResume: resume,
+          responseStatus: response.status,
+          mediaDelta,
         });
-        if (progressReceipt.action === "CONTINUE") activeImageOperationRef.current = progressReceipt.operation;
+        if (progressReceipt.action === "CONTINUE") {
+          activeImageOperationRef.current = {
+            ...currentOperation,
+            operation_snapshot: progressReceipt.operation_snapshot,
+            expected_draft_token: draftRecordToken(progressReceipt.operation_snapshot),
+          };
+        }
         if (progressReceipt.workspace) {
           if (mainAuthority.isCurrent(mainOperation)) {
             mainAuthority.commit(mainOperation, () => {
               adoptWorkspaceState(progressReceipt.workspace);
               if (progressReceipt.action === "CONTINUE") {
-                setImageResume(progress);
-                const remaining = Number.isInteger(progress.remaining_image_calls) ? `，剩余 ${progress.remaining_image_calls} 次` : "";
-                setToast(progress.completed_image_steps === 0 ? `配图规划已保存；将分 ${progress.total_image_steps} 个可恢复步骤生成${remaining}` : `图片步骤 ${progress.completed_image_steps}/${progress.total_image_steps} 已保存${remaining}；下一步只生成剩余内容`);
+                setImageResume(resume);
+                const remaining = Number.isInteger(resume.remaining_image_calls) ? `，剩余 ${resume.remaining_image_calls} 次` : "";
+                setToast(resume.completed_image_steps === 0 ? `配图规划已保存；将分 ${resume.total_image_steps} 个可恢复步骤生成${remaining}` : `图片步骤 ${resume.completed_image_steps}/${resume.total_image_steps} 已保存${remaining}`);
               } else {
                 setToast("稿件在生成期间发生变化；图片步骤已保存到恢复稿，后续付费调用已停止");
               }
             });
           } else {
             adoptWorkspaceState(progressReceipt.workspace);
+            setGenerationState("IDLE");
+            setToast("原稿图片进度已保存；已停止后续调用，当前稿件没有被替换");
           }
         }
-        return progressReceipt;
-      });
-      const result = parseContentPackage(JSON.stringify(providerResult));
-      const completionOperation = activeImageOperationRef.current;
-      if (!completionOperation || completionOperation.operation_id !== claimedOperation.operation_id) throw new Error("IMAGE_OPERATION_LOST");
-      const completionReceipt = await persistDraftBoundImageCompletion({
-        operation: completionOperation,
-        coordinator: workspaceCoordinator,
-        contentPackage: result,
-      });
-      if (completionReceipt.workspace) {
-        if (completionReceipt.adopt_current_ui && mainAuthority.isCurrent(mainOperation)) {
-          mainAuthority.commit(mainOperation, () => {
-            adoptWorkspaceState(completionReceipt.workspace);
-            setProviderHealth("ONLINE");
-            resetContent(result);
-            setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
-            setAssembledDraftId(textDraft.draft_id);
-            clearGenerationFailure();
-            setImageResume(null);
-            setToast(`${productionModeLabel(productionMode)} · ${resolvedCount} 个画板已完成母图切分与排版，向下继续编辑`);
-          });
-        } else {
-          adoptWorkspaceState(completionReceipt.workspace);
-          mainAuthority.commit(mainOperation, () => {
-            setGenerationState("IDLE");
-            setToast("图片结果已安全保存到资产库恢复稿；当前正在编辑的稿件没有被替换");
-          });
-        }
+        if (progressReceipt.action !== "CONTINUE" || !mainAuthority.isCurrent(mainOperation)) return { action: "STOP" };
+        return { action: "CONTINUE", request: nextImageStepRequest(response, attemptNonce) };
+      };
+
+      let providerResult = await provider.generateImages(initialRequest, consumeImageResponse);
+      if (providerResult.status === "ERROR" && providerResult.error?.code === "IMAGE_LEDGER_RUN_MISSING" && baseRecord.pending_image_operation?.protocol_state === "BOOTSTRAP") {
+        const start = await rebuildPendingImageStartV3({ pendingImageOperation: baseRecord.pending_image_operation, mediaStore });
+        providerResult = await provider.generateImages(start, consumeImageResponse);
       }
+      if (providerResult.status !== "COMPLETE") throw imageResponseFailure(providerResult);
     } catch (error) {
       console.warn(error);
+      if (error?.requiresAccess) dispatchAuth({ type: "BUSINESS_AUTH_REQUIRED", generation: authGeneration, message: "访问会话已失效，请重新输入访问码" });
       if (error?.intentionalStop || error?.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT") {
-        mainAuthority.commit(mainOperation, () => {
+        const settled = mainAuthority.commit(mainOperation, () => {
           setGenerationState("IDLE");
           setToast("图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费");
         });
+        if (!settled.applied) {
+          setGenerationState("IDLE");
+          setToast("原稿配图已停在安全断点；当前稿件没有被替换");
+        }
         return;
       }
-      mainAuthority.commit(mainOperation, () => {
-        if (error?.requiresAccess) { setAccessRequired(true); setAccessError("访问会话已失效，请重新输入访问码"); }
+      const failed = mainAuthority.commit(mainOperation, () => {
         if (error?.providerDetails?.retry_scope === "NO_MORE_PAID_CALLS_IN_THIS_RUN") {
           const resume = error.providerDetails;
           failGeneration({
@@ -1696,33 +2474,75 @@ function App() {
         }
         failGeneration(generationFailureFeedback(error));
       });
+      if (!failed.applied) {
+        setGenerationState("IDLE");
+        setToast("原稿配图未完成；恢复入口已保留，当前稿件没有被替换");
+      }
     } finally {
-      if (claimedOperation && activeImageOperationRef.current?.operation_id === claimedOperation.operation_id) {
+      if (imageOperation && activeImageOperationRef.current?.operation_id === imageOperation.operation_id) {
         activeImageOperationRef.current = null;
       }
+      if (draftMutationLockRef.current?.operation_id === mainOperation.id) draftMutationLockRef.current = null;
+      setGenerationState((current) => current === "IMAGE_GENERATING" ? "IDLE" : current);
     }
   }
 
   async function saveDraft() {
+    if (draftMutationIsLocked()) return;
+    const operation = mainAuthority.capture("SAVE_ACTIVE_DRAFT", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const draftId = baseWorkspace.active_draft_id;
+    const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
+    if (!baseRecord) return;
     try {
       const now = new Date().toISOString();
       const backfilledGeneration = publicationAuthority.code === "LEGACY_EXACT_MATCH" && textDraft?.draft_id
-        ? { ...content.generation, source_draft_id: textDraft.draft_id }
-        : content.generation;
+        ? { ...currentContent.generation, source_draft_id: textDraft.draft_id }
+        : currentContent.generation;
       const entry = {
-        ...content,
+        ...currentContent,
         generation: backfilledGeneration,
-        id: content.id || crypto.randomUUID(),
+        id: currentContent.id || crypto.randomUUID(),
         saved_at: now,
       };
-      const nextWorkspace = saveDraftRecord(workspaceEnvelopeRef.current, {
-        contentPackage: entry,
-        generationSession: currentAuthoringSession(),
+      const materialized = await materializeForWorkspace({ content_package: entry, generation_session: currentSession });
+      if (!mainAuthority.isCurrent(operation)) return;
+      const nextWorkspace = saveDraftRecordV3(baseWorkspace, {
+        contentPackage: materialized.value.content_package,
+        generationSession: materialized.value.generation_session,
         updatedAt: now,
       });
-      if (!await persistAndAdoptWorkspace(nextWorkspace)) return;
-      setContent(entry, { record: false });
-      setToast(publicationAuthority.allowed ? "已保存到本机资产库" : "草稿已完整保存；发布仍锁定，未发生串稿");
+      const replacementDraft = nextWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      const receipt = await workspaceCoordinator.mergeDraftCas({
+        draftId,
+        expectedDraftToken: draftRecordToken(baseRecord),
+        buildDraft: (target) => mainAuthority.isCurrent(operation) ? replacementDraft : target,
+        requireActiveDraftId: draftId,
+        reason: "SAVE_ACTIVE_DRAFT_V3",
+      });
+      if (!receipt.ok || !receipt.workspace) {
+        mainAuthority.commit(operation, () => handleWorkspaceConflict(receipt, "保存期间稿件已变化；旧数据没有被覆盖。"));
+        return;
+      }
+      const committed = mainAuthority.commit(operation, () => {
+        adoptWorkspaceState(receipt.workspace);
+        setContent(entry, { record: false, semantic: false });
+        setToast(publicationAuthority.allowed ? "已保存到本机资产库" : "草稿已完整保存；发布仍锁定，未发生串稿");
+      });
+      if (!committed.applied) {
+        const plan = reconcileStaleDraftWrite(receipt, { dirtyDraftId: draftId, issueLabel: "保存" });
+        const sameDraftStillVisible = workspaceEnvelopeRef.current.active_draft_id === draftId;
+        if (plan === "LATEST_SAME_ACTIVE_PRESERVE_LOCAL" || (plan === "LATEST_ALREADY_ADOPTED" && sameDraftStillVisible)) {
+          setContent((latestContent) => ({
+            ...latestContent,
+            id: latestContent.id || entry.id,
+            saved_at: latestContent.saved_at || now,
+          }), { record: false, semantic: false });
+          setToast("保存期间检测到新输入；新内容已保留并正在补存");
+        }
+      }
     } catch (error) {
       console.warn(error);
       setStorageIssue("保存失败：本机存储不可用。请先导出工作台备份，再释放浏览器空间。");
@@ -1734,9 +2554,10 @@ function App() {
     const files = [...event.target.files];
     event.target.value = "";
     if (!files.length) return;
+    if (workspaceMutationIsLocked()) return;
     const operation = mainAuthority.capture("content-package-import", { envelopeScoped: true });
     const baseWorkspace = workspaceEnvelopeRef.current;
-    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
     const currentContent = contentRef.current;
     const currentSession = currentAuthoringSession();
     try {
@@ -1780,11 +2601,18 @@ function App() {
   }
 
   async function saveProfile() {
+    if (workspaceMutationIsLocked()) return;
+    const operation = mainAuthority.capture("SAVE_PROFILE", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
       const checked = parseProfileV2(JSON.stringify(profile));
-      const snapshotted = workspaceWithCurrentSnapshot();
-      const nextWorkspace = saveWorkspaceProfile(snapshotted, checked);
-      if (!await persistAndAdoptWorkspace(nextWorkspace, { nextProfile: checked })) return;
+      const snapshotted = await workspaceWithCurrentSnapshot(baseWorkspace, currentContent, currentSession);
+      if (!mainAuthority.isCurrent(operation)) return;
+      const nextWorkspace = saveWorkspaceProfileV3(snapshotted, checked);
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { nextProfile: checked, expectedWorkspaceToken, operation, reason: "SAVE_PROFILE" })) return;
       setToast("Profile v2 已保存到本机");
     } catch (error) {
       console.warn(error);
@@ -1795,57 +2623,124 @@ function App() {
 
   async function importProfile(event) {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
+    if (workspaceMutationIsLocked()) return;
     const operation = mainAuthority.capture("profile-import", { envelopeScoped: true });
     const baseWorkspace = workspaceEnvelopeRef.current;
-    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
     const currentContent = contentRef.current;
     const currentSession = currentAuthoringSession();
     try {
       const next = parseProfileV2(await file.text());
       if (!mainAuthority.isCurrent(operation)) return;
-      const snapshotted = workspaceWithCurrentSnapshot(baseWorkspace, currentContent, currentSession);
-      const nextWorkspace = saveWorkspaceProfile(snapshotted, next);
+      const snapshotted = await workspaceWithCurrentSnapshot(baseWorkspace, currentContent, currentSession);
+      const nextWorkspace = saveWorkspaceProfileV3(snapshotted, next);
       if (!await persistAndAdoptWorkspace(nextWorkspace, { nextProfile: next, expectedWorkspaceToken, operation, reason: "IMPORT_PROFILE" })) return;
       setToast("Profile v2 已回载");
     }
     catch { mainAuthority.commit(operation, () => setToast("Profile v2 合同无效，原档案未改变")); }
   }
 
-  function downloadWorkspaceBackup() {
+  async function downloadWorkspaceBackup() {
     try {
-      const backup = buildWorkspaceBackupV2({ workspace: workspaceWithCurrentSnapshot() });
-      downloadBlob("小师妹-工作台备份.json", jsonBlob(backup));
+      const snapshot = await workspaceWithCurrentSnapshot();
+      const backup = await buildWorkspaceBackupV3({ workspace: snapshot, mediaStore });
+      await downloadBlob("小师妹-工作台备份.json", jsonBlob(backup));
       setToast("工作台备份已下载：账号档案、每份稿件、文字会话与资产库");
     } catch (error) {
       console.warn(error); setToast("工作台备份失败，请先修复无效草稿");
     }
   }
 
+  async function downloadProfileJson() {
+    try {
+      await downloadBlob("xiaoshimei-profile-v2.json", jsonBlob(profile));
+      setToast("账号档案 JSON 已保存");
+    } catch (error) {
+      console.warn(error); setToast("账号档案下载失败，当前档案未改变");
+    }
+  }
+
+  async function downloadGenerationContractJson() {
+    try {
+      await downloadBlob("xiaoshimei-generation-contract-v2.json", jsonBlob(buildGenerationContract(profile)));
+      setToast("生成合同 JSON 已保存");
+    } catch (error) {
+      console.warn(error); setToast("生成合同下载失败，当前档案未改变");
+    }
+  }
+
   async function restoreWorkspaceBackup(event) {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
     const operation = mainAuthority.capture("workspace-backup-restore", { envelopeScoped: true });
-    const expectedWorkspaceToken = workspaceEnvelopeToken(workspaceEnvelopeRef.current);
+    const wasBlocked = workspaceWriteBlockedRef.current;
+    setWorkspaceBlocked(true);
     try {
-      const restored = parseWorkspaceBackup(await file.text());
+      const currentSnapshot = workspaceCoordinator.snapshot();
+      let expectedWorkspaceToken = currentSnapshot.workspace_token;
+      let recoveryPrecondition = null;
+      if (!currentSnapshot.ok) {
+        if (currentSnapshot.code !== "WORKSPACE_V3_ENVELOPE_INVALID") {
+          throw new TypeError(currentSnapshot.code || "WORKSPACE_V3_SNAPSHOT_UNAVAILABLE");
+        }
+        const recovery = await workspaceCoordinator.recoverySnapshot();
+        if (recovery.code !== "WORKSPACE_V3_CORRUPT_RECOVERY_READY" || !recovery.ok || !recovery.recovery_precondition) {
+          throw new TypeError(recovery.code || currentSnapshot.code || "WORKSPACE_V3_RECOVERY_UNAVAILABLE");
+        }
+        expectedWorkspaceToken = undefined;
+        recoveryPrecondition = recovery.recovery_precondition;
+      }
+      const serialized = await file.text();
       if (!mainAuthority.isCurrent(operation)) return;
-      const nextWorkspace = restored.workspaceEnvelope || migrateLegacyWorkspaceState({
-        profile: restored.profile,
-        currentContent: restored.currentContent,
-        library: restored.library,
-        generationSession: null,
-        activeDraftId: restored.currentContent.id || crypto.randomUUID(),
+      const receipt = await restoreWorkspaceBackupV3({
+        serialized,
+        coordinator: workspaceCoordinator,
+        mediaStore,
+        expectedWorkspaceToken,
+        recoveryPrecondition,
       });
-      const record = activeDraftRecord(nextWorkspace);
-      if (!await persistAndAdoptWorkspace(nextWorkspace, { record, previousId: null, nextProfile: nextWorkspace.profile, expectedWorkspaceToken, operation, reason: "RESTORE_WORKSPACE_BACKUP" })) return;
-      setView("compose"); setToast("工作台已完整恢复；文字会话与各稿件同步回载，不携带新的评测或放量权限");
+      if (!receipt.ok || !receipt.workspace) {
+        mainAuthority.commit(operation, () => handleWorkspaceConflict(receipt, "恢复已暂停：另一标签页或本机存储已变化，原数据没有被覆盖。"));
+        return;
+      }
+      const record = activeDraftRecordV3(receipt.workspace);
+      let workspaceView = null;
+      try { workspaceView = await hydrateWorkspaceForView(receipt.workspace); }
+      catch (error) { console.warn(error); }
+      const committed = mainAuthority.commit(operation, () => {
+        adoptWorkspaceState(receipt.workspace, {
+          record,
+          nextProfile: receipt.workspace.profile,
+          applyRecord: true,
+          workspaceView,
+        });
+        if (workspaceView) {
+          setWorkspaceBlocked(false);
+          setStorageIssue("");
+          setToast("工作台已完整恢复；文字会话、图片与各稿件同步回载，不携带新的评测或放量权限");
+        } else {
+          setWorkspaceBlocked(true);
+          setStorageIssue("备份已恢复，但本机图片回载校验失败；媒体编辑、模型调用和发布包已暂停。");
+          setToast("文字稿已恢复；图片校验失败，已暂停继续生产");
+        }
+        setView("compose");
+      });
+      if (!committed.applied) {
+        workspaceView?.release?.();
+        adoptWorkspaceState(receipt.workspace, { record, applyRecord: true });
+        setWorkspaceBlocked(true);
+        setStorageIssue("备份恢复已落盘但界面目标发生变化；已读回恢复后的权威并暂停继续写入。");
+      }
     } catch (error) {
-      console.warn(error); mainAuthority.commit(operation, () => setToast("工作台备份无效或无法落盘，原数据未改变"));
+      console.warn(error);
+      setWorkspaceBlocked(wasBlocked);
+      mainAuthority.commit(operation, () => setToast("工作台备份无效或无法落盘，原数据未改变"));
     }
   }
 
   function replaceImage(event) {
     const [file] = event.target.files;
     event.target.value = "";
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     if (!file || !file.type.startsWith("image/")) return;
     const operation = mainAuthority.capture("page-image-reader", { pageScoped: true });
     const reader = new FileReader();
@@ -1855,6 +2750,7 @@ function App() {
   }
 
   function applyPagePreset(presetId) {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background")) return;
     mutatePage((page) => applyDesignPreset(page, presetId), { group: `template-${pageIndex}` });
     setSelectedObject("background");
@@ -1862,6 +2758,7 @@ function App() {
   }
 
   function applyPageCompositionMode(mode) {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background")) return;
     mutatePage((page) => applyCompositionMode(page, mode, { pageIndex, previousRecipe: pageIndex > 0 ? visiblePages[pageIndex - 1]?.layout_recipe : null }), { group: `composition-${pageIndex}-${mode}` });
     setSelectedObject("background");
@@ -1869,6 +2766,7 @@ function App() {
   }
 
   function applyCompositionModeToAll(mode) {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background")) return;
     setContent((current) => {
       const composed = current.pages.map((page, index) => index < current.visible_pages && !layerIsLocked(page, "background") ? applyCompositionMode(page, mode, { pageIndex: index }) : page);
@@ -1879,6 +2777,7 @@ function App() {
   }
 
   function applyPageLayoutRecipe(layoutRecipe) {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background") || !SMART_LAYOUT_RECIPES.some((recipe) => recipe.id === layoutRecipe)) return;
     mutatePage((page) => ({ ...page, layout_recipe: layoutRecipe }), { group: `layout-recipe-${pageIndex}` });
     setSelectedObject("background");
@@ -1886,12 +2785,14 @@ function App() {
   }
 
   function changeBackground(patch) {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background")) return;
     mutatePage((page) => ({ ...page, background_style: { ...backgroundStyleForPage(page), ...patch } }), { group: `background-${pageIndex}-${Object.keys(patch)[0]}` });
     setSelectedObject("background");
   }
 
   function resetBackground() {
+    if (draftMutationIsLocked()) return;
     if (layerIsLocked(currentPage, "background")) return;
     mutatePage((page) => {
       const { background_style: _backgroundStyle, ...rest } = page;
@@ -1903,6 +2804,7 @@ function App() {
   function replaceBackgroundImage(event) {
     const [file] = event.target.files;
     event.target.value = "";
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     if (!file || !new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type) || file.size > 8_000_000) {
       if (file) setToast("请选择 8MB 以内的 PNG、JPG 或 WebP 背景图");
       return;
@@ -1915,6 +2817,8 @@ function App() {
   }
 
   async function generateImageCandidates() {
+    if (!mediaWorkspaceIsUsable()) return;
+    if (pendingImageOperation && authoringInputIsLocked()) return;
     if (!provider?.generatePageCandidates) { setToast("当前未连接可用的图片候选服务"); return; }
     if (providerServerManaged) { setToast("生产模式已关闭单页候选付费支线；请在同一篇稿的配图步骤生成并继续精修"); return; }
     if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
@@ -1949,6 +2853,7 @@ function App() {
   }
 
   function chooseImageCandidate(candidate) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     if (candidatePageIndex !== pageIndex || candidatePageIdentity !== pageSemanticIdentity(currentPage, pageIndex) || !candidateRunId || candidateLoadState[candidate.sha256] !== "READY") return;
     mutatePage((page) => ({ ...page, visual: "character", image_style: { ...page.image_style, src: candidate.src, focalX: 50, focalY: 50, scale: 100 } }));
     setContent((current) => ({ ...current, generation: { ...current.generation, notice: `${current.generation.notice}; page ${pageIndex + 1} candidate ${candidateRunId}:${candidate.sha256}` } }));
@@ -1957,6 +2862,7 @@ function App() {
   }
 
   function movePage(delta) {
+    if (workspaceMutationIsLocked()) return;
     const target = pageIndex + delta;
     if (target < 0 || target >= visiblePages.length) return;
     setContent((current) => reorderPage(current, pageIndex, target));
@@ -1964,6 +2870,7 @@ function App() {
   }
 
   function copyPage() {
+    if (workspaceMutationIsLocked()) return;
     if (visiblePages.length >= 8) { setToast("单篇最多 8 页"); return; }
     setContent((current) => duplicatePage(current, pageIndex));
     setPageIndex(pageIndex + 1);
@@ -1971,6 +2878,7 @@ function App() {
   }
 
   function removePage() {
+    if (workspaceMutationIsLocked()) return;
     if (visiblePages.length <= 1) return;
     setContent((current) => deletePage(current, pageIndex));
     setPageIndex(Math.max(0, pageIndex - 1));
@@ -1978,6 +2886,7 @@ function App() {
   }
 
   async function copyPublicationCopy() {
+    if (!mediaWorkspaceIsUsable()) return;
     const gate = publicationAuthorityRef.current;
     const operation = mainAuthority.capture("copy-publication-copy");
     try {
@@ -1996,6 +2905,7 @@ function App() {
   }
 
   async function downloadZip() {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
     const initialGate = publicationAuthorityRef.current;
     const operation = mainAuthority.capture("prepare-publication-zip");
     if (!publicationSnapshotDecision({ gate: initialGate }).allowed) {
@@ -2053,6 +2963,10 @@ function App() {
   }
 
   function downloadPreparedExport(event) {
+    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) {
+      event.preventDefault();
+      return;
+    }
     const gate = publicationAuthorityRef.current;
     const decision = publicationSnapshotDecision({ gate, expectedToken: preparedExport?.authorityToken, currentContent: contentRef.current, expectedContent: preparedExport?.contentSnapshot });
     if (!decision.allowed) {
@@ -2085,6 +2999,7 @@ function App() {
   }
 
   async function saveResearchPositioning() {
+    if (workspaceMutationIsLocked()) return;
     if (!researchPositioning.trim()) { setResearchMessage("先写清账号定位。 "); return; }
     try {
       const response = await fetch("/api/workspace", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ positioning: researchPositioning.trim() }) });
@@ -2096,6 +3011,7 @@ function App() {
   }
 
   async function runResearch() {
+    if (workspaceMutationIsLocked()) return;
     if (!researchPositioning.trim()) { setResearchMessage("先写清账号定位。 "); return; }
     setResearchBusy(true); setResearchMessage("正在让研究 Agent 扫描本账号相关图文热点…");
     try {
@@ -2128,6 +3044,7 @@ function App() {
   }
 
   function useResearchTopic(item) {
+    if (workspaceMutationIsLocked()) return;
     const nextTopic = [item?.title, item?.angle ? `切入角度：${item.angle}` : "", item?.reason ? `为什么值得写：${item.reason}` : ""].filter(Boolean).join("\n");
     createAuthoringRecord({
       source: nextTopic,
@@ -2138,15 +3055,36 @@ function App() {
   }
 
   async function saveRealityFeedback(draftRecordId, feedback) {
+    if (draftMutationIsLocked()) return;
+    const operation = mainAuthority.capture("SAVE_REALITY_FEEDBACK", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
     try {
       const checked = normalizeRealityFeedback(feedback);
-      const target = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === draftRecordId);
+      const target = baseWorkspace.drafts.find((draft) => draft.draft_id === draftRecordId);
       if (!target) throw new TypeError("draft record is missing");
       const nextContent = { ...target.content_package, reality_feedback: checked };
-      const nextWorkspace = saveDraftRecord(workspaceEnvelopeRef.current, { draftId: draftRecordId, contentPackage: nextContent });
-      if (!await persistAndAdoptWorkspace(nextWorkspace)) return;
-      if (workspaceEnvelopeRef.current.active_draft_id === draftRecordId) setContent(nextContent, { record: false });
-      setToast("现实反馈已保存");
+      const nextWorkspace = saveDraftRecordV3(baseWorkspace, { draftId: draftRecordId, contentPackage: nextContent });
+      const replacementDraft = nextWorkspace.drafts.find((draft) => draft.draft_id === draftRecordId);
+      const receipt = await workspaceCoordinator.mergeDraftCas({
+        draftId: draftRecordId,
+        expectedDraftToken: draftRecordToken(target),
+        buildDraft: (latest) => mainAuthority.isCurrent(operation) ? replacementDraft : latest,
+        reason: "SAVE_REALITY_FEEDBACK_V3",
+      });
+      if (!receipt.ok || !receipt.workspace) return;
+      const committed = mainAuthority.commit(operation, () => {
+        adoptWorkspaceState(receipt.workspace);
+        if (receipt.workspace.active_draft_id === draftRecordId) {
+          setContent((current) => ({ ...current, reality_feedback: checked }), { record: false, semantic: false });
+        }
+        setToast("现实反馈已保存");
+      });
+      if (!committed.applied) {
+        reconcileStaleDraftWrite(receipt, {
+          dirtyDraftId: baseWorkspace.active_draft_id,
+          issueLabel: "反馈保存",
+        });
+      }
     } catch (error) {
       console.warn(error); setToast("现实反馈没有保存，请检查链接或指标");
     }
@@ -2165,29 +3103,29 @@ function App() {
 
       <section id="creator-source" className="workbench-section workbench-source">
         <header><div><strong>原文</strong><small>写清素材，再用 AI 扩写</small></div><button className="creator-flow-close" type="button" onClick={() => setCreatorOpen(false)} disabled={isGenerating} title="收起原文" aria-label="收起原文"><X /></button></header>
-        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} onChange={(value) => setPromptFieldValue("source_topic", value)} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
+        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue("source_topic", value)} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
         <details className="prompt-context-panel creator-requirements-panel">
           <summary><div><strong>补充要求</strong><small>{textRequirements.trim() ? "已填写" : "选填"}</small></div><ChevronDown /></summary>
-          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} onChange={(value) => setPromptFieldValue("text_requirements", value)} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
+          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue("text_requirements", value)} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
         </details>
         <details className="prompt-context-panel">
           <summary><div><strong>口吻与结构</strong><small>9 项</small></div><ChevronDown /></summary>
-          <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
+          <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => { mainAuthority.markSemanticMutation(); setActivatedAsContentOnly(false); setPillar(event.target.value); setTextConfirmed(false); setImageResume(null); setAssembledDraftId(null); }} disabled={isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => { mainAuthority.markSemanticMutation(); setActivatedAsContentOnly(false); setGoal(event.target.value); setTextConfirmed(false); setImageResume(null); setAssembledDraftId(null); }} disabled={isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
+        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => changeContentRoute("pillar", event.target.value)} disabled={authoringInputLocked || isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => changeContentRoute("goal", event.target.value)} disabled={authoringInputLocked || isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
         {generationState === "TEXT_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>正在生成文字</strong></div></div>}
-        <button className="creator-submit" onClick={generateTextNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
+        <button className="creator-submit" onClick={generateTextNode} disabled={authoringInputLocked || isGenerating || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
         {generationState === "FAILED" && generationError?.stage !== "image" && <FailureNotice feedback={generationError} onRetry={generateTextNode} />}
       </section>
 
       {textDraft && <section id="creator-text" className="workbench-section workbench-draft">
         <header><div><strong>文字草稿</strong><small>先改到满意，再确认进入配图；确认前图片调用数 = 0</small></div><span className={`text-gate ${textConfirmed ? "is-confirmed" : ""}`}>{textConfirmed ? "已确认" : "待确认"}</span></header>
         <div className="text-review">
-          <div className="title-candidates" aria-label="标题候选">{textDraft.titles.map((title, index) => <button key={`${index}-${title}`} className={title === textDraft.selected_title ? "is-selected" : ""} onClick={() => chooseDraftTitle(title)}>{title}</button>)}</div>
-          <label><span>最终标题</span><input value={textDraft.selected_title} onChange={(event) => editTextDraft("selected_title", event.target.value)} /></label>
-          <label><span>发布正文 <small>{textDraft.body.replace(/\s/g, "").length} 字</small></span><textarea rows="11" value={textDraft.body} onChange={(event) => editTextDraft("body", event.target.value)} /></label>
-          <div className="draft-tags"><span>标签</span>{textDraft.tags.map((tag, index) => <input key={index} value={tag} onChange={(event) => editTextDraft("tag", event.target.value, index)} />)}</div>
-          <button className="text-confirm-button" type="button" onClick={() => { if (textDraftIsReady()) { mainAuthority.markSemanticMutation(); setTextConfirmed(true); clearGenerationFailure(); setToast("文字已确认，现在可以决定页数与配图"); } }}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
+          <div className="title-candidates" aria-label="标题候选">{textDraft.titles.map((title, index) => <button key={`${index}-${title}`} className={title === textDraft.selected_title ? "is-selected" : ""} disabled={authoringInputLocked || isGenerating} onClick={() => chooseDraftTitle(title)}>{title}</button>)}</div>
+          <label><span>最终标题</span><input value={textDraft.selected_title} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("selected_title", event.target.value)} /></label>
+          <label><span>发布正文 <small>{textDraft.body.replace(/\s/g, "").length} 字</small></span><textarea rows="11" value={textDraft.body} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("body", event.target.value)} /></label>
+          <div className="draft-tags"><span>标签</span>{textDraft.tags.map((tag, index) => <input key={index} value={tag} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("tag", event.target.value, index)} />)}</div>
+          <button className="text-confirm-button" type="button" disabled={authoringInputLocked || isGenerating} onClick={confirmTextDraft}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
         </div>
       </section>}
 
@@ -2196,21 +3134,21 @@ function App() {
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
           <div className="production-mode-options">{PRODUCTION_MODES.map((mode) => <label key={mode.id} className={productionMode === mode.id ? "is-selected" : ""}>
-            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={Boolean(imageResume) || isGenerating} onChange={() => { mainAuthority.markSemanticMutation(); setProductionMode(mode.id); setImageResume(null); setAssembledDraftId(null); }} />
+            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={authoringInputLocked || isGenerating} onChange={() => changeProductionModeChoice(mode.id)} />
             <span><strong>{mode.label}{mode.id === "smart" && <em>推荐</em>}</strong><small>{mode.fit}</small><b>{mode.result}</b></span>
           </label>)}</div>
         </fieldset>
-        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { mainAuthority.markSemanticMutation(); setImageCountMode("AUTO"); setImageResume(null); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { mainAuthority.markSemanticMutation(); setImageCountMode("CUSTOM"); setImageResume(null); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { mainAuthority.markSemanticMutation(); setCustomImageCount(Number(event.target.value)); setImageResume(null); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
+        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={authoringInputLocked || isGenerating} onChange={() => changeImageCountModeChoice("AUTO")} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={authoringInputLocked || isGenerating} onChange={() => changeImageCountModeChoice("CUSTOM")} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={authoringInputLocked || isGenerating} onChange={(event) => changeCustomImageCountValue(event.target.value)}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
         <section className="action-reference-panel">
-          <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={actionReferences.length >= 3}><ImagePlus />加入</button></div>
+          <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={authoringInputLocked || isGenerating || actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
-          {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.id}><img src={item.data_url} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" onClick={() => removeActionReference(item.id)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
-          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => { mainAuthority.markSemanticMutation(); setActionReferenceNote(event.target.value); setImageResume(null); setAssembledDraftId(null); }} /></label>
+          {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.media_ref}><img src={actionReferencePreviewUrls[item.media_ref] || ""} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" disabled={authoringInputLocked || isGenerating} onClick={() => removeActionReference(item.media_ref)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
+          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} disabled={authoringInputLocked || isGenerating} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => changeActionReferenceNote(event.target.value)} /></label>
           <p>身份仍以小师妹固定图为准；参考图不进账号档案。</p>
         </section>
         <details className="prompt-context-panel prompt-context-panel--image">
           <summary><div><strong>画面设置</strong><small>人物、动作、场景、风格与构图 8 项</small></div><ChevronDown /></summary>
-          <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
+          <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
         <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中` : accessRequired ? "先验证访问码" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
@@ -2240,15 +3178,15 @@ function App() {
           {provider && <button type="button" className={`provider-health is-${providerHealth.toLowerCase()}`} aria-label="生成服务设置" onClick={openProviderSettings}><SlidersHorizontal />{providerMeta?.provider_label || "生成服务"} · {providerStatusLabel}</button>}
           {storageIssue && <span className="storage-alert" title={storageIssue}>存储未落盘</span>}
           {view === "compose" && <div className="topbar-actions">
-            <button className="icon-button" onClick={undo} title="撤销（⌘Z）" aria-label="撤销" disabled={!canUndo}><Undo2 /></button>
-            <button className="icon-button" onClick={redo} title="重做（⇧⌘Z / ⌘Y）" aria-label="重做" disabled={!canRedo}><Redo2 /></button>
+            <button className="icon-button" onClick={undo} title="撤销（⌘Z）" aria-label="撤销" disabled={draftEditingLocked || !canUndo}><Undo2 /></button>
+            <button className="icon-button" onClick={redo} title="重做（⇧⌘Z / ⌘Y）" aria-label="重做" disabled={draftEditingLocked || !canRedo}><Redo2 /></button>
           </div>}
         </header>
 
         {providerSettingsOpen && <div className="provider-settings-layer" role="presentation" onClick={() => setProviderSettingsOpen(false)}>
           <section className="provider-settings-card" role="dialog" aria-modal="true" aria-label="生成服务设置" onClick={(event) => event.stopPropagation()}>
             <header><div><strong>生成服务</strong><span>{providerServerManaged ? "生产服务已接好；密钥由服务端保管，不进入浏览器、草稿或发布包。" : IS_PUBLIC_RUNTIME ? "个人体验密钥只保存在当前标签页；关闭标签页即清除。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
-            {providerServerManaged ? <><div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key；访问码只用于建立当前浏览器的短期生产会话。</p></div>{accessRequired && <form id="provider-access-form" onSubmit={loginProviderAccess}><label><span>小师妹 Studio 访问码</span><input type="password" autoComplete="current-password" autoFocus value={accessCode} onChange={(event) => { setAccessCode(event.target.value); setAccessError(""); }} placeholder="输入访问码后继续生成" /></label>{accessError && <p role="alert">{accessError}</p>}</form>}</> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
+            {providerServerManaged ? <><div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key；访问码只用于建立当前浏览器的短期生产会话。</p></div>{accessRequired && <form id="provider-access-form" onSubmit={loginProviderAccess}><label><span>小师妹 Studio 访问码</span><input type="password" autoComplete="current-password" autoFocus value={accessCode} onChange={(event) => { setAccessCode(event.target.value); dispatchAuth({ type: "CLEAR_ERROR", generation: authStateRef.current.generation }); }} placeholder="输入访问码后继续生成" /></label>{accessError && <p role="alert">{accessError}</p>}</form>}</> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
               const nextProvider = event.target.value;
               setProviderSettingsForm((current) => ({
                 ...current,
@@ -2274,17 +3212,18 @@ function App() {
               <span>{visiblePages.length} 页 · {generatedImageCount} 图</span>
               <span className="canvas-size">1080×1440 · 3:4</span>
               <div className="editor-engine-switch" aria-label="页面编辑方式">
-                <button type="button" className={currentEditorMode === "html" ? "is-active" : ""} onClick={() => mutatePage((page) => ({ ...page, editor_mode: "html" }), { group: `editor-mode-${pageIndex}` })}>智能版式</button>
-                <button type="button" className={currentEditorMode === "fabric" ? "is-active" : ""} onClick={() => mutatePage((page) => ({ ...page, editor_mode: "fabric" }), { group: `editor-mode-${pageIndex}` })}>精细画布</button>
+                <button type="button" className={currentEditorMode === "html" ? "is-active" : ""} disabled={draftEditingLocked} onClick={() => mutatePage((page) => ({ ...page, editor_mode: "html" }), { group: `editor-mode-${pageIndex}` })}>智能版式</button>
+                <button type="button" className={currentEditorMode === "fabric" ? "is-active" : ""} disabled={draftEditingLocked} onClick={() => mutatePage((page) => ({ ...page, editor_mode: "fabric" }), { group: `editor-mode-${pageIndex}` })}>精细画布</button>
               </div>
               <div className="gallery__actions">
                 <button className="mobile-edit-button" onClick={() => setMobileInspectorOpen(true)}><SlidersHorizontal />编辑</button>
-                <button onClick={() => importRef.current?.click()}><Upload />回载</button>
+                <button onClick={() => importRef.current?.click()} disabled={draftEditingLocked}><Upload />回载</button>
                 <input ref={importRef} hidden multiple type="file" accept="application/json,.json" onChange={importJson} />
               </div>
             </div>
 
-            <div className="canvas-stage canvas-stage--mature">
+            <div className="canvas-stage canvas-stage--mature" inert={draftEditingLocked ? "" : undefined}>
+              {workspaceWriteBlocked && <div className="storage-alert" role="alert">{storageIssue || "本机图片尚未通过回载校验；媒体编辑、模型调用和发布包已暂停。"}</div>}
               {isDraftInputOnly ? <section className="fresh-draft-empty" aria-label="空白新稿">
                 <span>NEW DRAFT</span>
                 <h2>{isFreshDraft ? "从一段原文开始" : "原文已就位"}</h2>
@@ -2298,33 +3237,33 @@ function App() {
                 page={currentPage}
                 pageIndex={pageIndex}
                 totalPages={visiblePages.length}
-                onStateChange={(htmlState, options = {}) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, html_state: htmlState }), { group: `html-layout-${pageIndex}`, ...options }))}
-                onPagePatch={(patch) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, ...patch }), { group: `html-copy-${pageIndex}` }))}
+                onStateChange={(htmlState, options = {}) => draftEditingLocked ? null : mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, html_state: htmlState }), { group: `html-layout-${pageIndex}`, ...options }))}
+                onPagePatch={(patch) => draftEditingLocked ? null : mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, ...patch }), { group: `html-copy-${pageIndex}` }))}
               /> : <MaturePageEditor
                 key={`fabric-${workspaceEnvelope.active_draft_id}-${pageSemanticIdentity(currentPage, pageIndex)}-${layoutRefreshToken}`}
                 page={currentPage}
                 pageIndex={pageIndex}
                 totalPages={visiblePages.length}
-                onAutoArrange={autoArrangeInfoPanels}
-                onSceneChange={(editorState) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, editor_state: editorState }), { group: `mature-editor-${pageIndex}` }))}
+                onAutoArrange={() => { if (mediaWorkspaceIsUsable()) autoArrangeInfoPanels(); }}
+                onSceneChange={(editorState) => draftEditingLocked ? null : mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, editor_state: editorState }), { group: `mature-editor-${pageIndex}` }))}
               />}
             </div>
 
             {!isDraftInputOnly && <div className="filmstrip" aria-label="页面胶片条">
               <div className="filmstrip__tools">
-                <button onClick={() => movePage(-1)} disabled={pageIndex === 0} title="左移"><ArrowLeft /></button>
-                <button onClick={() => movePage(1)} disabled={pageIndex === visiblePages.length - 1} title="右移"><ArrowRight /></button>
-                <button onClick={copyPage} title="复制页面"><Copy /></button>
-                <button onClick={removePage} disabled={visiblePages.length <= 1} title="删除页面"><Trash2 /></button>
+                <button onClick={() => movePage(-1)} disabled={draftEditingLocked || pageIndex === 0} title="左移"><ArrowLeft /></button>
+                <button onClick={() => movePage(1)} disabled={draftEditingLocked || pageIndex === visiblePages.length - 1} title="右移"><ArrowRight /></button>
+                <button onClick={copyPage} disabled={draftEditingLocked} title="复制页面"><Copy /></button>
+                <button onClick={removePage} disabled={draftEditingLocked || visiblePages.length <= 1} title="删除页面"><Trash2 /></button>
               </div>
               {visiblePages.map((page, index) => <button key={`${index}-${page.title}`} className={`film-thumb ${pageIndex === index ? "is-active" : ""}`} onClick={() => { setPageIndex(index); selectObject("title"); }}><span>{String(index + 1).padStart(2, "0")}</span><strong>{page.title}</strong></button>)}
-              <button className="film-add" onClick={copyPage} title="复制当前页作为新页"><Plus /></button>
+              <button className="film-add" onClick={copyPage} disabled={draftEditingLocked} title="复制当前页作为新页"><Plus /></button>
             </div>}
           </section>
 
           {mobileInspectorOpen && <button className="mobile-inspector-backdrop" aria-label="关闭编辑面板" onClick={() => setMobileInspectorOpen(false)} />}
           <aside className={`inspector ${mobileInspectorOpen ? "is-mobile-open" : ""} ${creatorOpen ? "is-creator-flow" : ""}`}>
-            <div className="mobile-inspector-head"><strong>创作与编辑</strong><div><button onClick={undo} disabled={!canUndo} aria-label="编辑栏撤销"><Undo2 /></button><button onClick={redo} disabled={!canRedo} aria-label="编辑栏重做"><Redo2 /></button><button onClick={() => setMobileInspectorOpen(false)} aria-label="关闭编辑面板"><X /></button></div></div>
+            <div className="mobile-inspector-head"><strong>创作与编辑</strong><div><button onClick={undo} disabled={draftEditingLocked || !canUndo} aria-label="编辑栏撤销"><Undo2 /></button><button onClick={redo} disabled={draftEditingLocked || !canRedo} aria-label="编辑栏重做"><Redo2 /></button><button onClick={() => setMobileInspectorOpen(false)} aria-label="关闭编辑面板"><X /></button></div></div>
             <div className="workbench-stream">
               <nav className="creator-journey" aria-label="创作阶段">
                 {creatorJourney.steps.map((stage) => <button key={stage.step} type="button" className={`is-${stage.state}`} aria-current={stage.state === "current" ? "step" : undefined} onClick={() => {
@@ -2342,7 +3281,7 @@ function App() {
                   <span>文字稿：{textDraft?.selected_title || "未确认"}</span>
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
-                  {publicationAuthority.code === "HISTORICAL_CONFIRMATION_REQUIRED" && <button type="button" className="copy-publish" disabled={historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
+                  {publicationAuthority.code === "HISTORICAL_CONFIRMATION_REQUIRED" && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>
@@ -2352,11 +3291,11 @@ function App() {
                   <label><span>发布正文</span><textarea rows="8" value={content.body} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>
                   <div className="tag-editor"><span>标签</span>{content.tags.map((tag, index) => <input key={index} value={tag} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...current, tags: current.tags.map((item, tagIndex) => tagIndex === index ? event.target.value : item) }), { group: `publish-tag-${index}` })} />)}</div>
                 </>}
-                <button className="copy-publish" aria-disabled={!publicationAuthority.allowed} disabled={!publicationAuthority.allowed} onClick={copyPublicationCopy}><Clipboard />{publicationAuthority.allowed ? "复制完整发布文案" : "发布文案已锁定"}</button>
+                <button className="copy-publish" aria-disabled={workspaceWriteBlocked || !publicationAuthority.allowed} disabled={workspaceWriteBlocked || !publicationAuthority.allowed} onClick={copyPublicationCopy}><Clipboard />{workspaceWriteBlocked ? "媒体校验未通过" : publicationAuthority.allowed ? "复制完整发布文案" : "发布文案已锁定"}</button>
               </section>
             </section>}
             {!isDraftInputOnly && <section className="workbench-section workbench-export" aria-label="保存与下载">
-              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={preparedExport.url} download={preparedExport.name} onClick={downloadPreparedExport}><Download />保存发布包</a> : <button type="button" className="download-final" data-export-state={exportState} aria-disabled={!publicationAuthority.allowed} onClick={downloadZip} disabled={exportState === "GENERATING" || !publicationAuthority.allowed}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{exportState === "GENERATING" ? "正在生成发布包…" : publicationAuthority.allowed ? "下载发布包" : "发布包已锁定"}</button>}</div>
+              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft} disabled={draftEditingLocked}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={draftEditingLocked ? undefined : preparedExport.url} aria-disabled={draftEditingLocked} download={preparedExport.name} onClick={downloadPreparedExport}><Download />{draftEditingLocked ? "当前稿件已冻结" : "保存发布包"}</a> : <button type="button" className="download-final" data-export-state={exportState} aria-disabled={draftEditingLocked || !publicationAuthority.allowed} onClick={downloadZip} disabled={draftEditingLocked || exportState === "GENERATING" || !publicationAuthority.allowed}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{draftEditingLocked ? "当前稿件已冻结" : exportState === "GENERATING" ? "正在生成发布包…" : publicationAuthority.allowed ? "下载发布包" : "发布包已锁定"}</button>}</div>
               {!publicationAuthority.allowed && <p className="export-inline-note">草稿仍可保存；文字与画布重新对齐前，不会生成或下载发布包。</p>}
               {exportState === "FAILED" && <p className="export-inline-error">下载没有完成；请先处理上方排版提示后重试。</p>}
             </section>}
@@ -2391,7 +3330,7 @@ function App() {
             })}</div>
           </>}
         </section>}
-        {view === "profile" && <ProfileEditor profile={profile} onChange={setProfile} onSave={saveProfile} onImport={importProfile} importRef={profileImportRef} />}
+        {view === "profile" && <ProfileEditor profile={profile} readOnly={workspaceReadOnly} onChange={(next) => { if (!workspaceMutationIsLocked()) setProfile(next); }} onSave={saveProfile} onImport={importProfile} onDownloadProfile={downloadProfileJson} onDownloadContract={downloadGenerationContractJson} importRef={profileImportRef} />}
       </main>
 
       {toast && <div className="toast">{toast}</div>}

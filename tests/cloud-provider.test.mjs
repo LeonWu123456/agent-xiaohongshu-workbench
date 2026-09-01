@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import handler from "../api/provider.mjs";
+import * as providerModule from "../api/provider.mjs";
 import {
   ACCESS_SESSION_COOKIE,
   ACCESS_SESSION_TTL_SECONDS,
@@ -13,14 +14,18 @@ import {
   createUpstashImageLedger,
   generateImages,
   imageLedgerIdentity,
+  inspectAccessSessionCandidates,
+  inspectServerAccessConfig,
+  mintAccessSession,
   publicTileBudgetForResponse,
   signPublicImageCheckpoint,
   sliceStandaloneRepairForUnit,
   splitMotherSheetForUnits,
+  verifyAccessSession,
   verifyPublicImageCheckpoint,
 } from "../api/provider.mjs";
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
-import { parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
+import { computeImageGenerationInputSha256, parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
 import { sha256Bytes } from "../src/ark-provider-core.mjs";
 import { createPublicImageRun, failPublicImageJob, startPublicImageJob } from "../src/public-image-run.mjs";
 import { createLocalHttpProvider } from "../src/provider-client.mjs";
@@ -34,6 +39,8 @@ function responseProbe() {
     status(code) { this.statusCode = code; return this; },
     setHeader(name, value) { this.headers[name] = value; return this; },
     json(value) { this.body = value; return this; },
+    end(value = null) { this.body = value; return this; },
+    send(value = null) { this.body = value; return this; },
   };
 }
 
@@ -130,6 +137,1261 @@ class FakeAtomicImageLedger {
   }
 }
 
+function d36Field(value, ...names) {
+  for (const name of names) {
+    if (value && Object.prototype.hasOwnProperty.call(value, name)) return value[name];
+  }
+  return undefined;
+}
+
+function d36Error(code, details = {}) {
+  const error = new Error(code);
+  error.details = details;
+  return error;
+}
+
+class FakeD36ImageLedger {
+  constructor({ readiness = {}, commitMode = "normal", retainPhysicalKeys = false, events = [] } = {}) {
+    this.readiness = {
+      eviction: "off",
+      autoUpgrade: "off",
+      foreignKeys: 0,
+      usage: "KNOWN",
+      calibration: "PASS",
+      ...readiness,
+    };
+    this.commitMode = commitMode;
+    this.retainPhysicalKeys = retainPhysicalKeys;
+    this.events = events;
+    this.runs = new Map();
+    this.bootstrap = new Map();
+    this.assets = new Map();
+    this.steps = new Map();
+    this.releasedRuns = new Set();
+    this.readAssetCalls = 0;
+  }
+
+  async assertProductionReady() {
+    this.events.push("ledger:readiness");
+    const value = this.readiness;
+    const reason = value.eviction !== "off" ? "EVICTION_NOT_OFF"
+      : value.autoUpgrade !== "off" ? "AUTO_UPGRADE_NOT_OFF"
+        : value.foreignKeys !== 0 ? "FOREIGN_KEYS_PRESENT"
+          : value.usage !== "KNOWN" ? "USAGE_UNKNOWN"
+            : value.calibration !== "PASS" ? "CALIBRATION_UNKNOWN"
+              : null;
+    if (reason) throw d36Error(`IMAGE_LEDGER_PRODUCTION_NOT_READY:${reason}`);
+    return { status: "READY", redis_time_ms: 1_788_192_000_000 };
+  }
+
+  async claimStart(value = {}) {
+    this.events.push("ledger:claimStart");
+    const appScopeId = String(d36Field(value, "appScopeId", "app_scope_id") || "");
+    const bootstrapNonce = String(d36Field(value, "bootstrapNonce", "bootstrap_nonce") || "");
+    const inputSha256 = String(d36Field(value, "inputSha256", "input_sha256") || "");
+    const key = `${appScopeId}:${bootstrapNonce}`;
+    const existingId = this.bootstrap.get(key);
+    if (existingId) {
+      const existing = this.runs.get(existingId);
+      if (existing.inputSha256 !== inputSha256) return { status: "CONFLICT", runId: existingId };
+      return { status: existing.status, runId: existingId, ownerToken: existing.ownerToken, fence: existing.fence, cached: true };
+    }
+    const runId = String(d36Field(value, "runId", "run_id") || `image-run-d36-${bootstrapNonce.slice(0, 12)}`);
+    const run = {
+      runId,
+      appScopeId,
+      bootstrapNonce,
+      inputSha256,
+      status: "MATERIALIZING",
+      ownerToken: `owner-${bootstrapNonce.slice(0, 12)}`,
+      fence: 1,
+      paidCalls: 0,
+      checkpointPreimage: null,
+      checkpointPreimageSha256: null,
+      logicalStepId: "planner",
+      recoverableUntil: "2026-09-08T00:00:00.000Z",
+      snapshot: structuredClone(d36Field(value, "snapshot") || null),
+      referenceManifest: structuredClone(d36Field(value, "referenceManifest", "reference_manifest") || []),
+      compactRun: null,
+    };
+    this.bootstrap.set(key, runId);
+    this.runs.set(runId, run);
+    return { status: "MATERIALIZING", runId, ownerToken: run.ownerToken, fence: run.fence, recoverableUntil: run.recoverableUntil };
+  }
+
+  async putRunAsset(value = {}) {
+    this.events.push("ledger:putRunAsset");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const manifest = d36Field(value, "manifest") || value;
+    const expectedSha = String(d36Field(manifest, "sha256") || "");
+    const bytes = Buffer.from(d36Field(value, "bytes", "exactBytes", "exact_bytes") || []);
+    const actualSha = createHash("sha256").update(bytes).digest("hex");
+    if (!this.runs.has(runId)) throw d36Error("IMAGE_LEDGER_RUN_MISSING");
+    if (expectedSha !== actualSha) throw d36Error("IMAGE_ASSET_HASH_MISMATCH");
+    const key = `${runId}:${actualSha}`;
+    if (!this.assets.has(key)) this.assets.set(key, {
+      runId,
+      sha256: actualSha,
+      bytes,
+      mime: String(d36Field(manifest, "mime") || "image/jpeg"),
+      sizeBytes: bytes.length,
+      manifest: structuredClone(manifest),
+      member: true,
+    });
+    return { status: "STORED", runId, sha256: actualSha, sizeBytes: bytes.length, manifest: structuredClone(manifest) };
+  }
+
+  async readRunAsset(value = {}) {
+    this.events.push("ledger:readRunAsset");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const sha256 = String(d36Field(value, "sha256") || "");
+    const asset = this.assets.get(`${runId}:${sha256}`);
+    if (!asset) return { status: "MISSING" };
+    const actualSha = createHash("sha256").update(asset.bytes).digest("hex");
+    if (actualSha !== asset.sha256 || asset.bytes.length !== asset.sizeBytes) return { status: "CORRUPT" };
+    return { status: "FOUND", ...structuredClone(asset) };
+  }
+
+  async claimPlanner(value = {}) {
+    this.events.push("ledger:claimPlanner");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const run = this.runs.get(runId);
+    if (!run) return { status: "RUN_MISSING" };
+    if (run.status === "READY") return { status: "CACHED", runId, checkpointPreimage: run.checkpointPreimage, checkpointPreimageSha256: run.checkpointPreimageSha256 };
+    if (run.status === "UNKNOWN") return { status: "UNKNOWN", runId };
+    run.status = "PLANNING";
+    return { status: "PLANNING", runId, ownerToken: run.ownerToken, fence: run.fence };
+  }
+
+  async commitPlanner(value = {}) {
+    this.events.push("ledger:commitPlanner");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const run = this.runs.get(runId);
+    if (!run) return { status: "RUN_MISSING" };
+    run.status = "READY";
+    run.checkpointPreimage = structuredClone(d36Field(value, "checkpointPreimage", "checkpoint_preimage") || { schema: "xiaoshimei.image-checkpoint.v1", cursor: 0 });
+    run.checkpointPreimageSha256 = String(d36Field(value, "checkpointPreimageSha256", "checkpoint_preimage_sha256") || createHash("sha256").update(JSON.stringify(run.checkpointPreimage)).digest("hex"));
+    run.logicalStepId = String(d36Field(value, "logicalStepId", "logical_step_id") || "render-step-1");
+    run.plannerResult = structuredClone(d36Field(value, "plannerResult", "planner_result", "compactRun", "compact_run") || null);
+    run.compactRun = structuredClone(d36Field(value, "compactRun", "compact_run", "plannerResult", "planner_result") || null);
+    run.cachedResponse = structuredClone(d36Field(value, "response") || null);
+    return { status: "COMMITTED", runId, checkpointPreimage: run.checkpointPreimage, checkpointPreimageSha256: run.checkpointPreimageSha256, logicalStepId: run.logicalStepId };
+  }
+
+  async discover(value = {}) {
+    this.events.push("ledger:discover");
+    const appScopeId = String(d36Field(value, "appScopeId", "app_scope_id") || "");
+    const bootstrapNonce = String(d36Field(value, "bootstrapNonce", "bootstrap_nonce") || "");
+    const inputSha256 = String(d36Field(value, "inputSha256", "input_sha256") || "");
+    const explicitRunId = String(d36Field(value, "runId", "run_id") || "");
+    const runId = explicitRunId || this.bootstrap.get(`${appScopeId}:${bootstrapNonce}`);
+    if (!runId) return { status: "RUN_MISSING" };
+    const run = this.runs.get(runId);
+    if (!run || run.appScopeId !== appScopeId) return { status: "CONFLICT", runId };
+    if (inputSha256 && run.inputSha256 !== inputSha256) return { status: "CONFLICT", runId };
+    if (bootstrapNonce && run.bootstrapNonce !== bootstrapNonce) return { status: "CONFLICT", runId };
+    return {
+      status: run.status,
+      runId,
+      checkpointPreimage: structuredClone(run.checkpointPreimage || {}),
+      checkpointPreimageSha256: run.checkpointPreimageSha256,
+      logicalStepId: run.logicalStepId,
+      recoverableUntil: run.recoverableUntil,
+      cached: run.status === "READY" || run.status === "COMPLETE",
+      cachedResponse: structuredClone(run.cachedResponse || null),
+      bootstrapNonce: run.bootstrapNonce,
+      inputSha256: run.inputSha256,
+      snapshot: structuredClone(run.snapshot || null),
+      referenceManifest: structuredClone(run.referenceManifest || []),
+      compactRun: structuredClone(run.compactRun || null),
+    };
+  }
+
+  seedReadyRun({ runId = "image-run-d36-seeded", checkpointPreimage = { schema: "xiaoshimei.image-checkpoint.v1", cursor: 0 }, checkpointPreimageSha256 = null, logicalStepId = "render-step-1", paidCalls = 0 } = {}) {
+    const suffix = createHash("sha256").update(runId).digest("hex").slice(0, 8);
+    const resolvedRunId = `images-2026-09-01T00-00-00-000Z-${suffix}`;
+    const unit = { unit_id: "page-1-hero", page_index: 0, panel_index: null, media_role: "cover_kv", preferred_aspect: "9:8", fit_policy: "cover", visual_action: "小师妹右手握笔书写", image_prompt: d36PlannerPage().image_prompt };
+    const compactRun = createPublicImageRun({
+      runId: resolvedRunId,
+      draftId: "draft-d36-contract",
+      draftSha256: "7".repeat(64),
+      productionMode: "smart",
+      finalPages: [{ pageRole: "hook", eyebrow: "书院记录", title: "先把今日动作记下来", body: "今天先记录一个清楚动作。", panels: [], visualAction: unit.visual_action, imagePrompt: unit.image_prompt }],
+      illustrationUnits: [unit],
+      referenceFingerprint: "6".repeat(64),
+      jobs: [{ sheet_id: "mother-sheet-1", sheet_index: 0, template: "grid-3x3", kv_unit_index: 0, unit_labels: ["A"], units: [unit], job_kind: "mother_sheet" }],
+    });
+    const signedCheckpoint = checkpointPreimageSha256
+      ? checkpointPreimage
+      : providerModule.createImageTransactionCheckpoint(compactRun, D36_SETTINGS.apiKey);
+    const sha = checkpointPreimageSha256 || providerModule.imageTransactionCheckpointSha256(signedCheckpoint);
+    const nextLogicalStepId = checkpointPreimageSha256 ? logicalStepId : "render-job-01";
+    this.runs.set(resolvedRunId, {
+      runId: resolvedRunId,
+      appScopeId: "xiaoshimei-test-scope",
+      bootstrapNonce: "9".repeat(64),
+      inputSha256: "8".repeat(64),
+      status: "READY",
+      ownerToken: `owner-${runId}`,
+      fence: 1,
+      paidCalls,
+      checkpointPreimage: structuredClone(signedCheckpoint),
+      checkpointPreimageSha256: sha,
+      logicalStepId: nextLogicalStepId,
+      recoverableUntil: "2026-09-08T00:00:00.000Z",
+      plannerResult: { pages: [d36PlannerPage()] },
+      compactRun,
+      snapshot: {
+        schema: "xiaoshimei.image-operation-snapshot.v1",
+        draft_record_id: "draft-record-d36-contract",
+        mutation_epoch: 1,
+        confirmed_draft: d36ConfirmedDraft(),
+        page_count: 1,
+        production_mode: "smart",
+        reference_note: "",
+      },
+      referenceManifest: [],
+    });
+    return this.runs.get(resolvedRunId);
+  }
+
+  async reserveStep(value = {}) {
+    this.events.push("ledger:reserveStep");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const checkpointSha = String(d36Field(value, "checkpointPreimageSha256", "checkpoint_preimage_sha256") || "");
+    const logicalStepId = String(d36Field(value, "logicalStepId", "logical_step_id") || "");
+    const attemptNonce = String(d36Field(value, "attemptNonce", "attempt_nonce") || "");
+    const nowMs = Number(d36Field(value, "nowMs", "now_ms") || Date.now());
+    const leaseMs = Number(d36Field(value, "leaseMs", "lease_ms") || 360_000);
+    const run = this.runs.get(runId);
+    if (!run) return { status: "RUN_MISSING" };
+    if (run.status === "UNKNOWN") return { status: "UNKNOWN" };
+    if (run.checkpointPreimageSha256 !== checkpointSha || run.logicalStepId !== logicalStepId) return { status: "CHECKPOINT_CONFLICT" };
+    const actionId = `${runId}:${checkpointSha}:${logicalStepId}`;
+    const current = this.steps.get(actionId);
+    if (current) {
+      if (current.attemptNonce !== attemptNonce) return { status: "NONCE_CONFLICT", actionId };
+      if (current.status === "COMMITTED") return { status: "CACHED", actionId, cachedResponse: structuredClone(current.cachedResult) };
+      if (current.status === "UNKNOWN") return { status: "UNKNOWN", actionId };
+      if (nowMs - current.reservedAtMs > leaseMs) {
+        current.status = "UNKNOWN";
+        run.status = "UNKNOWN";
+        return { status: "UNKNOWN", actionId };
+      }
+      return { status: "IN_FLIGHT", actionId };
+    }
+    if (run.paidCalls >= 6) return { status: "BUDGET_EXHAUSTED" };
+    const step = { actionId, runId, checkpointSha, logicalStepId, attemptNonce, status: "IN_FLIGHT", ownerToken: `step-owner-${attemptNonce.slice(0, 12)}`, fence: 1, reservedAtMs: nowMs, cachedResult: null };
+    this.steps.set(actionId, step);
+    run.status = "IN_FLIGHT";
+    run.paidCalls += 1;
+    return { status: "RESERVED", actionId, ownerToken: step.ownerToken, fence: step.fence };
+  }
+
+  async commitStep(value = {}) {
+    this.events.push("ledger:commitStep");
+    const actionId = String(d36Field(value, "actionId", "action_id") || "");
+    const step = this.steps.get(actionId);
+    if (!step) return { status: "RUN_MISSING" };
+    const apply = () => {
+      step.status = "COMMITTED";
+      step.cachedResult = structuredClone(d36Field(value, "response", "result", "outcome", "cachedResult", "cached_result") || null);
+      const run = this.runs.get(step.runId);
+      if (run && run.status !== "UNKNOWN") run.status = String(d36Field(value, "runStatus", "run_status") || "READY");
+    };
+    if (this.commitMode === "throw-before-once") {
+      this.commitMode = "normal";
+      throw d36Error("FAKE_D36_COMMIT_LOST_BEFORE_APPLY");
+    }
+    if (this.commitMode === "apply-then-throw-once") {
+      this.commitMode = "normal";
+      apply();
+      throw d36Error("FAKE_D36_COMMIT_LOST_AFTER_APPLY");
+    }
+    apply();
+    return { status: "COMMITTED", actionId };
+  }
+
+  async markStepUnknown(value = {}) {
+    this.events.push("ledger:markStepUnknown");
+    const actionId = String(d36Field(value, "actionId", "action_id") || "");
+    const step = this.steps.get(actionId);
+    if (!step) return { status: "RUN_MISSING" };
+    if (step.status === "COMMITTED") return { status: "COMMITTED", cachedResponse: structuredClone(step.cachedResult) };
+    step.status = "UNKNOWN";
+    const run = this.runs.get(step.runId);
+    if (run) run.status = "UNKNOWN";
+    return { status: "UNKNOWN" };
+  }
+
+  seedInflightStep(input, { reservedAtMs = 0 } = {}) {
+    const run = this.runs.get(input.run_id);
+    const actionId = `${input.run_id}:${input.checkpoint_preimage_sha256}:${input.logical_step_id}`;
+    this.steps.set(actionId, { actionId, runId: input.run_id, checkpointSha: input.checkpoint_preimage_sha256, logicalStepId: input.logical_step_id, attemptNonce: input.attempt_nonce, status: "IN_FLIGHT", ownerToken: "old-owner", fence: 1, reservedAtMs, cachedResult: null });
+    if (run) run.status = "IN_FLIGHT";
+    return actionId;
+  }
+
+  async readAsset(value = {}) {
+    this.readAssetCalls += 1;
+    this.events.push("ledger:readAsset");
+    const appScopeId = String(d36Field(value, "appScopeId", "app_scope_id") || "");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const sha256 = String(d36Field(value, "sha256") || "");
+    const run = this.runs.get(runId);
+    const asset = this.assets.get(`${runId}:${sha256}`);
+    if (!run) return { status: "RUN_MISSING" };
+    if (run.appScopeId !== appScopeId) return { status: "FORBIDDEN" };
+    if (!asset?.member) return { status: "NOT_MEMBER" };
+    const actual = createHash("sha256").update(asset.bytes).digest("hex");
+    if (actual !== sha256 || asset.bytes.length !== asset.sizeBytes) return { status: "CORRUPT" };
+    return { status: "FOUND", bytes: Buffer.from(asset.bytes), manifest: structuredClone(asset.manifest) };
+  }
+
+  async cleanupRun(value = {}) {
+    this.events.push("ledger:cleanup:DEL");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    if (!this.retainPhysicalKeys) {
+      for (const key of [...this.assets.keys()]) if (key.startsWith(`${runId}:`)) this.assets.delete(key);
+    }
+    this.events.push("ledger:cleanup:ABSENCE_READBACK");
+    const retained = [...this.assets.keys()].some((key) => key.startsWith(`${runId}:`));
+    if (retained) return { status: "PHYSICAL_KEYS_RETAINED", released: false };
+    this.events.push("ledger:cleanup:RELEASE_CAPACITY");
+    this.releasedRuns.add(runId);
+    this.runs.delete(runId);
+    return { status: "RELEASED", released: true };
+  }
+}
+
+function d36PlannerPage() {
+  return {
+    page_role: "hook",
+    eyebrow: "书院记录",
+    title: "先把今日动作记下来",
+    body: "今天先记录一个清楚动作，后续进展和变化都继续按现实结果更新。",
+    visual_action: "小师妹右手握笔书写，左手压住摊开的记录册",
+    image_prompt: "傍晚的书院木桌前，小师妹坐下书写今日记录，右手握笔明确落在纸面，左手压住摊开的册页，视线低头看向笔尖，人物手部与记录册完整清楚，暖色侧光，中近景，人物位于画面右侧，上方保留干净空间，不出现文字、水印、边框或第二个人。",
+  };
+}
+
+function d36ConfirmedDraft(overrides = {}) {
+  return {
+    draft_id: "draft-d36-contract",
+    source_input: "书院日常记录",
+    pillar: "academy",
+    goal: "save",
+    titles: ["先把今日动作记下来", "今日书院记录的三个步骤", "把日常进展写成一份记录"],
+    selected_title: "先把今日动作记下来",
+    body: "这是一段经过用户确认的完整发布正文。".repeat(24),
+    tags: ["书院记录", "日常行动", "生活方式", "小师妹", "今日复盘"],
+    recommended_image_count: 1,
+    facts: [],
+    risks: [],
+    content_type: "knowledge_card",
+    style_lock: null,
+    prompt_context: {},
+    ...overrides,
+  };
+}
+
+async function d36ReferenceBytes() {
+  const width = 96;
+  const height = 128;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < pixels.length; index += 1) pixels[index] = (index * 67 + Math.floor(index / 31) * 19) % 256;
+  return sharp(pixels, { raw: { width, height, channels: 3 } }).jpeg({ quality: 88 }).toBuffer();
+}
+
+async function d36StartInput({ nonce = "a".repeat(64), operationOverrides = {}, includeMedia = true, referenceBytes = null, manifestSha = null } = {}) {
+  const bytes = referenceBytes || await d36ReferenceBytes();
+  const sha256 = manifestSha || createHash("sha256").update(bytes).digest("hex");
+  const manifest = {
+    schema: "xiaoshimei.media-asset-manifest.v1",
+    media_ref: `xiaoshimei-media://sha256/${sha256}`,
+    sha256,
+    size_bytes: bytes.length,
+    mime: "image/jpeg",
+    name: "动作参考",
+    width: 96,
+    height: 128,
+  };
+  const operationSnapshot = {
+    schema: "xiaoshimei.image-operation-snapshot.v1",
+    draft_record_id: "draft-record-d36-contract",
+    mutation_epoch: 1,
+    confirmed_draft: d36ConfirmedDraft(),
+    page_count: 1,
+    production_mode: "smart",
+    reference_note: "参考握笔和手部关系",
+    ...operationOverrides,
+  };
+  const inputSha256 = await computeImageGenerationInputSha256({ operation_snapshot: operationSnapshot, reference_manifest: [manifest] });
+  return {
+    mode: "START",
+    bootstrap_nonce: nonce,
+    operation_snapshot: operationSnapshot,
+    input_sha256: inputSha256,
+    reference_manifest: [manifest],
+    missing_reference_media: includeMedia ? [{ media_ref: manifest.media_ref, sha256, size_bytes: bytes.length, mime: "image/jpeg", bytes_base64: bytes.toString("base64") }] : [],
+  };
+}
+
+function d36StepInput(run, overrides = {}) {
+  return {
+    mode: "STEP",
+    run_id: run.runId,
+    checkpoint_preimage: structuredClone(run.checkpointPreimage),
+    checkpoint_preimage_sha256: run.checkpointPreimageSha256,
+    logical_step_id: run.logicalStepId,
+    attempt_nonce: "e".repeat(64),
+    ...overrides,
+  };
+}
+
+function d36Transaction() {
+  assert.equal(typeof providerModule.generateImagesTransaction, "function", "provider must export generateImagesTransaction");
+  return providerModule.generateImagesTransaction;
+}
+
+function assertOrdered(events, expected) {
+  let cursor = -1;
+  for (const item of expected) {
+    const next = events.indexOf(item, cursor + 1);
+    assert.notEqual(next, -1, `${item} missing from ${events.join(" -> ")}`);
+    cursor = next;
+  }
+}
+
+const D36_SETTINGS = Object.freeze({
+  apiKey: "test-key-123456",
+  textModel: "text",
+  imageModel: "image",
+  credentialMode: "SERVER_MANAGED",
+});
+const D36_APP_SCOPE = "xiaoshimei-test-scope";
+const D36_PRODUCTION_READINESS = Object.freeze({
+  dedicated: true,
+  eviction: "off",
+  autoUpgrade: false,
+  foreignKeyCount: 0,
+  usageReadable: true,
+  calibrated: true,
+  capacityAvailable: true,
+  calibrationSha256: "a".repeat(64),
+});
+
+test("D36 real adapter maps one app_scope+bootstrap_nonce to one physical run root even when the input hash conflicts", async () => {
+  const transact = d36Transaction();
+  const nonce = "4".repeat(64);
+  const first = await d36StartInput({ nonce });
+  const conflicting = await d36StartInput({ nonce, operationOverrides: { mutation_epoch: 2 } });
+  const commands = [];
+  let claimCount = 0;
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    productionReadiness: D36_PRODUCTION_READINESS,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body[0] === "PING") return { ok: true, json: async () => ({ result: "PONG" }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("snapshot_sha")) {
+        claimCount += 1;
+        return { ok: true, json: async () => ({ result: claimCount === 1 ? ["UNKNOWN", "", "0", "0"] : ["CONFLICT"] }) };
+      }
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    const firstResult = await transact(first, D36_SETTINGS, {
+      imageLedger,
+      nowMs: 1_788_192_000_000,
+      accessExpiresAtMs: 1_788_192_360_000,
+      appScopeId: D36_APP_SCOPE,
+    });
+    assert.equal(firstResult.status, "UNKNOWN");
+    await assert.rejects(
+      () => transact(conflicting, D36_SETTINGS, {
+        imageLedger,
+        nowMs: 1_788_192_001_000,
+        accessExpiresAtMs: 1_788_192_360_000,
+        appScopeId: D36_APP_SCOPE,
+      }),
+      /BOOTSTRAP_INPUT_CONFLICT/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const claims = commands.filter((body) => body[0] === "EVAL" && String(body[1]).includes("snapshot_sha"));
+  assert.equal(claims.length, 2);
+  assert.equal(claims[0][2], "2", "claimStart must atomically address meta plus inventory");
+  assert.equal(claims[0][3], claims[1][3]);
+  assert.equal(claims[0][4], claims[1][4]);
+  assert.match(claims[0][3], /^xiaoshimei:image-d36:\{images-[0-9TZ-]+-[0-9a-f]{8}\}:meta$/);
+  assert.equal(claims[0][4], claims[0][3].replace(/:meta$/, ":inventory"));
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 claimStart and external DISCOVER atomically turn an expired PLANNING lease into UNKNOWN using Redis TIME", async () => {
+  const transact = d36Transaction();
+  const input = await d36StartInput({ nonce: "5".repeat(64) });
+  const scripts = [];
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    productionReadiness: D36_PRODUCTION_READINESS,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      if (body[0] === "PING") return { ok: true, json: async () => ({ result: "PONG" }) };
+      if (body[0] === "EVAL") {
+        scripts.push(String(body[1]));
+        if (String(body[1]).includes("snapshot_sha")) return { ok: true, json: async () => ({ result: ["UNKNOWN", "", "0", "1788796800000"] }) };
+        if (String(body[1]).includes("HGETALL")) {
+          return {
+            ok: true,
+            json: async () => ({
+              result: [
+                "FOUND",
+                "status", "UNKNOWN",
+                "app_scope", D36_APP_SCOPE,
+                "bootstrap_nonce", input.bootstrap_nonce,
+                "input_sha", input.input_sha256,
+                "recoverable_until_ms", "1788796800000",
+              ],
+            }),
+          };
+        }
+      }
+      if (body[0] === "HGETALL") {
+        return {
+          ok: true,
+          json: async () => ({
+            result: [
+              "status", "PLANNING",
+              "planner_lease_until_ms", "1",
+              "app_scope", D36_APP_SCOPE,
+              "bootstrap_nonce", input.bootstrap_nonce,
+              "input_sha", input.input_sha256,
+              "recoverable_until_ms", "1788796800000",
+            ],
+          }),
+        };
+      }
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    const startResult = await transact(input, D36_SETTINGS, {
+      imageLedger,
+      nowMs: 1_788_192_000_000,
+      accessExpiresAtMs: 1_788_192_360_000,
+      appScopeId: D36_APP_SCOPE,
+    });
+    assert.equal(startResult.status, "UNKNOWN");
+    const discoverResult = await transact(
+      { mode: "DISCOVER", bootstrap_nonce: input.bootstrap_nonce, input_sha256: input.input_sha256 },
+      D36_SETTINGS,
+      { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE },
+    );
+    assert.equal(discoverResult.status, "UNKNOWN");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const claimScript = scripts.find((script) => script.includes("snapshot_sha"));
+  const discoverScript = scripts.find((script) => script.includes("HGETALL"));
+  for (const script of [claimScript, discoverScript]) {
+    assert.match(String(script), /redis\.call\(['"]TIME['"]\)/);
+    assert.match(String(script), /PLANNING/);
+    assert.match(String(script), /planner_lease_until_ms/);
+    assert.match(String(script), /HSET[\s\S]*UNKNOWN/);
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 STEP uses the real adapter's app-scope-only by-run read while external DISCOVER remains nonce+input bound", async () => {
+  const transact = d36Transaction();
+  const fixture = new FakeD36ImageLedger();
+  const run = fixture.seedReadyRun({ runId: "image-run-d36-real-adapter-read" });
+  const input = d36StepInput(run);
+  const redisCommands = [];
+  const record = [
+    "status", "READY",
+    "app_scope", D36_APP_SCOPE,
+    "bootstrap_nonce", run.bootstrapNonce,
+    "input_sha", run.inputSha256,
+    "recoverable_until_ms", String(Date.parse(run.recoverableUntil)),
+    "snapshot_json", JSON.stringify(run.snapshot),
+    "manifest_json", JSON.stringify(run.referenceManifest),
+    "run_json", JSON.stringify(run.compactRun),
+    "checkpoint_json", JSON.stringify(run.checkpointPreimage),
+    "checkpoint_sha", run.checkpointPreimageSha256,
+    "logical_step_id", run.logicalStepId,
+  ];
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    productionReadiness: D36_PRODUCTION_READINESS,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      redisCommands.push(body);
+      if (body[0] === "PING") return { ok: true, json: async () => ({ result: "PONG" }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("HGETALL")) return { ok: true, json: async () => ({ result: ["FOUND", ...record] }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("reservation_count")) return { ok: true, json: async () => ({ result: ["BUDGET_EXHAUSTED"] }) };
+      if (body[0] === "HGETALL") return { ok: true, json: async () => ({ result: record }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, {
+        imageLedger,
+        nowMs: 1_788_192_000_000,
+        accessExpiresAtMs: 1_788_192_360_000,
+        appScopeId: D36_APP_SCOPE,
+      }),
+      /BUDGET_EXHAUSTED/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const byRunRead = redisCommands.find((body) => body[0] === "EVAL" && String(body[1]).includes("HGETALL"));
+  assert.ok(byRunRead, "STEP must use the adapter's atomic by-run read");
+  assert.deepEqual(byRunRead.slice(-4), [D36_APP_SCOPE, "", "", "0"]);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 START durably claims, materializes and reads references, then claims planner before planner upstream", async () => {
+  const transact = d36Transaction();
+  const events = [];
+  const imageLedger = new FakeD36ImageLedger({ events });
+  const input = await d36StartInput();
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    events.push("provider:planner");
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: [d36PlannerPage()] }) }] }) };
+  };
+  try {
+    const result = await transact(input, D36_SETTINGS, {
+      imageLedger,
+      nowMs: 1_788_192_000_000,
+      accessExpiresAtMs: 1_788_192_000_000 + 360_000,
+      appScopeId: D36_APP_SCOPE,
+    });
+    assert.equal(result.status, "READY");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 1);
+  assertOrdered(events, [
+    "ledger:readiness",
+    "ledger:claimStart",
+    "ledger:putRunAsset",
+    "ledger:readRunAsset",
+    "ledger:claimPlanner",
+    "provider:planner",
+    "ledger:commitPlanner",
+  ]);
+});
+
+test("D36 same nonce and input DISCOVER reads cached READY with one planner while a different input hash conflicts", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const input = await d36StartInput({ nonce: "b".repeat(64) });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: [d36PlannerPage()] }) }] }) };
+  };
+  try {
+    const ready = await transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE });
+    const discovered = await transact(
+      { mode: "DISCOVER", bootstrap_nonce: input.bootstrap_nonce, input_sha256: input.input_sha256 },
+      D36_SETTINGS,
+      { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE },
+    );
+    assert.equal(ready.run_id, discovered.run_id);
+    assert.equal(discovered.status, "READY_DISCOVERY");
+    assert.equal(discovered.cached, true);
+
+    const conflicting = await d36StartInput({ nonce: input.bootstrap_nonce, operationOverrides: { mutation_epoch: 2 } });
+    await assert.rejects(
+      () => transact(conflicting, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_002_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /BOOTSTRAP.*CONFLICT|INPUT.*CONFLICT/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 1);
+});
+
+test("D36 paid capability with less than 270 seconds remaining stops before ledger claim and Provider", async () => {
+  const transact = d36Transaction();
+  const events = [];
+  const imageLedger = new FakeD36ImageLedger({ events });
+  const input = await d36StartInput({ nonce: "c".repeat(64) });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_269_999, appScopeId: D36_APP_SCOPE }),
+      /EXPIRY_WINDOW_TOO_SHORT/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+  assert.equal(events.includes("ledger:claimStart"), false);
+});
+
+test("D36 STEP reserves one logical action; an alternate nonce cannot enter the image upstream", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const run = imageLedger.seedReadyRun();
+  const input = d36StepInput(run);
+  let upstreamCalls = 0;
+  let announceStarted;
+  let releaseUpstream;
+  const started = new Promise((resolve) => { announceStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseUpstream = resolve; });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    announceStarted();
+    await gate;
+    throw new Error("FAKE_D36_IMAGE_PROVIDER_FAILURE");
+  };
+  try {
+    const first = transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE });
+    await started;
+    await assert.rejects(
+      () => transact({ ...input, attempt_nonce: "f".repeat(64) }, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /NONCE.*CONFLICT|IMAGE_STEP_IN_FLIGHT/,
+    );
+    releaseUpstream();
+    await assert.rejects(first, /FAKE_D36_IMAGE_PROVIDER_FAILURE|IMAGE_STEP/);
+  } finally {
+    releaseUpstream?.();
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 1);
+});
+
+test("D36 lost step commit is reused only after committed readback and never repeats Provider", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger({ commitMode: "apply-then-throw-once" });
+  const run = imageLedger.seedReadyRun({ runId: "image-run-d36-commit-loss" });
+  const input = d36StepInput(run);
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("FAKE_D36_COMMITTED_PROVIDER_ERROR"); };
+  let firstCode = "";
+  try {
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      (error) => { firstCode = error.message; return /FAKE_D36_COMMITTED_PROVIDER_ERROR|IMAGE_STEP/.test(firstCode); },
+    );
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      (error) => error.message === firstCode,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 1);
+});
+
+test("D36 expired in-flight STEP freezes UNKNOWN and never permits takeover", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const run = imageLedger.seedReadyRun({ runId: "image-run-d36-lease-expired" });
+  const input = d36StepInput(run);
+  imageLedger.seedInflightStep(input, { reservedAtMs: 1_788_191_000_000 });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /IMAGE_STEP_UNKNOWN|UNKNOWN/,
+    );
+    await assert.rejects(
+      () => transact({ ...input, attempt_nonce: "f".repeat(64) }, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /IMAGE_STEP_UNKNOWN|UNKNOWN/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 missing or corrupt reference bytes fail before planner upstream", async () => {
+  const transact = d36Transaction();
+  const validBytes = await d36ReferenceBytes();
+  const missing = await d36StartInput({ nonce: "d".repeat(64), includeMedia: false, referenceBytes: validBytes });
+  const corruptBytes = Buffer.from(validBytes);
+  corruptBytes[Math.floor(corruptBytes.length / 2)] ^= 0xff;
+  const corrupt = await d36StartInput({ nonce: "e".repeat(64), referenceBytes: corruptBytes, manifestSha: missing.reference_manifest[0].sha256 });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => transact(missing, D36_SETTINGS, { imageLedger: new FakeD36ImageLedger(), nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /REFERENCE.*MISSING|IMAGE_ASSET_MISSING/,
+    );
+    await assert.rejects(
+      () => transact(corrupt, D36_SETTINGS, { imageLedger: new FakeD36ImageLedger(), nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /HASH_MISMATCH|REFERENCE.*CORRUPT|IMAGE_ASSET_HASH_MISMATCH/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 readiness drift in eviction, auto-upgrade, foreign keys, usage or calibration closes the lane", async () => {
+  const transact = d36Transaction();
+  const input = await d36StartInput({ nonce: "1".repeat(64) });
+  const cases = [
+    { eviction: "allkeys-lru" },
+    { autoUpgrade: "on" },
+    { foreignKeys: 1 },
+    { usage: "UNKNOWN" },
+    { calibration: "UNKNOWN" },
+  ];
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    for (const readiness of cases) {
+      await assert.rejects(
+        () => transact(input, D36_SETTINGS, { imageLedger: new FakeD36ImageLedger({ readiness }), nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+        /IMAGE_LEDGER_PRODUCTION_NOT_READY/,
+      );
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 exact assets are content-addressed inside one run but never physically shared across runs", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const bytes = await d36ReferenceBytes();
+  const first = await d36StartInput({ nonce: "2".repeat(64), referenceBytes: bytes });
+  const second = await d36StartInput({ nonce: "3".repeat(64), referenceBytes: bytes });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: [d36PlannerPage()] }) }] }) };
+  };
+  try {
+    const one = await transact(first, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE });
+    const two = await transact(second, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE });
+    assert.notEqual(one.run_id, two.run_id);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const sha = first.reference_manifest[0].sha256;
+  const matching = [...imageLedger.assets.keys()].filter((key) => key.endsWith(`:${sha}`));
+  assert.equal(matching.length, 2);
+  assert.notEqual(matching[0], matching[1]);
+  assert.equal(upstreamCalls, 2);
+});
+
+test("D36 real adapter atomically inventories every meta, asset, and step physical-key creation", async () => {
+  const commands = [];
+  const bytes = await d36ReferenceBytes();
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const manifest = { schema: "xiaoshimei.media-asset-manifest.v1", media_ref: `xiaoshimei-media://sha256/${sha256}`, sha256, size_bytes: bytes.length, mime: "image/jpeg", name: "inventory asset", width: 96, height: 128 };
+  const runId = "images-2026-09-01T00-00-00-000Z-1a2b3c4d";
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body[0] === "EVAL" && String(body[1]).includes("snapshot_sha")) return { ok: true, json: async () => ({ result: ["MATERIALIZING", "", "0", "1788796800000"] }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("CAS_CONFLICT")) return { ok: true, json: async () => ({ result: ["STORED"] }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("reservation_count")) return { ok: true, json: async () => ({ result: ["RESERVED", "step-owner", "1"] }) };
+      if (body[0] === "GET") return { ok: true, json: async () => ({ result: bytes.toString("base64") }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  await imageLedger.claimStart({ runId, appScopeId: D36_APP_SCOPE, bootstrapNonce: "6".repeat(64), inputSha256: "7".repeat(64), snapshot: { schema: "snapshot" }, referenceManifest: [manifest], accessExpiresAtMs: 1_788_192_360_000 });
+  await imageLedger.putRunAsset({ runId, manifest, bytes });
+  await imageLedger.reserveStep({ runId, checkpointPreimageSha256: "8".repeat(64), logicalStepId: "render-job-01", attemptNonce: "9".repeat(64), accessExpiresAtMs: 1_788_192_720_000 });
+
+  const claim = commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("snapshot_sha"));
+  const asset = commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("CAS_CONFLICT"));
+  const step = commands.find((body) => body[0] === "EVAL" && String(body[1]).includes("required_remaining"));
+  assert.equal(claim[2], "2");
+  assert.equal(asset[2], "3");
+  assert.equal(step[2], "3");
+  for (const command of [claim, asset, step]) {
+    assert.match(String(command[1]), /SADD/);
+    assert.match(String(command[1]), /inventory_count|xiaoshimei\.d36-key-inventory\.v1/);
+  }
+  assert.match(String(asset[1]), /redis\.call\(['"]SET['"], KEYS\[3\]/);
+  assert.match(String(step[1]), /redis\.call\(['"]HSET['"], KEYS\[3\]/);
+  assert.match(String(step[1]), /PEXPIREAT[\s\S]*KEYS\[3\][\s\S]*recoverable_until/);
+  assert.equal(asset[3].replace(/:meta$/, ":inventory"), asset[4]);
+  assert.equal(step[3].replace(/:meta$/, ":inventory"), step[4]);
+});
+
+test("D36 reserve resolves exact committed or late action cache before current cursor and rejects a different attempt", async () => {
+  const commands = [];
+  const cachedResponse = { status: "PARTIAL", run_id: "cached-run" };
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body[0] === "EVAL") return { ok: true, json: async () => ({ result: ["CACHED", "COMMITTED"] }) };
+      if (body[0] === "HGET") return { ok: true, json: async () => ({ result: JSON.stringify(cachedResponse) }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  const reserved = await imageLedger.reserveStep({ runId: "images-2026-09-01T00-00-00-000Z-acde1234", checkpointPreimageSha256: "a".repeat(64), logicalStepId: "render-job-01", attemptNonce: "b".repeat(64), accessExpiresAtMs: 1_788_192_720_000 });
+  assert.equal(reserved.status, "CACHED");
+  assert.equal(reserved.cacheKind, "COMMITTED");
+  assert.deepEqual(reserved.cachedResponse, cachedResponse);
+  const lua = String(commands.find((body) => body[0] === "EVAL")[1]);
+  const oldActionIndex = lua.indexOf("EXISTS', KEYS[3]");
+  const runCursorIndex = lua.indexOf("HGET', KEYS[1], 'checkpoint_sha'");
+  assert.ok(oldActionIndex >= 0 && runCursorIndex > oldActionIndex, "existing action must be resolved before current run cursor");
+  assert.match(lua, /attempt_nonce'[\s\S]*NONCE_CONFLICT/);
+  assert.match(lua, /action_status == 'COMMITTED' or action_status == 'LATE_RESULT'[\s\S]*CACHED/);
+});
+
+test("D36 committed replay returns the old exact cache even after the run cursor has advanced", async () => {
+  const ledger = new FakeD36ImageLedger();
+  const run = ledger.seedReadyRun({ runId: "image-run-d36-advanced-cursor-cache" });
+  const input = d36StepInput(run);
+  const cachedResponse = {
+    schema: "xiaoshimei.image-generation-response.v1",
+    status: "READY",
+    bootstrap_nonce: run.bootstrapNonce,
+    input_sha256: run.inputSha256,
+    run_id: run.runId,
+    checkpoint_preimage: structuredClone(run.checkpointPreimage),
+    checkpoint_preimage_sha256: run.checkpointPreimageSha256,
+    logical_step_id: run.logicalStepId,
+    progress: { state: "READY" },
+    assets: [],
+    media_delta: [],
+    error: null,
+    cached: false,
+    recoverable_until: run.recoverableUntil,
+    upstream_calls: 1,
+  };
+  ledger.reserveStep = async () => ({ status: "CACHED", cacheKind: "COMMITTED", cachedResponse });
+  run.checkpointPreimageSha256 = "f".repeat(64);
+  run.logicalStepId = "render-job-02";
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    const replay = await d36Transaction()(input, D36_SETTINGS, { imageLedger: ledger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_720_000, appScopeId: D36_APP_SCOPE });
+    assert.equal(replay.status, "READY");
+    assert.equal(replay.cached, true);
+    assert.equal(replay.upstream_calls, 0);
+    assert.equal(replay.checkpoint_preimage_sha256, cachedResponse.checkpoint_preimage_sha256);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 late owner commit stores a recovery-only result, keeps run UNKNOWN, and returns only non-actionable LATE_RESULT on replay", async () => {
+  const runId = "images-2026-09-01T00-00-00-000Z-feed1234";
+  const checkpointSha = "c".repeat(64);
+  const logicalStepId = "render-job-01";
+  const attemptNonce = "d".repeat(64);
+  const actionId = createHash("sha256").update(`xiaoshimei-image-step-v1\0${runId}\0${checkpointSha}\0${logicalStepId}`).digest("hex");
+  const response = { status: "PARTIAL", run_id: runId, upstream_calls: 1 };
+  const commands = [];
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body[0] === "EVAL") return { ok: true, json: async () => ({ result: ["LATE_RESULT"] }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  const late = await imageLedger.commitStep({ runId, checkpointPreimageSha256: checkpointSha, logicalStepId, attemptNonce, actionId, ownerToken: "original-owner", fence: 1, compactRun: { run_id: runId }, checkpointPreimage: { schema: "checkpoint" }, nextCheckpointPreimageSha256: "e".repeat(64), nextLogicalStepId: "render-job-02", response, status: "PARTIAL" });
+  assert.equal(late.status, "LATE_RESULT");
+  const commitLua = String(commands.find((body) => body[0] === "EVAL")[1]);
+  const lateBranch = commitLua.slice(commitLua.indexOf("if now_ms >"), commitLua.indexOf("return {'LATE_RESULT'}") + 24);
+  assert.match(lateBranch, /status', 'LATE_RESULT'/);
+  assert.match(lateBranch, /result_sha'[\s\S]*result_json'[\s\S]*recovery_only', '1'/);
+  assert.match(lateBranch, /KEYS\[1\], 'status', 'UNKNOWN'/);
+  assert.doesNotMatch(lateBranch, /checkpoint_json|run_json/);
+
+  const fixture = new FakeD36ImageLedger();
+  const run = fixture.seedReadyRun({ runId: "image-run-d36-late-replay" });
+  const stepInput = d36StepInput(run);
+  fixture.reserveStep = async () => ({ status: "CACHED", cacheKind: "LATE_RESULT", cachedResponse: { ...response, status: "PARTIAL" } });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    const replay = await d36Transaction()(stepInput, D36_SETTINGS, { imageLedger: fixture, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_720_000, appScopeId: D36_APP_SCOPE });
+    assert.equal(replay.status, "LATE_RESULT");
+    assert.equal(replay.progress.recovery_only, true);
+    assert.deepEqual(replay.assets, []);
+    assert.deepEqual(replay.media_delta, []);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 real reserve uses Redis TIME and aligned run/inventory/step TTL gates before any paid upstream", async () => {
+  const fixture = new FakeD36ImageLedger();
+  const run = fixture.seedReadyRun({ runId: "image-run-d36-expiry-margin" });
+  const input = d36StepInput(run);
+  const redisCommands = [];
+  const record = [
+    "status", "READY", "app_scope", D36_APP_SCOPE, "bootstrap_nonce", run.bootstrapNonce, "input_sha", run.inputSha256,
+    "recoverable_until_ms", String(Date.parse(run.recoverableUntil)), "snapshot_json", JSON.stringify(run.snapshot),
+    "manifest_json", JSON.stringify(run.referenceManifest), "run_json", JSON.stringify(run.compactRun),
+    "checkpoint_json", JSON.stringify(run.checkpointPreimage), "checkpoint_sha", run.checkpointPreimageSha256,
+    "logical_step_id", run.logicalStepId,
+  ];
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    productionReadiness: D36_PRODUCTION_READINESS,
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      redisCommands.push(body);
+      if (body[0] === "PING") return { ok: true, json: async () => ({ result: "PONG" }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("HGETALL")) return { ok: true, json: async () => ({ result: ["FOUND", ...record] }) };
+      if (body[0] === "EVAL" && String(body[1]).includes("reservation_count")) return { ok: true, json: async () => ({ result: ["RUN_EXPIRY_WINDOW_TOO_SHORT"] }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => d36Transaction()(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_720_000, appScopeId: D36_APP_SCOPE }),
+      /RUN_EXPIRY_WINDOW_TOO_SHORT/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  const reserve = redisCommands.find((body) => body[0] === "EVAL" && String(body[1]).includes("reservation_count"));
+  const lua = String(reserve[1]);
+  assert.match(lua, /redis\.call\(['"]TIME['"]\)/);
+  assert.match(lua, /required_remaining = tonumber\(ARGV\[5\]\) \+ tonumber\(ARGV\[6\]\)/);
+  assert.match(lua, /PTTL', KEYS\[1\]/);
+  assert.match(lua, /PTTL', KEYS\[2\]/);
+  assert.match(lua, /PEXPIREAT', KEYS\[3\], recoverable_until/);
+  assert.match(lua, /PEXPIREAT', KEYS\[2\], recoverable_until/);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 authenticated raw asset route returns exact private bytes and rejects unauthenticated or forged membership without Provider", async () => {
+  const env = accessEnv();
+  const nowMs = 1_788_192_000_000;
+  const accessConfig = inspectServerAccessConfig(env);
+  const session = mintAccessSession(accessConfig, { nowMs, sessionId: "session-d36-raw-asset" });
+  const cookie = `${session.cookieName}=${session.token}`;
+  const imageLedger = new FakeD36ImageLedger();
+  const run = imageLedger.seedReadyRun({ runId: "image-run-d36-raw-asset" });
+  run.appScopeId = accessConfig.appScope;
+  const bytes = await d36ReferenceBytes();
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const manifest = { schema: "xiaoshimei.media-asset-manifest.v1", media_ref: `xiaoshimei-media://sha256/${sha256}`, sha256, size_bytes: bytes.length, mime: "image/jpeg", name: "raw asset", width: 96, height: 128 };
+  await imageLedger.putRunAsset({ runId: run.runId, manifest, bytes });
+  const rawHandler = createProviderHandler({ env, nowMs, imageLedger });
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  const header = (response, name) => Object.entries(response.headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  try {
+    const { origin: _normalGetOmitsOrigin, ...browserGetHeaders } = sameOriginHeaders(env, { cookie });
+    const accepted = responseProbe();
+    await rawHandler({ method: "GET", query: { route: `assets/${run.runId}/${sha256}` }, headers: browserGetHeaders }, accepted);
+    assert.equal(accepted.statusCode, 200);
+    assert.deepEqual(Buffer.from(accepted.body), bytes);
+    assert.equal(header(accepted, "content-type"), "image/jpeg");
+    assert.equal(Number(header(accepted, "content-length")), bytes.length);
+    assert.equal(header(accepted, "x-content-sha256"), sha256);
+    assert.match(String(header(accepted, "cache-control")), /private/);
+    assert.match(String(header(accepted, "cache-control")), /no-store/);
+    assert.equal(header(accepted, "x-content-type-options"), "nosniff");
+    assert.equal(header(accepted, "access-control-allow-origin"), undefined);
+
+    for (const headers of [
+      sameOriginHeaders(env, { cookie, origin: "https://attacker.example" }),
+      sameOriginHeaders(env, { cookie, "sec-fetch-site": "cross-site" }),
+    ]) {
+      const rejectedRead = responseProbe();
+      await rawHandler({ method: "GET", query: { route: `assets/${run.runId}/${sha256}` }, headers }, rejectedRead);
+      assert.equal(rejectedRead.statusCode, 403);
+    }
+
+    const anonymous = responseProbe();
+    const { origin: _anonymousGetOmitsOrigin, ...anonymousGetHeaders } = sameOriginHeaders(env);
+    await rawHandler({ method: "GET", query: { route: `assets/${run.runId}/${sha256}` }, headers: anonymousGetHeaders }, anonymous);
+    assert.equal(anonymous.statusCode, 401);
+
+    const forged = responseProbe();
+    await rawHandler({ method: "GET", query: { route: `assets/${run.runId}/${"f".repeat(64)}` }, headers: sameOriginHeaders(env, { cookie }) }, forged);
+    assert.notEqual(forged.statusCode, 200);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+  assert.equal(imageLedger.readAssetCalls, 2);
+});
+
+test("D36 seventh paid image action is rejected before Provider", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const run = imageLedger.seedReadyRun({ runId: "image-run-d36-budget", paidCalls: 6 });
+  const input = d36StepInput(run);
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    await assert.rejects(
+      () => transact(input, D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE }),
+      /IMAGE_CALL_BUDGET_EXHAUSTED|BUDGET_EXHAUSTED/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test("D36 physical capacity releases only after exact DEL and absence readback", async () => {
+  const bytes = await d36ReferenceBytes();
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const blocked = new FakeD36ImageLedger({ retainPhysicalKeys: true });
+  const blockedRun = blocked.seedReadyRun({ runId: "image-run-d36-cleanup-blocked" });
+  blockedRun.status = "UNKNOWN";
+  const manifest = { schema: "xiaoshimei.media-asset-manifest.v1", media_ref: `xiaoshimei-media://sha256/${sha256}`, sha256, size_bytes: bytes.length, mime: "image/jpeg", name: "cleanup asset", width: 96, height: 128 };
+  await blocked.putRunAsset({ runId: blockedRun.runId, manifest, bytes });
+  const retained = await blocked.cleanupRun({ runId: blockedRun.runId });
+  assert.equal(retained.released, false);
+  assert.equal(blocked.releasedRuns.has(blockedRun.runId), false);
+  assertOrdered(blocked.events, ["ledger:cleanup:DEL", "ledger:cleanup:ABSENCE_READBACK"]);
+  assert.equal(blocked.events.includes("ledger:cleanup:RELEASE_CAPACITY"), false);
+
+  const released = new FakeD36ImageLedger();
+  const releasedRun = released.seedReadyRun({ runId: "image-run-d36-cleanup-released" });
+  releasedRun.status = "COMPLETE";
+  await released.putRunAsset({ runId: releasedRun.runId, manifest, bytes });
+  const result = await released.cleanupRun({ runId: releasedRun.runId });
+  assert.equal(result.released, true);
+  assertOrdered(released.events, ["ledger:cleanup:DEL", "ledger:cleanup:ABSENCE_READBACK", "ledger:cleanup:RELEASE_CAPACITY"]);
+});
+
+test("D36 Upstash cleanup adapter performs physical DEL and absence readback before reporting capacity released", async () => {
+  const commands = [];
+  const runId = "images-2026-09-01T00-00-00-000Z-deadbeef";
+  const root = `xiaoshimei:image-d36:{${runId}}`;
+  const keys = [`${root}:meta`, `${root}:inventory`, `${root}:asset:${"a".repeat(64)}`].sort();
+  const imageLedger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      const command = body[0];
+      if (command === "EXISTS") return { ok: true, json: async () => ({ result: 0 }) };
+      if (command === "EVAL") return { ok: true, json: async () => ({ result: ["FROZEN", ...keys] }) };
+      if (command === "SCAN") return { ok: true, json: async () => ({ result: ["0", [...keys].reverse()] }) };
+      if (command === "DEL") return { ok: true, json: async () => ({ result: keys.length }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${command}`);
+    },
+  });
+  assert.equal(typeof imageLedger.cleanupRun, "function", "Upstash image ledger must expose cleanupRun");
+  const result = await imageLedger.cleanupRun({ runId });
+  assert.equal(result.status, "ABSENT_READBACK");
+  assert.equal(result.released, true);
+  assert.deepEqual(result.keys, keys);
+
+  const flatCommands = commands.map((body) => body[0]);
+  const delIndex = flatCommands.indexOf("DEL");
+  const existsIndex = flatCommands.indexOf("EXISTS");
+  const lua = commands.filter((body) => body[0] === "EVAL").map((body) => String(body[1])).join("\n");
+  const luaDel = lua.search(/redis\.call\(['\"]DEL['\"]/);
+  const luaExists = lua.search(/redis\.call\(['\"]EXISTS['\"]/);
+  const separateProof = delIndex >= 0 && existsIndex > delIndex;
+  const atomicProof = luaDel >= 0 && luaExists > luaDel;
+  assert.equal(separateProof || atomicProof, true, "cleanup must prove DEL precedes physical absence readback");
+  assert.equal(flatCommands.filter((command) => command === "EXISTS").length, keys.length);
+});
+
+test("D36 Upstash cleanup freezes only terminal runs and refuses missing or physically incomplete inventory without DEL", async () => {
+  const runId = "images-2026-09-01T00-00-00-000Z-facecafe";
+  const root = `xiaoshimei:image-d36:{${runId}}`;
+  const meta = `${root}:meta`;
+  const inventory = `${root}:inventory`;
+  for (const refusal of ["INVENTORY_MISSING", "NON_TERMINAL"]) {
+    const commands = [];
+    const ledger = createUpstashImageLedger({
+      url: "https://ledger.example",
+      token: "upstash-token-for-test",
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        commands.push(body);
+        return { ok: true, json: async () => ({ result: [refusal] }) };
+      },
+    });
+    const result = await ledger.cleanupRun({ runId });
+    assert.equal(result.status, refusal);
+    assert.equal(result.released, false);
+    assert.equal(commands.some((body) => body[0] === "DEL"), false);
+  }
+
+  const commands = [];
+  const ledger = createUpstashImageLedger({
+    url: "https://ledger.example",
+    token: "upstash-token-for-test",
+    fetchImpl: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      commands.push(body);
+      if (body[0] === "EVAL") return { ok: true, json: async () => ({ result: ["FROZEN", meta, inventory] }) };
+      if (body[0] === "SCAN") return { ok: true, json: async () => ({ result: ["0", [meta, inventory, `${root}:rogue`]] }) };
+      throw new Error(`UNEXPECTED_REDIS_COMMAND:${body[0]}`);
+    },
+  });
+  const incomplete = await ledger.cleanupRun({ runId });
+  assert.equal(incomplete.status, "INVENTORY_INCOMPLETE");
+  assert.equal(incomplete.released, false);
+  assert.equal(commands.some((body) => body[0] === "DEL"), false);
+  const freezeLua = String(commands.find((body) => body[0] === "EVAL")[1]);
+  assert.match(freezeLua, /COMPLETE'[\s\S]*UNKNOWN'[\s\S]*CLEANUP_FROZEN/);
+  assert.match(freezeLua, /inventory_count/);
+  assert.match(freezeLua, /SMEMBERS/);
+});
+
 function imageLedgerFixture({ failedCalls = 0 } = {}) {
   const body = "这是一段经过用户确认的完整发布正文。".repeat(24);
   const draft = {
@@ -167,6 +1429,28 @@ function accessEnv(code = "open-sesame") {
     XIAOSHIMEI_SESSION_SECRET: "session-secret-that-is-at-least-thirty-two-characters",
     XIAOSHIMEI_APP_ORIGIN: "https://studio.example",
   };
+}
+
+function sameOriginHeaders(env, extra = {}) {
+  const origin = new URL(env.XIAOSHIMEI_APP_ORIGIN);
+  return {
+    origin: origin.origin,
+    host: origin.host,
+    "x-forwarded-host": origin.host,
+    "x-forwarded-proto": "https",
+    "sec-fetch-site": "same-origin",
+    ...extra,
+  };
+}
+
+function setCookieValues(response) {
+  const value = response.headers["set-cookie"];
+  if (value == null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function cookiePairFromSetCookie(value) {
+  return String(value).split(";", 1)[0];
 }
 
 test("cloud provider health is public but never claims a stored key", async () => {
@@ -215,7 +1499,7 @@ test("cloud provider can use one server-managed production key without exposing 
   }
 });
 
-test("server-managed access login mints only a signed __Host session after exact-origin admission", async () => {
+test("server-managed access login mints a canonical token-bound __Host slot after exact same-origin admission", async () => {
   const env = accessEnv();
   const nowMs = Date.now();
   const accessHandler = createProviderHandler({ env, nowMs, sessionId: "session-id-for-test" });
@@ -231,61 +1515,186 @@ test("server-managed access login mints only a signed __Host session after exact
   assert.equal(JSON.stringify(health.body).includes(env.XIAOSHIMEI_ACCESS_CODE_SHA256), false);
 
   const denied = responseProbe();
-  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: { origin: "https://attacker.example" }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, denied);
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env, { origin: "https://attacker.example" }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, denied);
   assert.equal(denied.statusCode, 403);
 
   const wrongCode = responseProbe();
-  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN }, body: { code: "wrong" } }, wrongCode);
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env), body: { code: "wrong" } }, wrongCode);
   assert.equal(wrongCode.statusCode, 401);
   assert.equal(wrongCode.headers["set-cookie"], undefined);
 
   const login = responseProbe();
-  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN }, body: { code: "open-sesame" } }, login);
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env), body: { code: "open-sesame" } }, login);
   assert.equal(login.statusCode, 200);
   assert.equal(login.body.authenticated, true);
-  const setCookie = login.headers["set-cookie"];
-  assert.match(setCookie, new RegExp(`^${ACCESS_SESSION_COOKIE}=`));
+  const setCookie = setCookieValues(login).at(-1);
+  assert.match(setCookie, new RegExp(`^${ACCESS_SESSION_COOKIE}[0-9a-f]{32}=`));
   assert.match(setCookie, /; Path=\//);
   assert.match(setCookie, /; HttpOnly/);
   assert.match(setCookie, /; Secure/);
   assert.match(setCookie, /; SameSite=Strict/);
   assert.match(setCookie, /; Max-Age=43200/);
-  assert.match(setCookie, /; Expires=/);
+  assert.equal(setCookie.includes("Expires="), false);
   assert.equal(setCookie.includes("Domain="), false);
 
-  const cookie = setCookie.split(";", 1)[0];
+  const cookie = cookiePairFromSetCookie(setCookie);
   const authenticated = responseProbe();
   await accessHandler({ method: "GET", query: { route: "config" }, headers: { cookie } }, authenticated);
   assert.equal(authenticated.body.authenticated, true);
 });
 
-test("server-managed business admission rejects session, disabled route, and absent Redis before body parsing or Provider", async () => {
+test("access tokens are canonical, app/origin bound, name bound, and header order independent", async () => {
+  const env = accessEnv();
+  const nowMs = Date.now();
+  const accessConfig = inspectServerAccessConfig(env);
+  const first = mintAccessSession(accessConfig, { nowMs, sessionId: "session-canonical-first" });
+  const later = mintAccessSession(accessConfig, { nowMs: nowMs + 1_000, sessionId: "session-canonical-later" });
+  assert.equal(verifyAccessSession(first.token, accessConfig, { nowMs }), true);
+  assert.equal(verifyAccessSession(`${first.token}=`, accessConfig, { nowMs }), false);
+  assert.equal(verifyAccessSession(first.token.replace(".", "=."), accessConfig, { nowMs }), false);
+  assert.equal(verifyAccessSession(first.token, inspectServerAccessConfig({ ...env, XIAOSHIMEI_APP_ORIGIN: "https://other.example" }), { nowMs }), false);
+
+  const validFirst = `${first.cookieName}=${first.token}`;
+  const validLater = `${later.cookieName}=${later.token}`;
+  const forgedSameName = `${first.cookieName}=${first.token.slice(0, -1)}x`;
+  for (const cookie of [
+    `${forgedSameName}; ${validFirst}; ${validLater}`,
+    `${validLater}; ${validFirst}; ${forgedSameName}`,
+  ]) {
+    const inspected = inspectAccessSessionCandidates(cookie, accessConfig, { nowMs });
+    assert.equal(inspected.authenticated, true);
+    assert.equal(inspected.valid.length, 2);
+    assert.equal(inspected.preferred.token, later.token);
+    assert.equal(inspected.capabilityExpiresAtMs, later.expiresAt.getTime());
+  }
+
+  const mismatchedSuffix = later.cookieName.endsWith("0") ? "1" : "0";
+  const mismatchedName = `${later.cookieName.slice(0, -1)}${mismatchedSuffix}=${later.token}`;
+  assert.equal(inspectAccessSessionCandidates(mismatchedName, accessConfig, { nowMs }).authenticated, false);
+});
+
+test("GET config is a pure no-store readback for duplicate, overflow, and oversized Cookie headers", async () => {
+  const env = accessEnv();
+  const nowMs = Date.now();
+  const accessConfig = inspectServerAccessConfig(env);
+  const session = mintAccessSession(accessConfig, { nowMs, sessionId: "session-config-readback" });
+  const valid = `${session.cookieName}=${session.token}`;
+  const family = Array.from({ length: 17 }, (_, index) => `${ACCESS_SESSION_COOKIE}${String(index).padStart(32, "0")}=${index}`).join("; ");
+  const oversized = `other=${"x".repeat(8_193)}`;
+  const accessHandler = createProviderHandler({ env, nowMs });
+  for (const cookie of [valid, `${valid}; ${valid}`, family, oversized]) {
+    const response = responseProbe();
+    await accessHandler({ method: "GET", query: { route: "config" }, headers: { cookie } }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers["cache-control"], "no-store");
+    assert.equal(setCookieValues(response).length, 0);
+  }
+});
+
+test("correct-code login can bounded-clean 17 visible family groups while wrong code writes zero cookies", async () => {
+  const env = accessEnv();
+  const nowMs = Date.now();
+  const accessHandler = createProviderHandler({ env, nowMs, sessionId: "session-overflow-recovery" });
+  const family = Array.from({ length: 17 }, (_, index) => `${ACCESS_SESSION_COOKIE}${index.toString(16).padStart(32, "0")}=${index}`).join("; ");
+
+  const wrong = responseProbe();
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env, { cookie: family }), body: { code: "wrong" } }, wrong);
+  assert.equal(wrong.statusCode, 401);
+  assert.equal(setCookieValues(wrong).length, 0);
+
+  const recovered = responseProbe();
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env, { cookie: family }), body: { code: "open-sesame" } }, recovered);
+  assert.equal(recovered.statusCode, 200);
+  const writes = setCookieValues(recovered);
+  assert.equal(writes.length, 17);
+  assert.equal(writes.slice(0, -1).every((value) => /Max-Age=0/.test(value)), true);
+  assert.match(writes.at(-1), new RegExp(`^${ACCESS_SESSION_COOKIE}[0-9a-f]{32}=`));
+  assert.equal(/Max-Age=43200/.test(writes.at(-1)), true);
+});
+
+test("business admission enforces same-origin metadata and Cookie limits before body, ledger, or Provider", async () => {
+  const env = accessEnv();
+  const nowMs = Date.now();
+  const configValue = inspectServerAccessConfig(env);
+  const session = mintAccessSession(configValue, { nowMs, sessionId: "session-business-bounds" });
+  const valid = `${session.cookieName}=${session.token}`;
+  let ledgerCalls = 0;
+  let upstreamCalls = 0;
+  const boundedHandler = createProviderHandler({
+    env,
+    nowMs,
+    imageLedger: async () => { ledgerCalls += 1; throw new Error("LEDGER_MUST_NOT_RUN"); },
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    for (const headers of [
+      { ...sameOriginHeaders(env, { cookie: valid }), "sec-fetch-site": "cross-site" },
+      { ...sameOriginHeaders(env, { cookie: valid }), host: "attacker.example" },
+      { ...sameOriginHeaders(env, { cookie: valid }), "x-forwarded-host": "attacker.example" },
+      { ...sameOriginHeaders(env, { cookie: valid }), "x-forwarded-proto": "http" },
+    ]) {
+      const response = responseProbe();
+      await boundedHandler({ method: "POST", query: { route: "generate-images" }, headers, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, response);
+      assert.equal(response.statusCode, 403);
+    }
+
+    const family = Array.from({ length: 17 }, (_, index) => `${ACCESS_SESSION_COOKIE}${index.toString(16).padStart(32, "0")}=${index}`).join("; ");
+    const tooMany = responseProbe();
+    await boundedHandler({ method: "POST", query: { route: "generate-images" }, headers: sameOriginHeaders(env, { cookie: family }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, tooMany);
+    assert.equal(tooMany.statusCode, 431);
+    assert.equal(tooMany.body.error, "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED");
+
+    const oversized = responseProbe();
+    await boundedHandler({ method: "POST", query: { route: "generate-images" }, headers: sameOriginHeaders(env, { cookie: `other=${"x".repeat(8_193)}` }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, oversized);
+    assert.equal(oversized.statusCode, 431);
+    assert.equal(oversized.body.error, "COOKIE_HEADER_TOO_LARGE");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(ledgerCalls, 0);
+  assert.equal(upstreamCalls, 0);
+});
+
+test("server-managed business admission rejects invalid bodies before Redis and absent Redis before Provider", async () => {
   const env = accessEnv();
   const nowMs = Date.now();
   const accessHandler = createProviderHandler({ env, nowMs, sessionId: "session-id-for-test" });
   const login = responseProbe();
-  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN }, body: { code: "open-sesame" } }, login);
-  const cookie = login.headers["set-cookie"].split(";", 1)[0];
+  await accessHandler({ method: "POST", query: { route: "access-session" }, headers: sameOriginHeaders(env), body: { code: "open-sesame" } }, login);
+  const cookie = cookiePairFromSetCookie(setCookieValues(login).at(-1));
   let upstreamCalls = 0;
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
   try {
     const crossOrigin = responseProbe();
-    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: { origin: "https://attacker.example", cookie }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, crossOrigin);
+    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: sameOriginHeaders(env, { origin: "https://attacker.example", cookie }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, crossOrigin);
     assert.equal(crossOrigin.statusCode, 403);
 
     const anonymous = responseProbe();
-    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, anonymous);
+    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: sameOriginHeaders(env), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, anonymous);
     assert.equal(anonymous.statusCode, 401);
     assert.equal(anonymous.body.error, "ACCESS_SESSION_REQUIRED");
 
     const candidates = responseProbe();
-    await accessHandler({ method: "POST", query: { route: "page-candidates" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN, cookie }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, candidates);
+    await accessHandler({ method: "POST", query: { route: "page-candidates" }, headers: sameOriginHeaders(env, { cookie }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, candidates);
     assert.equal(candidates.statusCode, 403);
     assert.equal(candidates.body.error, "SERVER_MANAGED_PAGE_CANDIDATES_DISABLED");
 
+    let malformedLedgerCalls = 0;
+    const parseFirstHandler = createProviderHandler({
+      env,
+      nowMs,
+      imageLedger: async () => { malformedLedgerCalls += 1; return new FakeD36ImageLedger(); },
+    });
+    const malformed = responseProbe();
+    await parseFirstHandler({ method: "POST", query: { route: "generate-images" }, headers: sameOriginHeaders(env, { cookie }), body: { schema: "wrong" } }, malformed);
+    assert.equal(malformed.statusCode, 400);
+    assert.equal(malformedLedgerCalls, 0);
+
+    const validImageBody = { schema: "xiaoshimei.image-generation-request.v1", input: await d36StartInput() };
     const images = responseProbe();
-    await accessHandler({ method: "POST", query: { route: "generate-images" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN, cookie }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, images);
+    await accessHandler({ method: "POST", query: { route: "generate-images" }, headers: sameOriginHeaders(env, { cookie }), body: validImageBody }, images);
     assert.equal(images.statusCode, 503);
     assert.equal(images.body.error, "IMAGE_LEDGER_CONFIGURATION_REQUIRED");
 
@@ -296,18 +1705,19 @@ test("server-managed business admission rejects session, disabled route, and abs
       ledgerFetchImpl: async () => { ledgerCalls += 1; return { ok: false, json: async () => ({ error: "DOWN" }) }; },
     });
     const ledgerDown = responseProbe();
-    await ledgerDownHandler({ method: "POST", query: { route: "generate-images" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN, cookie }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, ledgerDown);
+    await ledgerDownHandler({ method: "POST", query: { route: "generate-images" }, headers: sameOriginHeaders(env, { cookie }), body: validImageBody }, ledgerDown);
     assert.equal(ledgerDown.statusCode, 503);
-    assert.equal(ledgerDown.body.error, "IMAGE_LEDGER_UNAVAILABLE");
+    assert.equal(ledgerDown.body.error, "ARK_PROBE_FAILED");
+    assert.equal(ledgerDown.body.code, "IMAGE_LEDGER_UNAVAILABLE");
     assert.equal(ledgerCalls, 1);
 
     const forged = responseProbe();
-    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN, cookie: `${cookie}x` }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, forged);
+    await accessHandler({ method: "POST", query: { route: "text-draft" }, headers: sameOriginHeaders(env, { cookie: `${cookie}x` }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, forged);
     assert.equal(forged.statusCode, 401);
 
     const expiredHandler = createProviderHandler({ env, nowMs: nowMs + (ACCESS_SESSION_TTL_SECONDS + 1) * 1000 });
     const expired = responseProbe();
-    await expiredHandler({ method: "POST", query: { route: "text-draft" }, headers: { origin: env.XIAOSHIMEI_APP_ORIGIN, cookie }, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, expired);
+    await expiredHandler({ method: "POST", query: { route: "text-draft" }, headers: sameOriginHeaders(env, { cookie }), get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, expired);
     assert.equal(expired.statusCode, 401);
   } finally {
     globalThis.fetch = previousFetch;
@@ -594,21 +2004,56 @@ test("direct Upstash adapter sends only authenticated REST commands and fails cl
 });
 
 test("provider client honors a persisted STOP decision before issuing the next image step", async () => {
-  const fixture = imageLedgerFixture();
+  const stepInput = {
+    mode: "STEP",
+    run_id: "image-run-contract-0001",
+    checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: 1 },
+    checkpoint_preimage_sha256: "d".repeat(64),
+    logical_step_id: "render-page-2",
+    attempt_nonce: "e".repeat(64),
+  };
+  const mediaSha256 = "c".repeat(64);
+  const response = {
+    schema: "xiaoshimei.image-generation-response.v1",
+    status: "PARTIAL",
+    bootstrap_nonce: "a".repeat(64),
+    input_sha256: "b".repeat(64),
+    run_id: stepInput.run_id,
+    checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: 2 },
+    checkpoint_preimage_sha256: "f".repeat(64),
+    logical_step_id: "render-page-3",
+    progress: { completed_steps: 2, total_steps: 3 },
+    assets: [],
+    media_delta: [{
+      schema: "xiaoshimei.media-asset-manifest.v1",
+      media_ref: `xiaoshimei-media://sha256/${mediaSha256}`,
+      sha256: mediaSha256,
+      size_bytes: 3,
+      mime: "image/jpeg",
+      name: "第二页配图",
+      width: 3,
+      height: 4,
+      asset_url: `/api/provider/assets/${stepInput.run_id}/${mediaSha256}`,
+    }],
+    error: null,
+    cached: false,
+    recoverable_until: "2026-09-08T00:00:00.000Z",
+    upstream_calls: 1,
+  };
   let fetches = 0;
   const provider = createLocalHttpProvider({
     endpoint: "http://127.0.0.1:9909/generate",
     fetchImpl: async () => {
       fetches += 1;
-      return { ok: true, status: 200, json: async () => ({ schema: "xiaoshimei.public-image-step-response.v1", status: "PARTIAL", resume: { resume_run_id: fixture.run.run_id, resume_checkpoint: fixture.checkpoint, completed_image_steps: 0, total_image_steps: 1 } }) };
+      return { ok: true, status: 200, json: async () => response };
     },
   });
   await assert.rejects(
-    () => provider.generateImages({ draft: fixture.draft, image_count: 1 }, async () => ({ action: "STOP" })),
+    () => provider.generateImages(stepInput, async () => ({ action: "STOP" })),
     (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT"
       && error.checkpointPersisted === true
       && error.intentionalStop === true
-      && error.providerDetails?.resume_run_id === fixture.run.run_id,
+      && error.providerDetails?.run_id === stepInput.run_id,
   );
   assert.equal(fetches, 1);
 });
