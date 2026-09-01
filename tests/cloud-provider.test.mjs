@@ -933,6 +933,18 @@ test("D36 attestor binds the retained audit slice, signs exact control facts, an
   assert.equal(fixture.state.capacity.reserved_bytes, 0);
 });
 
+test("D36 attestor transports an eight-megabyte calibration in bounded one-megabyte REST chunks", async () => {
+  const fixture = attestorFixture();
+  fixture.env.XIAOSHIMEI_WORST_CASE_RUN_BYTES = "8000000";
+  await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+
+  const writes = fixture.state.commands.filter((body) => body[0] === "SET" && String(body[1]).includes(":calibration:"));
+  assert.equal(writes.length, 8);
+  assert.equal(writes.reduce((total, body) => total + Buffer.from(body[2], "base64").length, 0), 8_000_000);
+  assert.equal(Math.max(...writes.map((body) => Buffer.from(body[2], "base64").length)), 1_000_000);
+  assert.equal(fixture.state.calibration.size, 0, "every transport chunk must still be deleted and read back absent");
+});
+
 test("D36 scheduled attestor verifies the signed exact binding and exits not-due before Developer API or calibration writes", async () => {
   const fixture = attestorFixture();
   const installed = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });

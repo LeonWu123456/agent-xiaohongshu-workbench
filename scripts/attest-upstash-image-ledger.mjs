@@ -15,7 +15,10 @@ export const CAPACITY_SCHEMA = "xiaoshimei.image-ledger-capacity.v1";
 export const AUDIT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 export const RENEW_MAX_MS = 6 * 24 * 60 * 60 * 1000;
 export const HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
-export const CALIBRATION_CHUNK_BYTES = 4_000_000;
+// Keep each REST command comfortably below common proxy/body thresholds. The
+// capacity proof still measures the full worst-case run; only its transport is
+// split into bounded chunks so the external renewal runner matches local use.
+export const CALIBRATION_CHUNK_BYTES = 1_000_000;
 
 const INSTALL_ATTESTATION_LUA = `
 local prior_generation = redis.call('HGET', KEYS[1], 'capacity_generation') or ''

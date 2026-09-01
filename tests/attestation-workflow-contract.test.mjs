@@ -49,7 +49,7 @@ test("D36 attestor keeps account audit logs on the official root endpoint", asyn
   assert.match(source, /database\.db_disk_threshold/);
   assert.match(source, /stats\.current_storage/);
   assert.match(source, /database\.modifying_state/);
-  assert.match(source, /CALIBRATION_CHUNK_BYTES = 4_000_000/);
+  assert.match(source, /CALIBRATION_CHUNK_BYTES = 1_000_000/);
   assert.match(source, /physicalBytes \+= chunkPhysicalBytes/);
   assert.match(source, /for \(const fixtureKey of fixtureKeys\)/);
 });
