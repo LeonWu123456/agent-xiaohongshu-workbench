@@ -656,6 +656,32 @@ export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscove
     : "DISCOVER_ONLY";
 }
 
+export function currentLibraryProjection({ contentTitle, confirmedTitle, textConfirmed, hasConfirmedContent, visiblePageCount, currentInLibrary, topic } = {}) {
+  const confirmed = Boolean(textConfirmed && String(confirmedTitle || "").trim());
+  if (confirmed && !hasConfirmedContent) {
+    return Object.freeze({
+      title: String(confirmedTitle).trim(),
+      pageCount: 0,
+      status: "文字已确认 · 等待配图",
+      saved: false,
+    });
+  }
+  if (!hasConfirmedContent) {
+    return Object.freeze({
+      title: "未命名新稿",
+      pageCount: 0,
+      status: String(topic || "").trim() ? "等待生成文字" : "等待原文",
+      saved: false,
+    });
+  }
+  return Object.freeze({
+    title: String(contentTitle || "未命名新稿"),
+    pageCount: Math.max(0, Number(visiblePageCount) || 0),
+    status: currentInLibrary ? "已在资产库，可继续补现实反馈" : "尚未进入资产库；回到工作台点击保存草稿",
+    saved: Boolean(currentInLibrary),
+  });
+}
+
 
 function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "", textareaId, textareaRef, disabled = false }) {
   return <section className={`prompt-context-field ${className}`}>
@@ -1025,6 +1051,15 @@ function App() {
       : hasConfirmedContent ? generatedImageCount : 0;
   const creatorJourney = deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfirmedContent, generatedImageCount: generatedForCurrentDraft, requiredImageCount, layoutIssueCount: 0, exportState });
   const currentInLibrary = Boolean(library.some((item) => item.draft_record_id === workspaceEnvelope.active_draft_id && item.saved_at === content.saved_at));
+  const libraryProjection = currentLibraryProjection({
+    contentTitle: content.selectedTitle,
+    confirmedTitle: textDraft?.selected_title,
+    textConfirmed,
+    hasConfirmedContent,
+    visiblePageCount: visiblePages.length,
+    currentInLibrary,
+    topic,
+  });
   const canReturnPrevious = Boolean(previousDraftId
     && previousDraftId !== workspaceEnvelope.active_draft_id
     && workspaceEnvelope.drafts.some((draft) => draft.draft_id === previousDraftId));
@@ -3468,7 +3503,7 @@ function App() {
 
         {view === "library" && <section className="library-view">
           <header><div><span className="section-kicker">LOCAL ASSET LIBRARY</span><h1>资产库</h1><p>保存创作，也记录发布后的真实结果；没有的数据保持 UNKNOWN。</p></div><div className="library-actions"><button onClick={downloadWorkspaceBackup}><Download />备份工作台</button><button onClick={() => workspaceImportRef.current?.click()}><Upload />恢复备份</button><input ref={workspaceImportRef} hidden type="file" accept="application/json,.json" onChange={restoreWorkspaceBackup} /><button onClick={openCreator}><Plus />新创作</button></div></header>
-          <section className={`library-current ${currentInLibrary ? "is-saved" : "is-unsaved"}`} aria-label="当前工作台保存状态"><div><span>当前工作台 · {visiblePages.length} 页</span><strong>{content.selectedTitle}</strong><small>{currentInLibrary ? "已在资产库，可继续补现实反馈" : "尚未进入资产库；回到工作台点击保存草稿"}</small></div><button type="button" onClick={() => { setView("compose"); setCreatorOpen(false); }}>返回编辑</button></section>
+          <section className={`library-current ${libraryProjection.saved ? "is-saved" : "is-unsaved"}`} aria-label="当前工作台保存状态"><div><span>当前工作台 · {libraryProjection.pageCount} 页</span><strong>{libraryProjection.title}</strong><small>{libraryProjection.status}</small></div><button type="button" onClick={() => { setView("compose"); setCreatorOpen(false); }}>返回编辑</button></section>
           {library.length === 0 ? <div className="empty-library"><Library /><strong>还没有保存的内容</strong><span>回到工作台保存后，会留在这台 Mac。</span></div> : <>
             {library.length >= 3 && <AssetPageRows library={library} />}
             {realityFeedbackItem && <RealityFeedbackEditor item={realityFeedbackItem} onSave={(feedback) => saveRealityFeedback(realityFeedbackItem.draft_record_id, feedback)} onClose={() => setRealityFeedbackId(null)} />}

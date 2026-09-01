@@ -60,7 +60,8 @@ const authRuntimeSource = between(
 const identitySource = namedFunctionSource(mainSource, "pageSemanticIdentity");
 const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockReason").replace(/^export\s+/, "");
 const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageRecoveryModeSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageRecoveryClickMode };`).toString("base64")}`);
+const libraryProjectionSource = namedFunctionSource(mainSource, "currentLibraryProjection").replace(/^export\s+/, "");
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageRecoveryModeSource}\n${libraryProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageRecoveryClickMode, currentLibraryProjection };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -72,6 +73,7 @@ const {
   pageSemanticIdentity,
   authoringInputLockReason,
   imageRecoveryClickMode,
+  currentLibraryProjection,
 } = runtimeModule;
 
 function makeUiState() {
@@ -349,6 +351,42 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.match(mainSource, /确认付费：继续图片步骤/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
+});
+
+test("asset library projects confirmed text honestly before a real canvas exists", () => {
+  const input = {
+    contentTitle: "忙碌之后，先别硬扛",
+    confirmedTitle: "日常三步处暑调养做法",
+    textConfirmed: true,
+    hasConfirmedContent: false,
+    visiblePageCount: 2,
+    currentInLibrary: true,
+    topic: "处暑调养原文",
+  };
+  const before = structuredClone(input);
+  assert.deepEqual(currentLibraryProjection(input), {
+    title: "日常三步处暑调养做法",
+    pageCount: 0,
+    status: "文字已确认 · 等待配图",
+    saved: false,
+  });
+  assert.deepEqual(input, before, "the library projection must not mutate DraftRecord or authoring state");
+
+  assert.deepEqual(currentLibraryProjection({ topic: "一段新原文" }), {
+    title: "未命名新稿",
+    pageCount: 0,
+    status: "等待生成文字",
+    saved: false,
+  });
+  assert.deepEqual(currentLibraryProjection({ contentTitle: "真实两页稿", hasConfirmedContent: true, visiblePageCount: 2, currentInLibrary: true }), {
+    title: "真实两页稿",
+    pageCount: 2,
+    status: "已在资产库，可继续补现实反馈",
+    saved: true,
+  });
+  assert.match(mainSource, /libraryProjection\.pageCount/);
+  assert.match(mainSource, /libraryProjection\.title/);
+  assert.match(mainSource, /libraryProjection\.status/);
 });
 
 test("a visible-canvas lineage split has one explicit zero-provider repair that preserves pages and pending", () => {
