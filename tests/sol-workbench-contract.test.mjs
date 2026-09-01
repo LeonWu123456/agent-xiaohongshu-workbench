@@ -37,7 +37,7 @@ test("workbench keeps one journey navigator and removes duplicate summary chrome
 test("blocked publication controls use native disable in addition to the inner lineage guard", async () => {
   const source = await readFile(mainUrl, "utf8");
   assert.match(source, /className="copy-publish"[^>]*disabled=\{workspaceWriteBlocked \|\| !publicationAuthority\.allowed\}[^>]*onClick=\{copyPublicationCopy\}/);
-  assert.match(source, /className="download-final"[^>]*disabled=\{draftEditingLocked \|\| exportState === "GENERATING" \|\| !publicationAuthority\.allowed\}/);
+  assert.match(source, /className="download-final"[^>]*disabled=\{publicationExportLocked \|\| exportState === "GENERATING"\}/);
   assert.match(source, /runGuardedPublicationAction/);
   assert.match(source, /publicationSnapshotDecision/);
 });
@@ -141,6 +141,8 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   ]);
   assert.match(cssSource, /aspect-ratio: 3 \/ 4/);
   assert.match(cssSource, /background: #ffffff !important/);
+  assert.match(cssSource, /\.html-editor__stage \{ padding: 20px 20px 0;/);
+  assert.match(cssSource, /\.html-editor__stage \{ padding: 10px 0 0;/);
   assert.match(cssSource, /nth-child\(2n \+ 1\)[\s\S]*text-align: left/);
   assert.match(cssSource, /nth-child\(2n\)[\s\S]*text-align: right/);
   assert.match(cssSource, /single executable geometry authority/);
@@ -204,6 +206,10 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /mode: "START"|rebuildPendingImageStartV3/);
   assert.match(source, /mode: "DISCOVER"/);
   assert.match(source, /mode: "STEP"/);
+  assert.match(source, /只查询恢复结果（0 次图片调用）/);
+  assert.match(source, /data-active-draft-id=\{workspaceEnvelope\.active_draft_id\}/);
+  assert.match(source, /data-pending-bootstrap-nonce=\{pendingImageOperation\?\.operation_nonce \|\| ""\}/);
+  assert.match(source, /data-pending-run-id=\{pendingImageOperation\?\.run_id \|\| ""\}/);
   assert.doesNotMatch(source, /resume_checkpoint: imageResume\?\.resume_checkpoint/);
   assert.doesNotMatch(source, /建议 \{textDraft\.recommended_image_count\} 张/);
 });

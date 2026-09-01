@@ -48,6 +48,48 @@ test("unconfirmed or unassembled text cannot publish", () => {
   assert.equal(derivePublicationAuthority({ ...pair, assembledDraftId: null }).code, "TEXT_NOT_ASSEMBLED");
 });
 
+test("an exact current canvas remains publishable while a separate image recovery is pending", () => {
+  const pair = confirmedPair();
+  const draftId = pair.textDraft.draft_id;
+  const activeDraftId = "draft-record-1";
+  const result = derivePublicationAuthority({
+    ...pair,
+    assembledDraftId: "stale-assembled-draft",
+    activeDraftId,
+    pendingImageOperation: {
+      operation_nonce: "a".repeat(64),
+      run_id: "images-pending-six-pages",
+      protocol_state: "UNKNOWN",
+      operation_snapshot: {
+        draft_record_id: activeDraftId,
+        confirmed_draft: { draft_id: draftId },
+      },
+    },
+  });
+  assert.equal(result.allowed, true);
+  assert.equal(result.code, "CONFIRMED_TEXT_AUTHORITY_WITH_PENDING_RECOVERY");
+  assert.equal(result.recovery_pending, true);
+  assert.equal(result.resolved_assembled_draft_id, draftId);
+});
+
+test("pending recovery never bypasses exact draft, copy, or visible-canvas gates", () => {
+  const pair = confirmedPair();
+  const draftId = pair.textDraft.draft_id;
+  const activeDraftId = "draft-record-2";
+  const pending = {
+    operation_nonce: "b".repeat(64),
+    run_id: "images-pending",
+    protocol_state: "UNKNOWN",
+    operation_snapshot: { draft_record_id: activeDraftId, confirmed_draft: { draft_id: draftId } },
+  };
+  const base = { ...pair, assembledDraftId: null, activeDraftId, pendingImageOperation: pending };
+  assert.equal(derivePublicationAuthority({ ...base, activeDraftId: "another-draft" }).code, "TEXT_NOT_ASSEMBLED");
+  assert.equal(derivePublicationAuthority({ ...base, pendingImageOperation: { ...pending, operation_snapshot: { ...pending.operation_snapshot, draft_record_id: "another-draft" } } }).code, "TEXT_NOT_ASSEMBLED");
+  assert.equal(derivePublicationAuthority({ ...base, pendingImageOperation: { ...pending, operation_snapshot: { ...pending.operation_snapshot, confirmed_draft: { draft_id: "another-text" } } } }).code, "TEXT_NOT_ASSEMBLED");
+  assert.equal(derivePublicationAuthority({ ...base, content: { ...pair.content, visible_pages: 0 } }).code, "TEXT_NOT_ASSEMBLED");
+  assert.equal(derivePublicationAuthority({ ...base, content: { ...pair.content, body: "另一份正文" } }).code, "PUBLICATION_COPY_MISMATCH");
+});
+
 test("a content-only boolean never grants publication authority", () => {
   const content = generateContentPackage({ topic: "旧稿" });
   const result = derivePublicationAuthority({ content, activatedAsContentOnly: true });

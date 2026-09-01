@@ -13,7 +13,7 @@
 }
 .canvas-stage--mature:has(.html-editor) { align-items: start; }
 .html-editor { height: auto; min-height: 0; grid-template-rows: 54px auto; }
-.html-editor__stage { padding: 20px; place-items: start center; }
+.html-editor__stage { padding: 20px 20px 0; place-items: start center; }
 
 .html-page {
   --xsm-orange: #e6773d;
@@ -377,7 +377,7 @@
   .html-editor { width: 100%; height: auto; min-height: 0; border-inline: 0; border-radius: 0; box-shadow: none; }
   .html-editor__toolbar { padding-inline: 8px; }
   .html-editor__hint { display: none; }
-  .html-editor__stage { padding: 10px 0 16px; }
+  .html-editor__stage { padding: 10px 0 0; }
   .html-page { width: min(calc(100% - 8px), 438px, calc((100vh - 286px) * .75)); }
   .html-editor__layout-warning { position: sticky; right: 0; }
 }

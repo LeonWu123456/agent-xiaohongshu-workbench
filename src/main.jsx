@@ -648,6 +648,12 @@ export function authoringInputLockReason({ workspaceReady, workspaceReadOnly, pe
   return null;
 }
 
+export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscoveryOnly = false } = {}) {
+  return requestedDiscoveryOnly || pendingImageOperation?.protocol_state === "UNKNOWN"
+    ? "DISCOVER_ONLY"
+    : "CONTINUE_ALLOWED";
+}
+
 
 function PromptContextField({ field, value, history, onChange, onRemember, onUse, onDelete, rows = 3, className = "", textareaId, textareaRef, disabled = false }) {
   return <section className={`prompt-context-field ${className}`}>
@@ -1024,7 +1030,19 @@ function App() {
     textConfirmed,
     assembledDraftId,
     activatedAsContentOnly,
-  }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly]);
+    activeDraftId: workspaceEnvelope.active_draft_id,
+    pendingImageOperation,
+  }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly, workspaceEnvelope.active_draft_id, pendingImageOperation]);
+  const pendingRecoveryDiscoveryOnly = pendingImageOperation?.protocol_state === "UNKNOWN";
+  const publicationExportLocked = workspaceReadOnly || workspaceTransitioning || !publicationAuthority.allowed;
+  const imageFailureFeedback = generationError?.stage === "image" && pendingRecoveryDiscoveryOnly && publicationAuthority.allowed
+    ? {
+      ...generationError,
+      title: "另一条配图还在恢复窗内",
+      detail: `当前 ${visiblePages.length} 页成品仍可复制和下载。这里只查询已有账本与缓存，不会重新生成图片，也不会进入付费步骤。`,
+      retry_label: "只查询恢复结果（0 次图片调用）",
+    }
+    : generationError;
   authorityTargetRef.current = {
     draftId: workspaceEnvelopeRef.current.active_draft_id,
     pageId: pageSemanticIdentity(currentPage, pageIndex),
@@ -2214,7 +2232,7 @@ function App() {
     setAssembledDraftId(null);
   }
 
-  async function generateImageNode() {
+  async function generateImageNode(options = {}) {
     if (!mediaWorkspaceIsUsable()) return;
     if (!textConfirmed) { setToast("请先确认文字，再进入配图"); return; }
     if (!provider?.generateImages) {
@@ -2230,6 +2248,10 @@ function App() {
     const targetDraftId = baseWorkspace.active_draft_id;
     const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
     if (!baseRecord) { setToast("当前稿件身份缺失，配图没有开始"); return; }
+    const discoveryOnly = imageRecoveryClickMode({
+      pendingImageOperation: baseRecord.pending_image_operation,
+      requestedDiscoveryOnly: options?.discoveryOnly === true,
+    }) === "DISCOVER_ONLY";
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
     const frozenTextDraft = textDraft;
@@ -2439,6 +2461,13 @@ function App() {
           }
         }
         if (progressReceipt.action !== "CONTINUE" || !mainAuthority.isCurrent(mainOperation)) return { action: "STOP" };
+        if (discoveryOnly) {
+          mainAuthority.commit(mainOperation, () => {
+            setGenerationState("IDLE");
+            setToast("零调用查询已完成；恢复点已更新，本次没有进入付费图片步骤");
+          });
+          return { action: "STOP" };
+        }
         return { action: "CONTINUE", request: nextImageStepRequest(response, attemptNonce) };
       };
 
@@ -2475,13 +2504,16 @@ function App() {
       console.warn(error);
       if (error?.requiresAccess) dispatchAuth({ type: "BUSINESS_AUTH_REQUIRED", generation: authGeneration, message: "访问会话已失效，请重新输入访问码" });
       if (error?.intentionalStop || error?.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT") {
+        const stopMessage = discoveryOnly
+          ? "零调用查询已完成；恢复点已更新，本次没有进入付费图片步骤"
+          : "图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费";
         const settled = mainAuthority.commit(mainOperation, () => {
           setGenerationState("IDLE");
-          setToast("图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费");
+          setToast(stopMessage);
         });
         if (!settled.applied) {
           setGenerationState("IDLE");
-          setToast("原稿配图已停在安全断点；当前稿件没有被替换");
+          setToast(discoveryOnly ? "原稿的零调用查询已停在恢复点；当前稿件没有被替换" : "原稿配图已停在安全断点；当前稿件没有被替换");
         }
         return;
       }
@@ -2929,7 +2961,7 @@ function App() {
   }
 
   async function downloadZip() {
-    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) return;
+    if (!mediaWorkspaceIsUsable() || workspaceTransitionLock.isLocked()) return;
     const initialGate = publicationAuthorityRef.current;
     const operation = mainAuthority.capture("prepare-publication-zip");
     if (!publicationSnapshotDecision({ gate: initialGate }).allowed) {
@@ -2987,7 +3019,7 @@ function App() {
   }
 
   function downloadPreparedExport(event) {
-    if (!mediaWorkspaceIsUsable() || draftMutationIsLocked()) {
+    if (!mediaWorkspaceIsUsable() || workspaceTransitionLock.isLocked()) {
       event.preventDefault();
       return;
     }
@@ -3153,7 +3185,7 @@ function App() {
         </div>
       </section>}
 
-      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images">
+      {textDraft && textConfirmed && <section id="creator-images" className="workbench-section workbench-images" data-active-draft-id={workspaceEnvelope.active_draft_id} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""}>
         <header><div><strong>配图生成</strong><small>文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖</small></div><span className="text-gate is-confirmed">文字已确认</span></header>
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
@@ -3175,8 +3207,8 @@ function App() {
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
-        <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中` : accessRequired ? "先验证访问码" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
-        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={generationError} onRetry={generateImageNode} />}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (pendingRecoveryDiscoveryOnly ? "正在查询已有结果（0 次图片调用）" : `${productionModeLabel(productionMode)}生成中`) : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
       </section>}
     </>;
   }
@@ -3309,7 +3341,7 @@ function App() {
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>
-                  <small>标题、正文和标签均来自“文字草稿”里已确认的同一份内容；需要改字就回到上方修改并重新确认。</small>
+                  <small>{publicationAuthority.recovery_pending ? `当前 ${visiblePages.length} 页成品与已确认文字一致，可以直接发布；另一条配图恢复仍保留，编辑与保存暂时冻结。` : "标题、正文和标签均来自“文字草稿”里已确认的同一份内容；需要改字就回到上方修改并重新确认。"}</small>
                 </div> : <>
                   <label><span>发布标题</span><input value={content.selectedTitle} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => { const nextTitle = event.target.value; return { ...invalidateVisualReview(current), selectedTitle: nextTitle, titles: current.titles.map((title) => title === current.selectedTitle ? nextTitle : title), pages: current.pages.map((page, index) => index === 0 ? { ...page, title: nextTitle } : page) }; }, { group: "publish-title" })} /></label>
                   <label><span>发布正文</span><textarea rows="8" value={content.body} readOnly={publicationAuthority.mode === "TEXT_DRAFT_PROJECTION"} onChange={(event) => setContent((current) => ({ ...invalidateVisualReview(current), body: event.target.value }), { group: "publish-body" })} /></label>
@@ -3319,7 +3351,7 @@ function App() {
               </section>
             </section>}
             {!isDraftInputOnly && <section className="workbench-section workbench-export" aria-label="保存与下载">
-              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft} disabled={draftEditingLocked}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={draftEditingLocked ? undefined : preparedExport.url} aria-disabled={draftEditingLocked} download={preparedExport.name} onClick={downloadPreparedExport}><Download />{draftEditingLocked ? "当前稿件已冻结" : "保存发布包"}</a> : <button type="button" className="download-final" data-export-state={exportState} aria-disabled={draftEditingLocked || !publicationAuthority.allowed} onClick={downloadZip} disabled={draftEditingLocked || exportState === "GENERATING" || !publicationAuthority.allowed}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{draftEditingLocked ? "当前稿件已冻结" : exportState === "GENERATING" ? "正在生成发布包…" : publicationAuthority.allowed ? "下载发布包" : "发布包已锁定"}</button>}</div>
+              <div className="export-actions"><button type="button" className="save-final" onClick={saveDraft} disabled={draftEditingLocked}><Save />保存草稿</button>{preparedExport ? <a className="download-final" data-export-state={exportState} href={publicationExportLocked ? undefined : preparedExport.url} aria-disabled={publicationExportLocked} download={preparedExport.name} onClick={downloadPreparedExport}><Download />{publicationExportLocked ? "发布包已锁定" : "保存发布包"}</a> : <button type="button" className="download-final" data-export-state={exportState} aria-disabled={publicationExportLocked} onClick={downloadZip} disabled={publicationExportLocked || exportState === "GENERATING"}>{exportState === "GENERATING" ? <RefreshCw /> : <Download />}{publicationExportLocked ? "发布包已锁定" : exportState === "GENERATING" ? "正在生成发布包…" : "下载发布包"}</button>}</div>
               {!publicationAuthority.allowed && <p className="export-inline-note">草稿仍可保存；文字与画布重新对齐前，不会生成或下载发布包。</p>}
               {exportState === "FAILED" && <p className="export-inline-error">下载没有完成；请先处理上方排版提示后重试。</p>}
             </section>}

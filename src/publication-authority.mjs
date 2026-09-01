@@ -8,7 +8,7 @@ function sameTags(left, right) {
     && left.every((value, index) => value === right[index]);
 }
 
-function authorityToken(content, textDraft, textConfirmed, assembledDraftId) {
+function authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId, pendingImageOperation) {
   return JSON.stringify([
     content?.id || null,
     content?.selectedTitle || "",
@@ -27,11 +27,24 @@ function authorityToken(content, textDraft, textConfirmed, assembledDraftId) {
     textDraft?.goal || "",
     Boolean(textConfirmed),
     assembledDraftId || null,
+    activeDraftId || null,
+    pendingImageOperation?.operation_nonce || null,
+    pendingImageOperation?.run_id || null,
+    pendingImageOperation?.protocol_state || null,
+    content?.visible_pages || 0,
   ]);
 }
 
-export function derivePublicationAuthority({ content, textDraft = null, textConfirmed = false, assembledDraftId = null, activatedAsContentOnly = false }) {
-  const token = authorityToken(content, textDraft, textConfirmed, assembledDraftId);
+export function derivePublicationAuthority({
+  content,
+  textDraft = null,
+  textConfirmed = false,
+  assembledDraftId = null,
+  activatedAsContentOnly = false,
+  activeDraftId = null,
+  pendingImageOperation = null,
+}) {
+  const token = authorityToken(content, textDraft, textConfirmed, assembledDraftId, activeDraftId, pendingImageOperation);
   if (!content || typeof content !== "object") return { allowed: false, code: "CONTENT_MISSING", token };
 
   if (!textDraft) {
@@ -44,7 +57,6 @@ export function derivePublicationAuthority({ content, textDraft = null, textConf
 
   const draftId = String(textDraft.draft_id || "");
   if (!textConfirmed) return { allowed: false, code: "TEXT_NOT_CONFIRMED", token };
-  if (!draftId || assembledDraftId !== draftId) return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
   const sourceDraftId = content.generation?.source_draft_id;
   if (!sourceDraftId) return { allowed: false, code: "CONTENT_LINEAGE_MISSING", token };
   if (sourceDraftId !== draftId) return { allowed: false, code: "CONTENT_LINEAGE_MISMATCH", token };
@@ -57,10 +69,27 @@ export function derivePublicationAuthority({ content, textDraft = null, textConf
     || content.goal !== textDraft.goal
   ) return { allowed: false, code: "PUBLICATION_COPY_MISMATCH", token };
 
+  if (!draftId) return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
+  const pendingSnapshot = pendingImageOperation?.operation_snapshot;
+  const currentCanvasSurvivesPendingRecovery = typeof activeDraftId === "string"
+    && Boolean(activeDraftId)
+    && pendingSnapshot?.draft_record_id === activeDraftId
+    && pendingSnapshot?.confirmed_draft?.draft_id === draftId
+    && /^[0-9a-f]{64}$/.test(pendingImageOperation?.operation_nonce || "")
+    && Number.isInteger(content.visible_pages)
+    && content.visible_pages > 0
+    && Array.isArray(content.pages)
+    && content.pages.length >= content.visible_pages;
+  if (assembledDraftId !== draftId && !currentCanvasSurvivesPendingRecovery) {
+    return { allowed: false, code: "TEXT_NOT_ASSEMBLED", token };
+  }
+
   return {
     allowed: true,
-    code: "CONFIRMED_TEXT_AUTHORITY",
+    code: currentCanvasSurvivesPendingRecovery ? "CONFIRMED_TEXT_AUTHORITY_WITH_PENDING_RECOVERY" : "CONFIRMED_TEXT_AUTHORITY",
     mode: "TEXT_DRAFT_PROJECTION",
+    recovery_pending: currentCanvasSurvivesPendingRecovery,
+    resolved_assembled_draft_id: draftId,
     token,
   };
 }

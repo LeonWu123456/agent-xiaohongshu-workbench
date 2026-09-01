@@ -59,7 +59,8 @@ const authRuntimeSource = between(
 );
 const identitySource = namedFunctionSource(mainSource, "pageSemanticIdentity");
 const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockReason").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\nexport { pageSemanticIdentity, authoringInputLockReason };`).toString("base64")}`);
+const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageRecoveryModeSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageRecoveryClickMode };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -70,6 +71,7 @@ const {
   postCasWorkspaceSettlementPlan,
   pageSemanticIdentity,
   authoringInputLockReason,
+  imageRecoveryClickMode,
 } = runtimeModule;
 
 function makeUiState() {
@@ -325,6 +327,18 @@ test("pending image authority freezes every image input while the same operation
   assert.match(imageSource, /IMAGE_BOOTSTRAP_STALE_PENDING_SAVED/);
   assert.match(imageSource, /setGenerationState\s*\(\s*\(current\)\s*=>\s*current === "IMAGE_GENERATING" \? "IDLE" : current\s*\)/, "operation-id finally must settle global busy even after A to B cutover");
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
+});
+
+test("UNKNOWN recovery is one DISCOVER-only action and cannot chain into STEP", () => {
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" } }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" } }), "CONTINUE_ALLOWED");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" }, requestedDiscoveryOnly: true }), "DISCOVER_ONLY");
+  const imageSource = namedFunctionSource(mainSource, "generateImageNode");
+  assert.match(imageSource, /const discoveryOnly = imageRecoveryClickMode\s*\(/);
+  assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP" \};[\s\S]*nextImageStepRequest/);
+  assert.match(imageSource, /零调用查询已完成/);
+  assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
+  assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {
