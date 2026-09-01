@@ -478,6 +478,70 @@ export function completePublicImageRun(value) {
   return parsePublicImageRun(next);
 }
 
+export function completeCoveredNarrativePublicImageRun(value) {
+  const parsed = parsePublicImageRun(value);
+  if (parsed.production_mode !== "narrative" || parsed.status === "IMAGE_CALL_IN_PROGRESS" || parsed.status === "COMPLETE" || parsed.status === "EXHAUSTED") return null;
+
+  const assetByUnitId = new Map(parsed.assets.map((asset) => [asset.unit_id, asset]));
+  const completedUnitIds = new Set(parsed.jobs.slice(0, parsed.next_job_index).flatMap((job) => job.units.map((unit) => unit.unit_id)));
+  const selectedUnits = [];
+  for (let pageIndex = 0; pageIndex < parsed.final_page_count; pageIndex += 1) {
+    const candidates = parsed.illustration_units
+      .filter((unit) => unit.page_index === pageIndex && completedUnitIds.has(unit.unit_id) && assetByUnitId.has(unit.unit_id))
+      .sort((left, right) => {
+        const leftHero = left.panel_index == null ? 0 : 1;
+        const rightHero = right.panel_index == null ? 0 : 1;
+        return leftHero - rightHero || Number(left.panel_index ?? -1) - Number(right.panel_index ?? -1);
+      });
+    if (!candidates.length) return null;
+    selectedUnits.push(candidates[0]);
+  }
+
+  const selectedIds = new Set(selectedUnits.map((unit) => unit.unit_id));
+  const droppedUnitIds = parsed.illustration_units.map((unit) => unit.unit_id).filter((unitId) => !selectedIds.has(unitId));
+  if (!droppedUnitIds.length) return null;
+
+  const jobs = [];
+  const jobIndexMap = new Map();
+  parsed.jobs.slice(0, parsed.next_job_index).forEach((job, oldIndex) => {
+    const units = job.units.filter((unit) => selectedIds.has(unit.unit_id));
+    if (!units.length) return;
+    jobIndexMap.set(oldIndex, jobs.length);
+    jobs.push({ ...job, units, unit_labels: Array.isArray(job.unit_labels) ? job.unit_labels.slice(0, units.length) : job.unit_labels });
+  });
+  if (!jobs.length) return null;
+
+  const jobAttempts = parsed.job_attempts
+    .filter((attempt) => jobIndexMap.has(attempt.job_index))
+    .map((attempt) => {
+      const jobIndex = jobIndexMap.get(attempt.job_index);
+      const units = jobs[jobIndex].units;
+      return {
+        ...attempt,
+        job_index: jobIndex,
+        admitted_unit_ids: units.map((unit) => unit.unit_id),
+        missing_unit_ids: [],
+        decision: "ASSETS_ADMITTED",
+        zero_provider_normalization: "NARRATIVE_ONE_ASSET_PER_PAGE",
+        dropped_unit_ids: droppedUnitIds,
+      };
+    });
+
+  const normalized = parsePublicImageRun({
+    ...cloneWithoutSignature(parsed),
+    final_pages: parsed.final_pages.map((page) => ({ ...page, panels: [] })),
+    illustration_units: selectedUnits,
+    jobs,
+    next_job_index: jobs.length,
+    assets: parsed.assets.filter((asset) => selectedIds.has(asset.unit_id)),
+    job_attempts: jobAttempts,
+    phase: "PRIMARY",
+    status: "GENERATING",
+    failure: null,
+  });
+  return completePublicImageRun(normalized);
+}
+
 export function exhaustPublicImageRun(value) {
   const next = cloneWithoutSignature(parsePublicImageRun(value));
   const unresolved = unresolvedPublicImageUnitIds(next);

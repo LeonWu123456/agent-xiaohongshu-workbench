@@ -4,6 +4,7 @@ import {
   admitPublicImageJob,
   appendPublicImageJobs,
   claimDraftBoundImageOperation,
+  completeCoveredNarrativePublicImageRun,
   completePublicImageRun,
   createDraftBoundImageOperation,
   createPublicImageRun,
@@ -208,6 +209,50 @@ test("public image run admits one paid step, preserves good assets, and appends 
   assert.equal(run.status, "COMPLETE");
   assert.equal(run.actual_image_calls, 2);
   assert.deepEqual(unresolvedPublicImageUnitIds(run), []);
+});
+
+test("a covered narrative overrun completes from the first durable sheet without another paid call", () => {
+  const units = [
+    { unit_id: "page-1-hero", page_index: 0, panel_index: null },
+    ...[0, 1, 2, 3].map((panelIndex) => ({ unit_id: `page-2-panel-${panelIndex + 1}`, page_index: 1, panel_index: panelIndex })),
+  ];
+  let run = createPublicImageRun({
+    runId: "images-2026-09-01T11-35-57-000Z-d41d41d4",
+    draftId: "draft-narrative",
+    draftSha256: "a".repeat(64),
+    productionMode: "narrative",
+    finalPages: [
+      { title: "白露食白", panels: [] },
+      { title: "三种日常吃法", panels: [{}, {}, {}, {}] },
+    ],
+    illustrationUnits: units,
+    planAttempts: [{ attempt: 1, status: "PASS" }],
+    referenceFingerprint: "b".repeat(64),
+    jobs: [
+      { sheet_id: "mother-sheet-1", sheet_index: 0, units: units.slice(0, 4), job_kind: "mother_sheet" },
+      { sheet_id: "mother-sheet-2", sheet_index: 1, units: units.slice(4), job_kind: "mother_sheet" },
+    ],
+  });
+  run = startPublicImageJob(run);
+  run = admitPublicImageJob(run, {
+    assets: [tile("page-1-hero", "1"), tile("page-2-panel-1", "2"), tile("page-2-panel-2", "3"), tile("page-2-panel-3", "4")],
+    attempt: { image_sha256: "5".repeat(64) },
+  });
+
+  const completed = completeCoveredNarrativePublicImageRun(run);
+  assert.equal(completed.status, "COMPLETE");
+  assert.equal(completed.actual_image_calls, 1);
+  assert.equal(completed.jobs.length, 1);
+  assert.equal(completed.next_job_index, 1);
+  assert.deepEqual(completed.final_pages.map((page) => page.panels), [[], []]);
+  assert.deepEqual(completed.illustration_units.map((unit) => unit.unit_id), ["page-1-hero", "page-2-panel-1"]);
+  assert.deepEqual(completed.assets.map((asset) => asset.unit_id), ["page-1-hero", "page-2-panel-1"]);
+  assert.equal(completed.job_attempts[0].zero_provider_normalization, "NARRATIVE_ONE_ASSET_PER_PAGE");
+  assert.deepEqual(unresolvedPublicImageUnitIds(completed), []);
+
+  assert.equal(completeCoveredNarrativePublicImageRun({ ...run, production_mode: "smart" }), null);
+  const uncovered = parsePublicImageRun({ ...run, assets: run.assets.filter((asset) => asset.page_index === 0) });
+  assert.equal(completeCoveredNarrativePublicImageRun(uncovered), null);
 });
 
 test("a failed public image step is resumable at the same job without losing earlier assets", () => {

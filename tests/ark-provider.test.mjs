@@ -166,6 +166,17 @@ test("page planning receives the selected production mode before any image call"
   assert.match(referenced.input[0].content, /人物远离屏幕并自然眨眼/);
 });
 
+test("narrative page planning deterministically removes model-supplied panels before image costing", () => {
+  const pages = structuredClone(planValue().pages);
+  pages[1].panels = [
+    { title: "第一格", body: "这一格本不该进入场景叙事的图片计划。", visual_action: "小师妹抬手整理桌面上的白瓷盘", content_role: "hero", shot_role: "action", highlight_phrases: ["第一格"] },
+    { title: "第二格", body: "这一格也不该增加新的付费插画单元。", visual_action: "小师妹把白瓷盘平稳放回木桌中央", content_role: "support", shot_role: "detail", highlight_phrases: ["第二格"] },
+  ];
+  const response = { output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages }) }] };
+  const narrative = extractArkPagePlan(response, 2, { ...input(), productionMode: "narrative" });
+  assert.deepEqual(narrative.map((page) => page.panels), [[], []]);
+});
+
 test("Ark image request carries identity reference and forbids baked-in text", () => {
   const request = buildArkImageRequest({ model: "seedream-image-endpoint", prompt: "小师妹在山林书院练功", referenceImageDataUrl: "data:image/png;base64,AAAA" });
   assert.equal(request.model, "seedream-image-endpoint"); assert.equal(request.response_format, "b64_json"); assert.equal(request.sequential_image_generation, "disabled");

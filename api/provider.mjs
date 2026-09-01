@@ -27,6 +27,7 @@ import {
 import {
   admitPublicImageJob,
   appendPublicImageJobs,
+  completeCoveredNarrativePublicImageRun,
   completePublicImageRun,
   createPublicImageRun,
   exhaustPublicImageRun,
@@ -2643,8 +2644,11 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
     const references = await readAndVerifyD36ReferenceAssets(imageLedger, input.run_id, appScopeId, state.referenceManifest || []);
     const legacyInput = d36LegacyInput(state.snapshot, references);
     try {
-      const advanced = await executePublicImageJob(hydratedRun, legacyInput, settings);
-      const persisted = await persistD36GeneratedAssets(imageLedger, input.run_id, appScopeId, advanced, state.compactRun.assets || []);
+      const coveredNarrative = completeCoveredNarrativePublicImageRun(hydratedRun);
+      const advanced = coveredNarrative || await executePublicImageJob(hydratedRun, legacyInput, settings);
+      const persisted = coveredNarrative
+        ? { compactRun: compactPublicImageRun(advanced), mediaDelta: [] }
+        : await persistD36GeneratedAssets(imageLedger, input.run_id, appScopeId, advanced, state.compactRun.assets || []);
       compactRun = persisted.compactRun;
       let contentPackage;
       if (advanced.status === "COMPLETE") {
@@ -2659,7 +2663,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
         apiKey: settings.apiKey,
         mediaDelta: persisted.mediaDelta,
         recoverableUntil: state.recoverableUntil,
-        upstreamCalls: 1,
+        upstreamCalls: coveredNarrative ? 0 : 1,
         status: advanced.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
         contentPackage,
       });

@@ -32,7 +32,7 @@ import {
 import { groupIllustrationUnits } from "../src/mother-sheet.mjs";
 import { computeImageGenerationInputSha256, parsePageCandidateResponse, PAGE_CANDIDATE_RESPONSE_SCHEMA } from "../src/provider-contract.mjs";
 import { sha256Bytes } from "../src/ark-provider-core.mjs";
-import { createPublicImageRun, failPublicImageJob, startPublicImageJob } from "../src/public-image-run.mjs";
+import { admitPublicImageJob, createPublicImageRun, failPublicImageJob, startPublicImageJob } from "../src/public-image-run.mjs";
 import { createLocalHttpProvider } from "../src/provider-client.mjs";
 import sharp from "sharp";
 
@@ -573,6 +573,98 @@ function d36StepInput(run, overrides = {}) {
     attempt_nonce: "e".repeat(64),
     ...overrides,
   };
+}
+
+async function seedD41CoveredNarrativeRun(imageLedger) {
+  const pages = [
+    {
+      pageRole: "hook",
+      shotRole: "scene",
+      highlightPhrases: ["今日动作"],
+      eyebrow: "书院日常记录",
+      title: "先把今日动作记下来",
+      body: "从一个看得见的日常动作开始，留下今天真实发生的书院记录。",
+      visualAction: "小师妹右手握笔书写，左手压住摊开的记录册",
+      imagePrompt: d36PlannerPage().image_prompt,
+      panels: [],
+    },
+    {
+      pageRole: "example",
+      shotRole: "action",
+      highlightPhrases: ["按发生顺序"],
+      eyebrow: "记录时只做三件事",
+      title: "按发生顺序写清楚",
+      body: "先写今天做了什么，再记下现场出现的变化，最后补上下一步。只写已经发生的事实，不把筹备中的想法提前说成结果。",
+      visualAction: "小师妹翻动记录册并依次检查三行手写内容",
+      imagePrompt: "书院木桌前，小师妹翻动摊开的记录册，右手食指依次检查三行手写内容，左手扶住册页，视线落在纸面，人物与双手清楚完整，暖色侧光，中近景，画面不出现可读文字、水印、边框或第二个人。",
+      panels: [
+        { title: "先记动作", body: "把今天已经完成的动作按顺序写清楚。", visualAction: "小师妹右手握笔在记录册第一行书写", contentRole: "hero", shotRole: "action", highlightPhrases: ["先记动作"] },
+        { title: "再记变化", body: "把现场真正出现的变化紧接着补充完整。", visualAction: "小师妹用手指检查记录册第二行内容", contentRole: "support", shotRole: "detail", highlightPhrases: ["再记变化"] },
+        { title: "补下一步", body: "只写下一件准备执行并能回读的具体行动。", visualAction: "小师妹把书签夹到记录册下一页", contentRole: "support", shotRole: "action", highlightPhrases: ["补下一步"] },
+        { title: "不抢跑", body: "筹备想法仍按想法标注，不提前包装成结果。", visualAction: "小师妹把待核验便签放在记录册旁边", contentRole: "detail", shotRole: "scene", highlightPhrases: ["不抢跑"] },
+      ],
+    },
+  ];
+  const units = [
+    { unit_id: "page-1-hero", page_index: 0, panel_index: null, media_role: "cover_kv", preferred_aspect: "9:8", fit_policy: "cover", visual_action: pages[0].visualAction, image_prompt: pages[0].imagePrompt },
+    ...pages[1].panels.map((panel, panelIndex) => ({ unit_id: `page-2-panel-${panelIndex + 1}`, page_index: 1, panel_index: panelIndex, media_role: "inline_sticker", preferred_aspect: "3:4", fit_policy: "contain", visual_action: panel.visualAction, image_prompt: pages[1].imagePrompt })),
+  ];
+  let hydratedRun = createPublicImageRun({
+    runId: "images-2026-09-01T11-35-57-000Z-d41d41d4",
+    draftId: "draft-d36-contract",
+    draftSha256: "7".repeat(64),
+    productionMode: "narrative",
+    finalPages: pages,
+    illustrationUnits: units,
+    planAttempts: [{ attempt: 1, status: "PASS" }],
+    referenceFingerprint: "6".repeat(64),
+    jobs: groupIllustrationUnits(units).map((job) => ({ ...job, job_kind: "mother_sheet" })),
+  });
+  const assetBytes = await Promise.all(units.slice(0, 4).map(async (_unit, assetIndex) => {
+    const pixels = Buffer.alloc(96 * 128 * 3);
+    for (let index = 0; index < pixels.length; index += 1) pixels[index] = (index * (67 + assetIndex * 4) + Math.floor(index / 31) * 19 + assetIndex * 23) % 256;
+    return sharp(pixels, { raw: { width: 96, height: 128, channels: 3 } }).jpeg({ quality: 88 }).toBuffer();
+  }));
+  const assets = units.slice(0, 4).map((unit, assetIndex) => {
+    const bytes = assetBytes[assetIndex];
+    return { ...unit, src: `data:image/jpeg;base64,${bytes.toString("base64")}`, sha256: createHash("sha256").update(bytes).digest("hex"), size_bytes: bytes.length, width: 96, height: 128 };
+  });
+  const sourceSha256 = createHash("sha256").update(Buffer.concat(assetBytes)).digest("hex");
+  hydratedRun = admitPublicImageJob(startPublicImageJob(hydratedRun), { assets, attempt: { image_sha256: sourceSha256, image_size_bytes: assetBytes.reduce((sum, bytes) => sum + bytes.length, 0) } });
+  const compactRun = { ...hydratedRun, assets: hydratedRun.assets.map((asset) => ({ ...asset, src: `xiaoshimei-media://sha256/${asset.sha256}` })) };
+  const checkpointPreimage = providerModule.createImageTransactionCheckpoint(compactRun, D36_SETTINGS.apiKey);
+  const checkpointPreimageSha256 = providerModule.imageTransactionCheckpointSha256(checkpointPreimage);
+  assets.forEach((asset, assetIndex) => {
+    const bytes = assetBytes[assetIndex];
+    imageLedger.assets.set(`${compactRun.run_id}:${asset.sha256}`, { runId: compactRun.run_id, sha256: asset.sha256, bytes, mime: "image/jpeg", sizeBytes: bytes.length, manifest: { sha256: asset.sha256, size_bytes: bytes.length, mime: "image/jpeg", width: 96, height: 128 }, member: true });
+  });
+  const run = {
+    runId: compactRun.run_id,
+    appScopeId: D36_APP_SCOPE,
+    bootstrapNonce: "4".repeat(64),
+    inputSha256: "5".repeat(64),
+    status: "PARTIAL",
+    ownerToken: "owner-d41",
+    fence: 1,
+    paidCalls: 1,
+    checkpointPreimage,
+    checkpointPreimageSha256,
+    logicalStepId: "render-job-02",
+    recoverableUntil: "2026-09-08T00:00:00.000Z",
+    compactRun,
+    snapshot: {
+      schema: "xiaoshimei.image-operation-snapshot.v1",
+      draft_record_id: "draft-record-d36-contract",
+      mutation_epoch: 1,
+      confirmed_draft: d36ConfirmedDraft({ recommended_image_count: 2 }),
+      page_count: 2,
+      production_mode: "narrative",
+      reference_note: "",
+    },
+    referenceManifest: [],
+  };
+  imageLedger.runs.set(run.runId, run);
+  return run;
 }
 
 function d36Transaction() {
@@ -1454,6 +1546,30 @@ test("D36 paid capability with less than 270 seconds remaining stops before ledg
   }
   assert.equal(upstreamCalls, 0);
   assert.equal(events.includes("ledger:claimStart"), false);
+});
+
+test("D41 covered narrative checkpoint commits COMPLETE with zero additional Provider calls", async () => {
+  const events = [];
+  const imageLedger = new FakeD36ImageLedger({ events });
+  const run = await seedD41CoveredNarrativeRun(imageLedger);
+  let upstreamCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
+  try {
+    const result = await d36Transaction()(d36StepInput(run), D36_SETTINGS, { imageLedger, nowMs: 1_788_192_000_000, accessExpiresAtMs: 1_788_192_720_000, appScopeId: D36_APP_SCOPE });
+    assert.equal(result.status, "COMPLETE");
+    assert.equal(result.upstream_calls, 0);
+    assert.equal(result.progress.actual_image_calls, 1);
+    assert.equal(result.progress.completed_image_steps, 1);
+    assert.equal(result.progress.total_image_steps, 1);
+    assert.equal(result.content_package.visible_pages, 2);
+    assert.equal(result.content_package.generation.production_mode, "narrative");
+    assert.equal(result.content_package.pages.every((page) => !page.info_panels?.length), true);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 0);
+  assertOrdered(events, ["ledger:readiness", "ledger:reserveStep", "ledger:readRunAsset", "ledger:commitStep"]);
 });
 
 test("D36 STEP reserves one logical action; an alternate nonce cannot enter the image upstream", async () => {

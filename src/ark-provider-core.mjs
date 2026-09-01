@@ -466,7 +466,10 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     const pageRole = roleRepairs[page?.page_role] || page?.page_role;
     const title = nonEmptyString(page?.title, `pages[${index}].title`);
     const body = nonEmptyString(page?.body, `pages[${index}].body`);
-    const rawPanels = Array.isArray(page?.panels) ? page.panels : [];
+    // Narrative mode is one full scene per page. The model prompt asks for
+    // empty panels, but a paid plan must not trust the model to honor a cost
+    // boundary: extra panels become extra illustration units and image calls.
+    const rawPanels = context.productionMode === "narrative" ? [] : (Array.isArray(page?.panels) ? page.panels : []);
     const normalized = {
       pageRole: normalizeXhsPageRole(pageRole, `pages[${index}].page_role`),
       shotRole: normalizeShotRole(page?.shot_role, `pages[${index}].shot_role`, index === 0 ? "scene" : "action"),
