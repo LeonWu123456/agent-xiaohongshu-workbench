@@ -14,6 +14,12 @@ function tile(width, height, { separator = false, thickSeparator = false, whiteB
   return { data, width, height, channels: 4 };
 }
 
+function nearWhitePaper(width, height, value = 248) {
+  const data = new Uint8Array(width * height * 4);
+  for (let offset = 0; offset < width * height; offset += 1) data.set([value, value, value - 2, 255], offset * 4);
+  return { data, width, height, channels: 4 };
+}
+
 function grayFrame(width, height) {
   const data = new Uint8Array(width * height * 4);
   for (let y = 0; y < height; y += 1) {
@@ -41,6 +47,13 @@ function coloredSceneEdge(width, height) {
 test("pixel gate accepts an exact 3:4 white-background illustration", () => {
   const result = inspectMotherSheetTilePixels(tile(120, 160, { whiteBackground: true }));
   assert.equal(result.hasCleanEdges, true);
+});
+
+test("pixel gate rejects a uniform near-white paper rectangle that remains visibly darker than the page", () => {
+  const result = inspectMotherSheetTilePixels(nearWhitePaper(120, 160, 249));
+  assert.equal(result.hasCleanEdges, false);
+  assert.deepEqual(result.contaminatedSides, ["top", "right", "bottom", "left"]);
+  assert.equal(result.sides.top.paperWhiteMismatch, true);
 });
 
 test("pixel gate keeps a white image background even when scene pixels begin inward", () => {

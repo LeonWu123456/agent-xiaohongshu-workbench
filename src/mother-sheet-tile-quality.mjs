@@ -96,9 +96,11 @@ export function inspectMotherSheetTilePixels(image, options = {}) {
     // mother-sheet grid/frame. Dark and coloured scene edges remain valid.
     const uniformLightNeutralLine = uniformOuterLine && outerLightness >= 160 && outerLightness <= 238 && outerChroma <= 48;
     const separator = uniformLightNeutralLine && outer.paleRatio < .9 && distance >= 20;
+    const uniformPaperSurface = uniformOuterLine && outerLightness > 238 && outerChroma <= 18;
+    const paperWhiteMismatch = uniformPaperSurface && outerLightness < 250;
     const transparency = outer.transparentRatio > .01;
-    if (separator || transparency) contaminatedSides.push(side);
-    sides[side] = { outer, inner, distance, uniformOuterLine, uniformLightNeutralLine, separator, transparency };
+    if (separator || paperWhiteMismatch || transparency) contaminatedSides.push(side);
+    sides[side] = { outer, inner, distance, uniformOuterLine, uniformLightNeutralLine, uniformPaperSurface, paperWhiteMismatch, separator, transparency };
   }
   const expectedAspect = String(options.expectedAspect || "3:4");
   const aspectOk = expectedAspect === "9:8"

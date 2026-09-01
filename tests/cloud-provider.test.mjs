@@ -633,7 +633,7 @@ function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_AP
   };
 }
 
-function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "START", runId = "images-2026-09-01T00-00-00-000Z-deadbeef", runRecord = null, mutateEnvelope = null } = {}) {
+function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "START", runId = "images-2026-09-01T00-00-00-000Z-deadbeef", runRecord = null, mutateEnvelope = null, extraKeys = [], extraHashes = {} } = {}) {
   const accessEnv = {
     XIAOSHIMEI_ACCESS_CODE_SHA256: "a".repeat(64),
     XIAOSHIMEI_SESSION_SECRET: "s".repeat(64),
@@ -644,11 +644,12 @@ function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "
   const envelope = structuredClone(signed.envelope);
   if (typeof mutateEnvelope === "function") mutateEnvelope(envelope);
   const rootTag = createHash("sha256").update(appScope).digest("hex").slice(0, 32);
-  const root = `xiaoshimei:image-d36:{${rootTag}}`;
+  const productRoot = "xiaoshimei:image-d37:{xiaoshimei-studio-v2}";
+  const root = `${productRoot}:scope:${rootTag}`;
   const readinessKey = `${root}:readiness`;
-  const capacityKey = `${root}:capacity`;
+  const capacityKey = `${productRoot}:capacity`;
   const commands = [];
-  const keys = mode === "START" ? [capacityKey, readinessKey] : [];
+  const keys = mode === "START" ? [...new Set([capacityKey, readinessKey, ...extraKeys])].sort() : [];
   const env = {
     ...accessEnv,
     UPSTASH_REDIS_REST_URL: "https://fake.upstash.io",
@@ -672,7 +673,7 @@ function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "
     else if (command === "SCAN") result = ["0", keys];
     else if (command === "MEMORY" && body[1] === "USAGE") result = 1_000;
     else if (command === "HGETALL" && body[1] === capacityKey) result = [
-      "schema", "xiaoshimei.image-ledger-capacity.v1",
+      "schema", "xiaoshimei.image-ledger-capacity.v2",
       "capacity_generation", envelope.payload.capacity_generation,
       "attestation_generation", envelope.payload.attestation_generation,
       "capacity_limit_bytes", String(envelope.payload.capacity_limit_bytes),
@@ -682,6 +683,7 @@ function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "
       "live_reservations", "0",
       "unfinalized_inventory", "0",
     ];
+    else if (command === "HGETALL" && Object.prototype.hasOwnProperty.call(extraHashes, body[1])) result = Object.entries(extraHashes[body[1]]).flatMap(([key, value]) => [key, String(value)]);
     else if (command === "HGETALL" && body[1].endsWith(`:run:${runId}:meta`)) result = runRecord || [
       "app_scope", appScope,
       "capacity_generation", envelope.payload.capacity_generation,
@@ -801,6 +803,40 @@ test("D36 default env factory verifies the signed Redis sentinel and performs ST
   assert.equal(fixture.commands.filter((body) => body[0] === "MEMORY" && body[1] === "USAGE").length, 2);
 });
 
+test("D37 START accepts sibling environment and inventoried legacy D36 roots while sharing one conservative capacity total", async () => {
+  const legacyRoot = `xiaoshimei:image-d36:{${"a".repeat(32)}}`;
+  const siblingReadiness = `xiaoshimei:image-d37:{xiaoshimei-studio-v2}:scope:${"b".repeat(32)}:readiness`;
+  const legacyCapacity = `${legacyRoot}:capacity`;
+  const fixture = runtimeLedgerFixture({
+    extraKeys: [siblingReadiness, `${legacyRoot}:readiness`, legacyCapacity],
+    extraHashes: {
+      [legacyCapacity]: {
+        schema: "xiaoshimei.image-ledger-capacity.v1",
+        reserved_bytes: 2_000_000,
+        live_reservations: 1,
+        unfinalized_inventory: 1,
+      },
+    },
+  });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  const readiness = await ledger.assertProductionReady({ mode: "START", appScopeId: fixture.appScope, runId: fixture.runId });
+  assert.equal(readiness.legacyRootCount, 1);
+  assert.equal(readiness.reservedBytes, 2_000_000);
+  assert.equal(readiness.liveReservations, 1);
+  assert.equal(readiness.unfinalizedInventory, 1);
+  assert.equal(readiness.physicalBytes, 5_000);
+});
+
+test("D37 START still rejects an unknown namespace before claim or Provider", async () => {
+  const fixture = runtimeLedgerFixture({ extraKeys: ["another-product:foreign"] });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  await assert.rejects(
+    () => ledger.assertProductionReady({ mode: "START", appScopeId: fixture.appScope, runId: fixture.runId }),
+    /IMAGE_LEDGER_FOREIGN_KEYS_PRESENT/,
+  );
+  assert.equal(fixture.commands.some((body) => body[0] === "EVAL"), false);
+});
+
 test("D36 runtime-attested START atomically rechecks both generations and reserves worst-case capacity in the claim Lua", async () => {
   const fixture = runtimeLedgerFixture({ mode: "START" });
   const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
@@ -826,6 +862,7 @@ test("D36 runtime-attested START atomically rechecks both generations and reserv
   assert.equal(claim.includes(readiness.attestation_generation), true);
   assert.equal(claim.includes(readiness.capacity_generation), true);
   assert.equal(claim.includes(String(readiness.worst_case_run_bytes)), true);
+  assert.doesNotMatch(String(claim[1]), /HGET', KEYS\[3\], 'attestation_generation'/, "one environment refresh must not invalidate another environment's shared capacity slot");
   assert.match(String(claim[1]), /HINCRBY[\s\S]*reserved_bytes[\s\S]*live_reservations[\s\S]*unfinalized_inventory/);
   assert.match(String(claim[1]), /ZADD[\s\S]*recoverable_until/);
 });
@@ -931,6 +968,18 @@ test("D36 attestor binds the retained audit slice, signs exact control facts, an
   assert.equal(second.envelope.payload.capacity_generation, firstCapacityGeneration, "fresh random calibration bytes with the same measured result must not rotate live capacity identity");
   assert.notEqual(second.envelope.payload.attestation_generation, firstAttestationGeneration);
   assert.equal(fixture.state.capacity.reserved_bytes, 0);
+});
+
+test("D37 Preview and Production attestations keep separate readiness keys but derive one shared capacity identity", async () => {
+  const preview = attestorFixture();
+  const production = attestorFixture();
+  production.env.XIAOSHIMEI_APP_SCOPE = `xiaoshimei-studio:${"f".repeat(32)}`;
+  production.env.VERCEL_ENV = "production";
+  const previewResult = await buildAndInstallAttestation({ env: preview.env, fetchImpl: preview.fetchImpl });
+  const productionResult = await buildAndInstallAttestation({ env: production.env, fetchImpl: production.fetchImpl });
+  assert.notEqual(previewResult.readiness_key, productionResult.readiness_key);
+  assert.equal(previewResult.capacity_key, productionResult.capacity_key);
+  assert.equal(previewResult.envelope.payload.capacity_generation, productionResult.envelope.payload.capacity_generation);
 });
 
 test("D36 attestor transports an eight-megabyte calibration in bounded one-megabyte REST chunks", async () => {
@@ -1079,7 +1128,7 @@ test("D36 real adapter maps one app_scope+bootstrap_nonce to one physical run ro
   assert.equal(claims[0][2], "2", "claimStart must atomically address meta plus inventory");
   assert.equal(claims[0][3], claims[1][3]);
   assert.equal(claims[0][4], claims[1][4]);
-  assert.match(claims[0][3], /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:run:images-[0-9TZ-]+-[0-9a-f]{8}:meta$/);
+  assert.match(claims[0][3], /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:run:images-[0-9TZ-]+-[0-9a-f]{8}:meta$/);
   assert.equal(claims[0][4], claims[0][3].replace(/:meta$/, ":inventory"));
   assert.equal(upstreamCalls, 0);
 });
@@ -1808,7 +1857,8 @@ test("D36 signed expiry finalizer waits through 7d-1ms, then releases capacity o
     const appScope = inspectServerAccessConfig(accessEnv).appScope;
     const signed = signedRuntimeAttestation({ nowMs, appScope });
     const tag = createHash("sha256").update(appScope).digest("hex").slice(0, 32);
-    const appRoot = `xiaoshimei:image-d36:{${tag}}`;
+    const productRoot = "xiaoshimei:image-d37:{xiaoshimei-studio-v2}";
+    const appRoot = `${productRoot}:scope:${tag}`;
     const runId = "images-2026-09-01T00-00-00-000Z-deadbeef";
     const runRoot = `${appRoot}:run:${runId}`;
     const meta = `${runRoot}:meta`;
@@ -1817,7 +1867,7 @@ test("D36 signed expiry finalizer waits through 7d-1ms, then releases capacity o
     const keys = [asset, inventory, meta].sort();
     const expiry = `${appRoot}:expiry`;
     const readiness = `${appRoot}:readiness`;
-    const capacity = `${appRoot}:capacity`;
+    const capacity = `${productRoot}:capacity`;
     const member = `${meta}|${signed.envelope.payload.capacity_generation}|${signed.envelope.payload.worst_case_run_bytes}`;
     const commands = [];
     let physicalPresent = true;

@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 
 export const ATTESTATION_SCHEMA = "xiaoshimei.image-ledger-attestation.v1";
 export const ATTESTATION_ENVELOPE_SCHEMA = "xiaoshimei.image-ledger-attestation-envelope.v1";
-export const CAPACITY_SCHEMA = "xiaoshimei.image-ledger-capacity.v1";
+export const CAPACITY_SCHEMA = "xiaoshimei.image-ledger-capacity.v2";
 export const AUDIT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 export const RENEW_MAX_MS = 6 * 24 * 60 * 60 * 1000;
 export const HARD_EXPIRY_MAX_MS = 7 * 24 * 60 * 60 * 1000;
@@ -90,9 +90,15 @@ function numberFrom(value, code) {
   return number;
 }
 
+const D37_PRODUCT_ROOT = "xiaoshimei:image-d37:{xiaoshimei-studio-v2}";
+
 function appRoot(appScope) {
   if (!/^xiaoshimei-studio:[0-9a-f]{32}$/.test(appScope) && appScope !== "xiaoshimei-test-scope") throw new Error("ATTESTATION_APP_SCOPE_INVALID");
-  return `xiaoshimei:image-d36:{${sha256(Buffer.from(appScope)).slice(0, 32)}}`;
+  return `${D37_PRODUCT_ROOT}:scope:${sha256(Buffer.from(appScope)).slice(0, 32)}`;
+}
+
+function productCapacityKey() {
+  return `${D37_PRODUCT_ROOT}:capacity`;
 }
 
 function publicKeyDerBase64(privateKey) {
@@ -282,7 +288,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const signedAtMs = await redisTimeMs(redis);
   const root = appRoot(appScope);
   const readinessKey = `${root}:readiness`;
-  const capacityKey = `${root}:capacity`;
+  const capacityKey = productCapacityKey();
   const priorRaw = await redis.command(["GET", readinessKey]);
   let priorEnvelope = null;
   if (typeof priorRaw === "string") {
@@ -341,8 +347,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const capacityIdentity = {
     database_id_sha256: control.database_id_sha256,
     rest_origin: new URL(redisUrl).origin,
-    app_scope: appScope,
-    key_schema: "xiaoshimei.image-d36.app-scope-hash-tag.v1",
+    key_schema: "xiaoshimei.image-d37.product-capacity-hash-tag.v2",
     calibration_schema: "xiaoshimei.image-ledger-random-bytes-base64.v1",
     logical_worst_case_run_bytes: worstCaseRunBytes,
     calibration_bytes: calibration.calibration_bytes,

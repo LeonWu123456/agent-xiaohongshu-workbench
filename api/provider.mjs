@@ -659,7 +659,10 @@ export async function sliceStandaloneRepairForUnit(bytes, unit, options = {}) {
   const crop = preferredAspect === "9:8"
     ? { left: 0, top: Math.max(0, Math.floor((height - Math.round(width / (9 / 8))) / 2)), width, height: Math.min(height, Math.round(width / (9 / 8))) }
     : { left: 0, top: 0, width, height };
-  const baseTile = await sharp(bytes).flatten({ background: "#ffffff" }).extract(crop).png().toBuffer();
+  let baseTile = await sharp(bytes).flatten({ background: "#ffffff" }).extract(crop).png().toBuffer();
+  const rawTile = await sharp(baseTile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const cleaned = cleanupGeneratedGridArtifacts({ data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels });
+  baseTile = await sharp(Buffer.from(cleaned.data), { raw: { width: cleaned.width, height: cleaned.height, channels: cleaned.channels } }).png().toBuffer();
   const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
   const missing = (reason, pixelGate = null) => ({
     unit_id: unit.unit_id, page_index: unit.page_index, panel_index: unit.panel_index, missing: true,
@@ -789,19 +792,28 @@ export function verifyImageLedgerAttestationEnvelope(envelope, { publicKey, expe
   return structuredClone(payload);
 }
 
-function d36AppRoot(appScopeId) {
+const D37_PRODUCT_ROOT = "xiaoshimei:image-d37:{xiaoshimei-studio-v2}";
+
+function d36ScopeTag(appScopeId) {
   const value = String(appScopeId || "");
   if (!/^xiaoshimei-studio:[0-9a-f]{32}$/.test(value) && value !== "xiaoshimei-test-scope") throw new TypeError("IMAGE_LEDGER_APP_SCOPE_REQUIRED");
-  const tag = sha256Bytes(Buffer.from(value, "utf8")).slice(0, 32);
-  return `xiaoshimei:image-d36:{${tag}}`;
+  return sha256Bytes(Buffer.from(value, "utf8")).slice(0, 32);
+}
+
+function d36AppRoot(appScopeId) {
+  return `${D37_PRODUCT_ROOT}:scope:${d36ScopeTag(appScopeId)}`;
+}
+
+function d36LegacyAppRoot(appScopeId) {
+  return `xiaoshimei:image-d36:{${d36ScopeTag(appScopeId)}}`;
 }
 
 function d36ReadinessKey(appScopeId) {
   return `${d36AppRoot(appScopeId)}:readiness`;
 }
 
-function d36CapacityKey(appScopeId) {
-  return `${d36AppRoot(appScopeId)}:capacity`;
+function d36CapacityKey() {
+  return `${D37_PRODUCT_ROOT}:capacity`;
 }
 
 function d36ExpiryIndexKey(appScopeId) {
@@ -1108,8 +1120,7 @@ end
 local runtime_attested = #KEYS >= 4
 local reservation = 0
 if runtime_attested then
-  if redis.call('HGET', KEYS[3], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v1'
-    or redis.call('HGET', KEYS[3], 'attestation_generation') ~= ARGV[11]
+  if redis.call('HGET', KEYS[3], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v2'
     or redis.call('HGET', KEYS[3], 'capacity_generation') ~= ARGV[12] then return {'CAPACITY_GENERATION_DRIFT'} end
   local reserved = tonumber(redis.call('HGET', KEYS[3], 'reserved_bytes') or '-1')
   local capacity_limit = tonumber(redis.call('HGET', KEYS[3], 'capacity_limit_bytes') or '-1')
@@ -1379,7 +1390,7 @@ return reply
 `;
 
 const D36_RELEASE_CAPACITY_LUA = `
-if redis.call('HGET', KEYS[1], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v1'
+if redis.call('HGET', KEYS[1], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v2'
   or redis.call('HGET', KEYS[1], 'capacity_generation') ~= ARGV[2] then return {'CAPACITY_GENERATION_DRIFT'} end
 if redis.call('ZSCORE', KEYS[2], ARGV[1]) == false then return {'ALREADY_RELEASED'} end
 local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_bytes') or '-1')
@@ -1592,13 +1603,14 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
   const verifyStartInventoryAndCapacity = async (context, attestation) => {
     const appScopeId = String(context?.appScopeId || "");
     await finalizeExpiredRunsWithAttestation(appScopeId, attestation);
-    const root = d36AppRoot(appScopeId);
     const dbSizeBefore = Number(await command(["DBSIZE"]));
     if (!Number.isSafeInteger(dbSizeBefore) || dbSizeBefore < 0) throw new Error("IMAGE_LEDGER_DBSIZE_INVALID");
     const keys = await scanPatternKeys("*");
     const dbSizeAfter = Number(await command(["DBSIZE"]));
     if (dbSizeBefore !== dbSizeAfter || keys.length !== dbSizeAfter) throw new Error("IMAGE_LEDGER_SCAN_NOT_STABLE");
-    if (keys.some((key) => !key.startsWith(`${root}:`))) throw new Error("IMAGE_LEDGER_FOREIGN_KEYS_PRESENT");
+    const isD37Key = (key) => key.startsWith(`${D37_PRODUCT_ROOT}:`);
+    const isLegacyD36Key = (key) => /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:/.test(key);
+    if (keys.some((key) => !isD37Key(key) && !isLegacyD36Key(key))) throw new Error("IMAGE_LEDGER_FOREIGN_KEYS_PRESENT");
     let physicalBytes = 0;
     for (const key of keys) {
       const usage = Number(await command(["MEMORY", "USAGE", key]));
@@ -1608,19 +1620,30 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     }
     const capacityRaw = await command(["HGETALL", d36CapacityKey(appScopeId)]);
     const capacity = redisHashObject(capacityRaw);
-    if (capacity.schema !== "xiaoshimei.image-ledger-capacity.v1"
+    if (capacity.schema !== "xiaoshimei.image-ledger-capacity.v2"
       || capacity.capacity_generation !== attestation.capacity_generation) {
       throw new Error("IMAGE_LEDGER_CAPACITY_GENERATION_DRIFT");
     }
-    const reservedBytes = Number(capacity.reserved_bytes);
-    const liveReservations = Number(capacity.live_reservations);
-    const unfinalizedInventory = Number(capacity.unfinalized_inventory);
+    let reservedBytes = Number(capacity.reserved_bytes);
+    let liveReservations = Number(capacity.live_reservations);
+    let unfinalizedInventory = Number(capacity.unfinalized_inventory);
     if (![reservedBytes, liveReservations, unfinalizedInventory].every((value) => Number.isSafeInteger(value) && value >= 0)) {
       throw new Error("IMAGE_LEDGER_CAPACITY_INVALID");
     }
+    const legacyCapacityKeys = keys.filter((key) => /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:capacity$/.test(key));
+    for (const key of legacyCapacityKeys) {
+      const legacy = redisHashObject(await command(["HGETALL", key]));
+      const values = [Number(legacy.reserved_bytes), Number(legacy.live_reservations), Number(legacy.unfinalized_inventory)];
+      if (legacy.schema !== "xiaoshimei.image-ledger-capacity.v1" || !values.every((value) => Number.isSafeInteger(value) && value >= 0)) {
+        throw new Error("IMAGE_LEDGER_LEGACY_CAPACITY_INVALID");
+      }
+      reservedBytes += values[0]; liveReservations += values[1]; unfinalizedInventory += values[2];
+      if (![reservedBytes, liveReservations, unfinalizedInventory].every(Number.isSafeInteger)) throw new Error("IMAGE_LEDGER_CAPACITY_INVALID");
+    }
     const runMetaKeys = keys.filter((key) => /:run:images-[^:]+:meta$/.test(key));
-    const inventoryUnion = new Set([d36ReadinessKey(appScopeId), d36CapacityKey(appScopeId), d36ExpiryIndexKey(appScopeId)]);
-    for (const key of [...inventoryUnion]) if (!keys.includes(key)) inventoryUnion.delete(key);
+    const inventoryUnion = new Set(keys.filter((key) => key === d36CapacityKey(appScopeId)
+      || /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:(readiness|expiry)$/.test(key)
+      || /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:(readiness|capacity|expiry)$/.test(key)));
     for (const metaKey of runMetaKeys) {
       const inventoryKey = metaKey.replace(/:meta$/, ":inventory");
       const members = await command(["SMEMBERS", inventoryKey]);
@@ -1633,7 +1656,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     if (physicalBytes + reservedBytes + attestation.worst_case_run_bytes + attestation.headroom_bytes > attestation.capacity_limit_bytes) {
       throw new Error("IMAGE_LEDGER_CAPACITY_EXHAUSTED");
     }
-    return { ...attestation, mode: "START", runtime_attested: true, physicalBytes, reservedBytes, liveReservations, unfinalizedInventory };
+    return { ...attestation, mode: "START", runtime_attested: true, physicalBytes, reservedBytes, liveReservations, unfinalizedInventory, legacyRootCount: legacyCapacityKeys.length };
   };
   const verifyStepReservation = async (context, attestation) => {
     const runId = String(context?.runId || "");

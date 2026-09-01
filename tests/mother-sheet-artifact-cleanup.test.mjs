@@ -46,3 +46,18 @@ test("cleanup expands a legacy repaired rule through the contaminated outer band
   assert.equal(result.data[(2 * image.width + 60) * image.channels], 255);
   assert.equal(result.data[(80 * image.width + 80) * image.channels], 60);
 });
+
+test("cleanup normalizes only edge-connected near-white paper and preserves an enclosed white subject", () => {
+  const width = 40; const height = 48; const channels = 4;
+  const data = new Uint8Array(width * height * channels);
+  for (let offset = 0; offset < width * height; offset += 1) data.set([248, 248, 246, 255], offset * channels);
+  const set = (x, y, rgb) => data.set([...rgb, 255], (y * width + x) * channels);
+  for (let x = 11; x <= 28; x += 1) { set(x, 11, [45, 45, 45]); set(x, 36, [45, 45, 45]); }
+  for (let y = 11; y <= 36; y += 1) { set(11, y, [45, 45, 45]); set(28, y, [45, 45, 45]); }
+  for (let y = 12; y < 36; y += 1) for (let x = 12; x < 28; x += 1) set(x, y, [246, 246, 244]);
+  const result = cleanupGeneratedGridArtifacts({ data, width, height, channels });
+  assert.equal(result.actions.at(-1).type, "EDGE_CONNECTED_PAPER_NORMALIZED");
+  assert.equal(result.data[(2 * width + 2) * channels], 255);
+  assert.equal(result.data[(20 * width + 20) * channels], 246);
+  assert.equal(result.data[(11 * width + 20) * channels], 45);
+});

@@ -61,8 +61,8 @@
 1. 冻结 candidate commit、Vercel project/environment、native database 和 app scope。
 2. 在 Runtime 外运行 `node scripts/attest-upstash-image-ledger.mjs`。脚本只在 active、not modifying、TLS on、eviction/db_eviction/auto-upgrade off、七天审计连续、校准写入/readback/物理用量/DEL/absence 全部可证时签发。
 3. 回读输出中的 `control_config_hash`、`relevant_audit_set_hash`、audit high-water、`attestation_generation`、`capacity_generation`、第 6 天 renew 和第 7 天 hard expiry；输出不含秘密。
-4. 相同 capacity identity 的续签只改变 `attestation_generation`，保留所有 live reservation；改变 database/origin/app scope/key schema/calibration/capacity 时，旧 `live_reservations`、`reserved_bytes`、`unfinalized_inventory` 任一非零都拒绝切换。
-5. 新 START 在 Provider 前验签 sentinel，并执行 Redis TIME、PING、DBSIZE A/full SCAN/DBSIZE B、exact inventory union、物理/逻辑容量检查；同一 claim Lua 再验 generation 并原子占 worst-case reservation。STEP 只重验当前 receipt、稳定 `capacity_generation` 和已有 reservation，不重复全库扫描。
+4. 相同 capacity identity 的续签只改变各环境自己的 `attestation_generation`，保留所有 live reservation。D37 capacity identity 绑定 database/origin/product key schema/calibration/capacity，不含 app scope；Preview 与 Production 的 readiness/run/expiry 按 scope 子路径隔离，但共享唯一产品级 capacity key 和固定 Redis hash tag。改变 database/origin/key schema/calibration/capacity 时，旧 `live_reservations`、`reserved_bytes`、`unfinalized_inventory` 任一非零都拒绝切换。
+5. 新 START 在 Provider 前验签当前环境 sentinel，并执行 Redis TIME、PING、DBSIZE A/full SCAN/DBSIZE B、exact inventory union、物理/逻辑容量检查；同一 claim Lua 只对共享 capacity 的稳定 `capacity_generation` 原子占 worst-case reservation，不能用另一个环境最近写入的 `attestation_generation` 使当前环境失效。迁移窗内旧 D36 roots 必须逐 inventory/capacity 保守计量，未知 namespace 仍 fail closed。STEP 只重验当前 receipt、稳定 `capacity_generation` 和已有 reservation，不重复全库扫描。
 6. 七天内不得因 COMPLETE、本机已保存或 helper 调用提前删除 server raw asset。Redis TIME 到恢复截止后，下一次 paid admission 才有界执行 inventory freeze → exact DEL → 每键 EXISTS=0 + run-root SCAN empty → 原子 capacity release；TTL 设得晚于七天，仅作无后续请求时的物理兜底，TTL 本身不释放 reservation。
 
 ### 触发与失败语义

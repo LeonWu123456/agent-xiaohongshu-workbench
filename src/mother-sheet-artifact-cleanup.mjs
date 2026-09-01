@@ -26,6 +26,42 @@ function whitePixel(data, width, channels, x, y) {
   if (channels > 3) data[index + 3] = 255;
 }
 
+function edgeConnectedPaperPixel(data, width, channels, x, y) {
+  const index = (y * width + x) * channels;
+  if (channels > 3 && data[index + 3] < 250) return false;
+  const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
+  const lightness = (red + green + blue) / 3;
+  const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
+  return lightness >= 242 && chroma <= 16;
+}
+
+function normalizeEdgeConnectedPaper(data, width, height, channels) {
+  const visited = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  let head = 0; let tail = 0; let changed = 0;
+  const enqueue = (x, y) => {
+    const offset = y * width + x;
+    if (visited[offset] || !edgeConnectedPaperPixel(data, width, channels, x, y)) return;
+    visited[offset] = 1;
+    queue[tail] = offset;
+    tail += 1;
+  };
+  for (let x = 0; x < width; x += 1) { enqueue(x, 0); enqueue(x, height - 1); }
+  for (let y = 1; y < height - 1; y += 1) { enqueue(0, y); enqueue(width - 1, y); }
+  while (head < tail) {
+    const offset = queue[head]; head += 1;
+    const x = offset % width; const y = Math.floor(offset / width);
+    const index = offset * channels;
+    if (data[index] !== 255 || data[index + 1] !== 255 || data[index + 2] !== 255) changed += 1;
+    whitePixel(data, width, channels, x, y);
+    if (x > 0) enqueue(x - 1, y);
+    if (x + 1 < width) enqueue(x + 1, y);
+    if (y > 0) enqueue(x, y - 1);
+    if (y + 1 < height) enqueue(x, y + 1);
+  }
+  return changed;
+}
+
 function findRule(data, width, height, channels, axis, start, end) {
   let best = null;
   for (let coordinate = start; coordinate <= end; coordinate += 1) {
@@ -95,5 +131,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActio
     }
     actions.push({ type: "VERTICAL_GRID_EDGE_BAND_REMOVED", edge, coordinate: rule.coordinate, ratio: rule.ratio, from, to });
   });
+  const normalizedPaperPixels = normalizeEdgeConnectedPaper(data, width, height, channels);
+  if (normalizedPaperPixels > 0) actions.push({ type: "EDGE_CONNECTED_PAPER_NORMALIZED", pixels: normalizedPaperPixels });
   return { data, width, height, channels, actions };
 }
