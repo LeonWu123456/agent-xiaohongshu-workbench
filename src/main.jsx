@@ -2031,7 +2031,7 @@ function App() {
 
   async function adoptHistoricalDraft() {
     if (draftMutationIsLocked()) return;
-    if (publicationAuthorityRef.current?.code !== "HISTORICAL_CONFIRMATION_REQUIRED" || historicalAdoptionRef.current) return;
+    if (!["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"].includes(publicationAuthorityRef.current?.code) || historicalAdoptionRef.current) return;
     const operation = mainAuthority.capture("historical-draft-adoption", { envelopeScoped: true });
     historicalAdoptionRef.current = true;
     setHistoricalAdoptionBusy(true);
@@ -3392,7 +3392,7 @@ function App() {
         </div>}
 
         {view === "compose" && <section className={`workbench ${creatorOpen ? "is-creator-open" : ""}`}>
-          <section className="gallery" aria-label="页面编辑区">
+          <section className="gallery" aria-label="页面编辑区" data-active-draft-id={workspaceEnvelope.active_draft_id} data-visible-page-count={visiblePages.length}>
             <div className="gallery__toolbar">
               <span className="mode-badge">{content.generation?.mode === "PROVIDER" ? "AI 素材草稿" : "演示模板"}</span>
               <span>{visiblePages.length} 页 · {generatedImageCount} 图</span>
@@ -3467,7 +3467,7 @@ function App() {
                   <span>文字稿：{textDraft?.selected_title || "未确认"}</span>
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
-                  {publicationAuthority.code === "HISTORICAL_CONFIRMATION_REQUIRED" && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
+                  {["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"].includes(publicationAuthority.code) && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
                   {publicationAuthority.code === "CONTENT_LINEAGE_MISMATCH" && pendingImageOperation && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : "恢复当前两页对应文案（0 次图片调用）"}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
@@ -3510,8 +3510,8 @@ function App() {
             <div className="library-section-title"><strong>逐份打开</strong><span>{library.length} 份本机资产 · 发布后可持续补真实数据</span></div>
             <div className="library-grid">{library.map((item) => {
               const status = realityFeedbackStatus(item.reality_feedback);
-              return <article className="library-item" key={item.draft_record_id}>
-                <button className="library-card" onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
+              return <article className="library-item" key={item.draft_record_id} data-draft-id={item.draft_record_id}>
+                <button className="library-card" data-draft-id={item.draft_record_id} onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
                 <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.draft_record_id)}>现实反馈</button>
               </article>;
             })}</div>

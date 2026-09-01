@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import html2canvas from "html2canvas";
 import {
-  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crop, Minus, Move, Plus, RotateCcw, ScanSearch, Shuffle, Type,
+  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crop, Minus, Move, Plus, RotateCcw, ScanSearch, Shuffle, Sparkles, Type,
 } from "lucide-react";
 import {
   HTML_IMAGE_ZOOM_MAX, bodyParagraphs, editorialPanelMeta, highlightTextSegments, imageEditFor, layoutsForPage, nextHtmlLayout, normalizeHtmlState,
@@ -13,6 +13,7 @@ import { assertRenderedImageRegions, assertRenderedPageContent } from "./export-
 import { rectContainedBy, rectsIntersect } from "./layout-qa.mjs";
 import { mediaPolicyFor } from "./media-role.mjs";
 import { designProgramStyle, normalizeDesignProgram } from "./design-program.mjs";
+import { cleanupGeneratedGridArtifacts } from "./mother-sheet-artifact-cleanup.mjs";
 
 const PAGE_WIDTH = 1080;
 const PAGE_HEIGHT = 1440;
@@ -101,6 +102,38 @@ async function detectSubjectFocus(src, mediaRole = "inline_sticker") {
       ? 1
       : subjectCoverage < .28 ? 1.04 : policy.defaultZoom,
   };
+}
+
+async function normalizeIllustrationBackground(src) {
+  if (!src) throw new TypeError("ILLUSTRATION_SOURCE_REQUIRED");
+  const image = new Image();
+  if (!src.startsWith("data:")) image.crossOrigin = "anonymous";
+  image.decoding = "async";
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("ILLUSTRATION_BACKGROUND_READ_FAILED"));
+    image.src = src;
+    if (image.complete && image.naturalWidth) resolve();
+  });
+  if (!image.naturalWidth || !image.naturalHeight) throw new Error("ILLUSTRATION_BACKGROUND_READ_FAILED");
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(image, 0, 0);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+  const cleaned = cleanupGeneratedGridArtifacts({
+    data: new Uint8Array(pixels.data),
+    width: canvas.width,
+    height: canvas.height,
+    channels: 4,
+  }, { paperOnly: true });
+  const changed = cleaned.actions.find((action) => action.type === "EDGE_CONNECTED_PAPER_NORMALIZED")?.pixels || 0;
+  if (!changed) return { src, changed: 0 };
+  const output = context.createImageData(canvas.width, canvas.height);
+  output.data.set(cleaned.data);
+  context.putImageData(output, 0, 0);
+  return { src: canvas.toDataURL("image/jpeg", .94), changed };
 }
 
 export function inspectHtmlPageLayout(pageElement) {
@@ -514,6 +547,7 @@ export function HtmlPageEditor({ page, pageIndex, totalPages, onStateChange, onP
   const [interactionMode, setInteractionMode] = useState("edit");
   const [moveableTarget, setMoveableTarget] = useState(null);
   const [focusBusy, setFocusBusy] = useState(false);
+  const [backgroundBusy, setBackgroundBusy] = useState(false);
   const [layoutIssue, setLayoutIssue] = useState(null);
   const stageRef = useRef(null);
   const selectedEntry = selectedImage ? imageEntries.find((item) => item.id === selectedImage) : null;
@@ -536,6 +570,27 @@ export function HtmlPageEditor({ page, pageIndex, totalPages, onStateChange, onP
     setFocusBusy(true);
     try { updateImage(imageId, await detectSubjectFocus(entry.imageStyle.src, entry.mediaRole)); }
     finally { setFocusBusy(false); }
+  };
+  const whitenSelectedImageBackground = async () => {
+    if (!selectedEntry?.imageStyle?.src || backgroundBusy) return;
+    setBackgroundBusy(true);
+    try {
+      const result = await normalizeIllustrationBackground(selectedEntry.imageStyle.src);
+      if (!result.changed) return;
+      if (selectedImage === "hero") {
+        onPagePatch?.({ image_style: { ...page.image_style, src: result.src } });
+        return;
+      }
+      const panelIndex = Number(String(selectedImage || "").replace(/^panel-/, ""));
+      if (!Number.isInteger(panelIndex) || panelIndex < 0) return;
+      onPagePatch?.({
+        info_panels: (Array.isArray(page.info_panels) ? page.info_panels : []).map((panel, index) => index === panelIndex
+          ? { ...panel, image_style: { ...panel.image_style, src: result.src } }
+          : panel),
+      });
+    } finally {
+      setBackgroundBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -586,6 +641,7 @@ export function HtmlPageEditor({ page, pageIndex, totalPages, onStateChange, onP
       {selectedEdit ? <div className="html-editor__image-tools" aria-label="图片裁剪与取景">
         <Crop /><span>裁剪 / 取景</span>
         <button type="button" aria-label="智能识别主体" title="智能识别主体" disabled={focusBusy} onClick={() => autoFocusImage(selectedImage)}><ScanSearch /></button>
+        <button type="button" aria-label="提白插图背景" title="提白插图背景（不调用模型）" disabled={backgroundBusy} onClick={whitenSelectedImageBackground}><Sparkles /></button>
         <button type="button" aria-label="缩小图片" title="缩小图片" disabled={selectedEdit.zoom <= 1} onClick={() => updateSelectedImage({ zoom: selectedEdit.zoom - 0.04 })}><Minus /></button>
         <output aria-label="当前图片缩放">{Math.round(selectedEdit.zoom * 100)}%</output>
         <button type="button" aria-label="放大图片" title="放大图片" disabled={selectedEdit.zoom >= HTML_IMAGE_ZOOM_MAX} onClick={() => updateSelectedImage({ zoom: selectedEdit.zoom + 0.04 })}><Plus /></button>

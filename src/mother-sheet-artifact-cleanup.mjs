@@ -32,13 +32,59 @@ function edgeConnectedPaperPixel(data, width, channels, x, y) {
   const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
   const lightness = (red + green + blue) / 3;
   const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
-  return lightness >= 242 && chroma <= 16;
+  // Seedream often returns a softly graded warm paper even when the prompt asks
+  // for #FFFFFF. Connectivity keeps the operation on the outside paper; this
+  // broader traversal threshold lets the later feather reach the full gradient
+  // instead of cutting a jagged hard boundary through it.
+  return lightness >= 185 && chroma <= 45;
+}
+
+function paperWhiteningStrength(data, width, channels, x, y) {
+  const index = (y * width + x) * channels;
+  const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
+  const lightness = (red + green + blue) / 3;
+  const chroma = Math.max(red, green, blue) - Math.min(red, green, blue);
+  const lightProgress = Math.max(0, Math.min(1, (lightness - 185) / 35));
+  const smoothLight = lightProgress * lightProgress * (3 - 2 * lightProgress);
+  const chromaWeight = Math.max(0, Math.min(1, (48 - chroma) / 18));
+  return smoothLight * chromaWeight;
+}
+
+function blurPaperMask(mask, width, height, radius) {
+  if (radius < 1) return mask;
+  const horizontal = new Uint8Array(mask.length);
+  const output = new Uint8Array(mask.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      for (let delta = -radius; delta <= radius; delta += 1) sum += mask[y * width + Math.max(0, Math.min(width - 1, x + delta))];
+      horizontal[y * width + x] = Math.round(sum / (radius * 2 + 1));
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) {
+      let sum = 0;
+      for (let delta = -radius; delta <= radius; delta += 1) sum += horizontal[Math.max(0, Math.min(height - 1, y + delta)) * width + x];
+      output[y * width + x] = Math.round(sum / (radius * 2 + 1));
+    }
+  }
+  return output;
+}
+
+function applyPaperStrength(data, channels, offset, strength) {
+  const index = offset * channels;
+  const red = data[index]; const green = data[index + 1]; const blue = data[index + 2];
+  const next = [red, green, blue].map((value) => Math.round(value + (255 - value) * strength));
+  const changed = next[0] !== red || next[1] !== green || next[2] !== blue;
+  data[index] = next[0]; data[index + 1] = next[1]; data[index + 2] = next[2];
+  if (channels > 3) data[index + 3] = 255;
+  return changed;
 }
 
 function normalizeEdgeConnectedPaper(data, width, height, channels) {
   const visited = new Uint8Array(width * height);
   const queue = new Int32Array(width * height);
-  let head = 0; let tail = 0; let changed = 0;
+  let head = 0; let tail = 0;
   const enqueue = (x, y) => {
     const offset = y * width + x;
     if (visited[offset] || !edgeConnectedPaperPixel(data, width, channels, x, y)) return;
@@ -51,13 +97,23 @@ function normalizeEdgeConnectedPaper(data, width, height, channels) {
   while (head < tail) {
     const offset = queue[head]; head += 1;
     const x = offset % width; const y = Math.floor(offset / width);
-    const index = offset * channels;
-    if (data[index] !== 255 || data[index + 1] !== 255 || data[index + 2] !== 255) changed += 1;
-    whitePixel(data, width, channels, x, y);
     if (x > 0) enqueue(x - 1, y);
     if (x + 1 < width) enqueue(x + 1, y);
     if (y > 0) enqueue(x, y - 1);
     if (y + 1 < height) enqueue(x, y + 1);
+  }
+  const mask = new Uint8Array(width * height);
+  for (let offset = 0; offset < visited.length; offset += 1) {
+    if (!visited[offset]) continue;
+    const x = offset % width; const y = Math.floor(offset / width);
+    mask[offset] = Math.round(paperWhiteningStrength(data, width, channels, x, y) * 255);
+  }
+  const radius = Math.max(1, Math.min(8, Math.round(Math.min(width, height) / 120)));
+  const softened = blurPaperMask(mask, width, height, radius);
+  let changed = 0;
+  for (let offset = 0; offset < visited.length; offset += 1) {
+    if (!visited[offset] || !softened[offset]) continue;
+    if (applyPaperStrength(data, channels, offset, softened[offset] / 255)) changed += 1;
   }
   return changed;
 }
@@ -71,7 +127,7 @@ function findRule(data, width, height, channels, axis, start, end) {
   return best;
 }
 
-export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActions = [] } = {}) {
+export function cleanupGeneratedGridArtifacts(image, { kv = false, paperOnly = false, previousActions = [] } = {}) {
   const source = image?.data;
   const width = finiteInteger(image?.width);
   const height = finiteInteger(image?.height);
@@ -83,7 +139,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActio
   // white, but can still retain a neighbour-cell strip outside that rule.
   // Replay the recorded coordinate as an edge-band cleanup so old paid assets
   // can be repaired without regenerating or recharging.
-  for (const prior of Array.isArray(previousActions) ? previousActions : []) {
+  for (const prior of paperOnly ? [] : (Array.isArray(previousActions) ? previousActions : [])) {
     if (prior?.type !== "HORIZONTAL_GRID_RULE_REMOVED") continue;
     const coordinate = Math.max(0, Math.min(height - 1, Math.round(Number(prior.coordinate))));
     const edge = coordinate < height / 2 ? "top" : "bottom";
@@ -92,7 +148,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActio
     for (let y = from; y <= to; y += 1) for (let x = 0; x < width; x += 1) whitePixel(data, width, channels, x, y);
     actions.push({ type: "LEGACY_HORIZONTAL_GRID_EDGE_BAND_REMOVED", edge, coordinate, from, to });
   }
-  if (kv) {
+  if (!paperOnly && kv) {
     const seam = findRule(data, width, height, channels, "x", Math.round(width * .08), Math.round(width * .4));
     if (seam) {
       for (let y = 0; y < height; y += 1) for (let x = 0; x <= Math.min(width - 1, seam.coordinate + 3); x += 1) whitePixel(data, width, channels, x, y);
@@ -103,7 +159,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActio
     { edge: "top", start: 0, end: Math.round(height * .08) },
     { edge: "bottom", start: Math.round(height * .92), end: height - 1 },
   ];
-  horizontalRanges.forEach(({ edge, start, end }) => {
+  if (!paperOnly) horizontalRanges.forEach(({ edge, start, end }) => {
     const rule = findRule(data, width, height, channels, "y", start, end);
     if (!rule) return;
     // The leaked material sits between the tile edge and the detected grid
@@ -121,7 +177,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, previousActio
     { edge: "left", start: 0, end: Math.round(width * .08) },
     { edge: "right", start: Math.round(width * .92), end: width - 1 },
   ];
-  verticalRanges.forEach(({ edge, start, end }) => {
+  if (!paperOnly) verticalRanges.forEach(({ edge, start, end }) => {
     const rule = findRule(data, width, height, channels, "x", start, end);
     if (!rule) return;
     const from = edge === "left" ? 0 : Math.max(0, rule.coordinate - 3);

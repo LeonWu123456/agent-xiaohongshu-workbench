@@ -42,6 +42,13 @@ test("blocked publication controls use native disable in addition to the inner l
   assert.match(source, /publicationSnapshotDecision/);
 });
 
+test("saved content without a usable generation session can enter the explicit zero-paid adoption path", async () => {
+  const source = await readFile(mainUrl, "utf8");
+  assert.match(source, /\["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"\]\.includes\(publicationAuthorityRef\.current\?\.code\)/);
+  assert.match(source, /\["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"\]\.includes\(publicationAuthority\.code\)/);
+  assert.match(source, /确认现有文案为本稿唯一发布文案/);
+});
+
 test("creator expansion cannot squeeze the desktop canvas again", async () => {
   const css = `${await readFile(cssUrl, "utf8")}\n${await readFile(pageContractCssUrl, "utf8")}`;
   assert.match(css, /\.workbench\.is-creator-open \{ grid-template-columns: minmax\(560px,1fr\) 430px; \}/);
@@ -148,6 +155,9 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /single executable geometry authority/);
   assert.doesNotMatch(legacyCssSource, /^\.html-page/m);
   assert.match(htmlSource, /PANEL_CHILD_ESCAPE/);
+  assert.match(htmlSource, /aria-label="提白插图背景"/);
+  assert.match(htmlSource, /cleanupGeneratedGridArtifacts/);
+  assert.match(htmlSource, /onPagePatch\?\.\(\{ image_style:/);
   assert.match(htmlSource, /CROSS_PANEL_OVERLAP/);
   assert.match(htmlSource, /ESSAY_TEXT_IMAGE_OVERLAP/);
   assert.match(htmlSource, /COVER_HEADER_LEDE_OVERLAP/);

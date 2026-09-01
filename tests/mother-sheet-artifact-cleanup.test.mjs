@@ -61,3 +61,40 @@ test("cleanup normalizes only edge-connected near-white paper and preserves an e
   assert.equal(result.data[(20 * width + 20) * channels], 246);
   assert.equal(result.data[(11 * width + 20) * channels], 45);
 });
+
+test("cleanup whitens warm ivory illustration paper without crossing the subject outline", () => {
+  const width = 48; const height = 64; const channels = 4;
+  const data = new Uint8Array(width * height * channels);
+  for (let offset = 0; offset < width * height; offset += 1) data.set([240, 234, 222, 255], offset * channels);
+  const set = (x, y, rgb) => data.set([...rgb, 255], (y * width + x) * channels);
+  for (let x = 12; x <= 35; x += 1) { set(x, 14, [48, 43, 39]); set(x, 49, [48, 43, 39]); }
+  for (let y = 14; y <= 49; y += 1) { set(12, y, [48, 43, 39]); set(35, y, [48, 43, 39]); }
+  for (let y = 15; y < 49; y += 1) for (let x = 13; x < 35; x += 1) set(x, y, [239, 231, 216]);
+  const result = cleanupGeneratedGridArtifacts({ data, width, height, channels });
+  assert.equal(result.actions.at(-1).type, "EDGE_CONNECTED_PAPER_NORMALIZED");
+  const outside = [...result.data.slice((2 * width + 2) * channels, (2 * width + 2) * channels + 3)];
+  assert.ok(outside.every((value) => value >= 252));
+  assert.ok(Math.max(...outside) - Math.min(...outside) <= 2);
+  assert.deepEqual([...result.data.slice((28 * width + 24) * channels, (28 * width + 24) * channels + 3)], [239, 231, 216]);
+  assert.deepEqual([...result.data.slice((14 * width + 24) * channels, (14 * width + 24) * channels + 3)], [48, 43, 39]);
+});
+
+test("cleanup feathers a warm paper gradient without a hard threshold step", () => {
+  const width = 64; const height = 48; const channels = 4;
+  const data = new Uint8Array(width * height * channels);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const shade = 246 - Math.round((x / (width - 1)) * 34);
+    data.set([shade, shade - 5, shade - 14, 255], (y * width + x) * channels);
+  }
+  const result = cleanupGeneratedGridArtifacts({ data, width, height, channels }, { paperOnly: true });
+  const row = Math.floor(height / 2);
+  const outputLightness = Array.from({ length: width }, (_, x) => {
+    const offset = (row * width + x) * channels;
+    return (result.data[offset] + result.data[offset + 1] + result.data[offset + 2]) / 3;
+  });
+  const largestStep = Math.max(...outputLightness.slice(1).map((value, index) => Math.abs(value - outputLightness[index])));
+  assert.ok(largestStep <= 4, `gradient introduced a ${largestStep}-level hard edge`);
+  assert.ok(outputLightness[0] >= 252);
+  assert.ok(outputLightness.at(-1) > 205);
+  assert.deepEqual(result.actions.map((action) => action.type), ["EDGE_CONNECTED_PAPER_NORMALIZED"]);
+});
