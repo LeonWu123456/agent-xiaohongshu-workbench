@@ -7,6 +7,7 @@ import { applyCompositionMode } from "./design-presets.mjs";
 import { INFO_PANEL_SURFACE_COLOR, createInfoPanelsFromPlan } from "./infographic-panels.mjs";
 import { normalizeProductionMode, productionModeLabel, productionModePlanInstruction, productionModeUsesInfoPanels } from "./production-mode.mjs";
 import { assertXhsPublishQuality } from "./xhs-publish-quality.mjs";
+import { textDraftLengthBounds } from "./text-draft-policy.mjs";
 import {
   DESIGN_PROGRAM_COMPOSITIONS, DESIGN_PROGRAM_FOCAL_ROLES, DESIGN_PROGRAM_IMAGE_EDGES, DESIGN_PROGRAM_IMAGE_SCALES,
   DESIGN_PROGRAM_RHYTHMS, DESIGN_PROGRAM_TITLE_MEASURES, DESIGN_PROGRAM_WHITESPACE_ANCHORS, normalizeDesignProgram,
@@ -125,12 +126,6 @@ function hasProcedure(value) {
 }
 
 function compactLength(value) { return String(value).replace(/\s/g, "").length; }
-
-function textDraftLengthBounds(topic) {
-  const sourceLength = compactLength(topic);
-  if (sourceLength < 80) return { minimum: 240, maximum: 900, sourceLength, fullSource: false };
-  return { minimum: 180, maximum: Math.min(600, Math.max(220, Math.ceil(sourceLength * 1.3))), sourceLength, fullSource: true };
-}
 
 function normalizeReadableParagraphs(value) {
   const body = String(value).trim();

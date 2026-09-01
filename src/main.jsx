@@ -77,6 +77,7 @@ import { HtmlPageEditor, renderHtmlPageToPng } from "./HtmlPageEditor.jsx";
 import { editorModeForPage } from "./html-layout.mjs";
 import { resolveDownloadTarget } from "./download-transport.mjs";
 import { XIAOSHIMEI_AVATAR_DATA_URL } from "../api/xiaoshimei-avatar-data.mjs";
+import { textDraftConfirmationIssue } from "./text-draft-policy.mjs";
 import "./styles.css";
 import "./xhs-page-contract.css";
 
@@ -2290,9 +2291,8 @@ function App() {
   }
 
   function textDraftIsReady() {
-    if (!textDraft || textDraft.selected_title.trim().length < 8) { failGeneration({ code: "TITLE_TOO_SHORT", title: "标题还不完整", detail: "请把标题补充到至少8个字。" }); return false; }
-    if (textDraft.body.replace(/\s/g, "").length < 240) { failGeneration({ code: "BODY_TOO_SHORT", title: "正文被改得太短", detail: "至少保留240个有效字符。" }); return false; }
-    if (textDraft.tags.length !== 5 || textDraft.tags.some((tag) => !tag.trim())) { failGeneration({ code: "TAGS_INVALID", title: "标签还没填完", detail: "请保留5个有内容的标签。" }); return false; }
+    const issue = textDraftConfirmationIssue(textDraft);
+    if (issue) { failGeneration(issue); return false; }
     return true;
   }
 
