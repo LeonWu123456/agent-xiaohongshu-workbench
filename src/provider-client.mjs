@@ -48,6 +48,30 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     globalThis.sessionStorage?.setItem(CLOUD_VERIFIED_KEY, JSON.stringify({ signature: settingsSignature(settings), verified_at: new Date().toISOString() }));
   };
 
+  const credentialOptions = isLoopback ? {} : { credentials: "same-origin" };
+  const providerFailure = (response, payload) => {
+    const providerCode = String(payload?.code || payload?.error || `HTTP_${response?.status || "UNKNOWN"}`);
+    const error = new Error(`provider request failed: ${providerCode}`);
+    error.providerCode = providerCode;
+    error.providerStage = typeof payload?.stage === "string" ? payload.stage : null;
+    error.failureId = typeof payload?.failure_id === "string" ? payload.failure_id : null;
+    error.httpStatus = response?.status || null;
+    error.requiresAccess = response?.status === 401 && !isLoopback
+      && (new Set(["ACCESS_DENIED", "ACCESS_SESSION_REQUIRED"]).has(providerCode) || cloudSettings()?.credential_mode === "SERVER_MANAGED");
+    error.providerDetails = payload?.details && typeof payload.details === "object" ? structuredClone(payload.details) : null;
+    return error;
+  };
+  const progressRequestsStop = (value) => value === "STOP" || value === false || value?.action === "STOP";
+  const stoppedAfterCheckpoint = (resume) => {
+    const error = new Error("IMAGE_RUN_STOPPED_AFTER_CHECKPOINT");
+    error.providerCode = "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT";
+    error.providerStage = "image";
+    error.providerDetails = structuredClone(resume);
+    error.checkpointPersisted = true;
+    error.intentionalStop = true;
+    return error;
+  };
+
   const post = async (target, body) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -55,18 +79,9 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
       const settings = cloudSettings();
       const apiKey = settings ? globalThis.sessionStorage?.getItem(CLOUD_KEY) || "" : "";
       const browserByok = settings && settings.credential_mode !== "SERVER_MANAGED";
-      const response = await fetchImpl(target, { method: "POST", headers: { "content-type": "application/json", ...(browserByok ? { authorization: `Bearer ${apiKey}`, "x-xiaoshimei-text-model": settings.text_model, "x-xiaoshimei-image-model": settings.image_model } : {}) }, body: JSON.stringify(body), signal: controller.signal });
+      const response = await fetchImpl(target, { method: "POST", headers: { "content-type": "application/json", ...(browserByok ? { authorization: `Bearer ${apiKey}`, "x-xiaoshimei-text-model": settings.text_model, "x-xiaoshimei-image-model": settings.image_model } : {}) }, body: JSON.stringify(body), signal: controller.signal, ...credentialOptions });
       const payload = await response.json();
-      if (!response?.ok) {
-        const providerCode = String(payload?.code || payload?.error || `HTTP_${response?.status || "UNKNOWN"}`);
-        const error = new Error(`provider request failed: ${providerCode}`);
-        error.providerCode = providerCode;
-        error.providerStage = typeof payload?.stage === "string" ? payload.stage : null;
-        error.failureId = typeof payload?.failure_id === "string" ? payload.failure_id : null;
-        error.httpStatus = response?.status || null;
-        error.providerDetails = payload?.details && typeof payload.details === "object" ? structuredClone(payload.details) : null;
-        throw error;
-      }
+      if (!response?.ok) throw providerFailure(response, payload);
       if (settings) markCloudVerified(settings);
       return payload;
     } finally { clearTimeout(timer); }
@@ -81,6 +96,29 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
   healthUrl.pathname = isLoopback ? "/health" : url.pathname.replace(/\/generate\/?$/, "/health");
   const configUrl = new URL(url);
   configUrl.pathname = isLoopback ? "/config" : url.pathname.replace(/\/generate\/?$/, "/config");
+  const accessSessionUrl = new URL(url);
+  accessSessionUrl.pathname = isLoopback ? "/access-session" : url.pathname.replace(/\/generate\/?$/, "/access-session");
+
+  const authenticateAccess = async (code) => {
+    if (isLoopback) throw new TypeError("本机生成服务不使用公网访问会话");
+    if (typeof code !== "string" || code.length < 1 || code.length > 256) throw new TypeError("请输入有效访问码");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(accessSessionUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+        signal: controller.signal,
+        credentials: "same-origin",
+      });
+      const payload = await response.json();
+      if (!response?.ok) throw providerFailure(response, payload);
+      if (payload?.authenticated !== true) throw new TypeError("ACCESS_SESSION_RESPONSE_INVALID");
+      if (publicServerSettings) publicServerSettings = { ...publicServerSettings, authenticated: true };
+      return payload;
+    } finally { clearTimeout(timer); }
+  };
 
   return {
     id: `${isLoopback ? "local-http" : "same-origin-byok"}:${url.host}`,
@@ -88,23 +126,24 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 3000);
       try {
-        const response = await fetchImpl(healthUrl, { method: "GET", signal: controller.signal, cache: "no-store" });
+        const response = await fetchImpl(healthUrl, { method: "GET", signal: controller.signal, cache: "no-store", ...credentialOptions });
         const payload = await response.json();
         if (!response?.ok) throw new Error(`provider health failed: HTTP_${response?.status || "UNKNOWN"}`);
         if (isLoopback) return payload;
         publicServerSettings = payload && typeof payload === "object" ? structuredClone(payload) : null;
         const settings = cloudSettings();
         const verified = cloudVerification(settings);
+        const accessRequired = settings.credential_mode === "SERVER_MANAGED" && settings.access_required === true && settings.authenticated !== true;
         return {
           ...payload,
           ...settings,
-          status: verified ? "LIVE_VERIFIED" : settings.configured ? "CONFIGURED_UNVERIFIED" : payload.status,
+          status: accessRequired ? "ACCESS_SESSION_REQUIRED" : verified ? "LIVE_VERIFIED" : settings.configured ? "CONFIGURED_UNVERIFIED" : payload.status,
           last_success_at: verified?.verified_at || null,
         };
       } finally { clearTimeout(timer); }
     },
     async getSettings() {
-      const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store" });
+      const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store", ...credentialOptions });
       const payload = await response.json();
       if (!response?.ok) throw new Error(`provider config failed: HTTP_${response?.status || "UNKNOWN"}`);
       if (isLoopback) return payload;
@@ -131,6 +170,8 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     async generate(input) {
       return post(url, buildGenerationRequest(input));
     },
+    authenticateAccess,
+    loginAccess: authenticateAccess,
     async generateTextDraft(input) {
       return parseTextDraftResponse(await post(textDraftUrl, buildTextDraftRequest(input)));
     },
@@ -143,20 +184,25 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         } catch (error) {
           const resume = error?.providerDetails;
           if (resume?.resume_run_id && resume?.resume_checkpoint && typeof onProgress === "function") {
-            await onProgress(structuredClone(resume));
+            const decision = await onProgress(structuredClone(resume));
             error.checkpointPersisted = true;
+            if (progressRequestsStop(decision)) error.intentionalStop = true;
           }
           throw error;
         }
         if (payload?.schema !== PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA || payload?.status !== "PARTIAL") return payload;
         const resume = payload.resume;
         if (!resume?.resume_run_id || !resume?.resume_checkpoint) throw new TypeError("PUBLIC_IMAGE_STEP_RESPONSE_INVALID");
-        if (typeof onProgress === "function") await onProgress(structuredClone(resume));
+        if (typeof onProgress === "function") {
+          const decision = await onProgress(structuredClone(resume));
+          if (progressRequestsStop(decision)) throw stoppedAfterCheckpoint(resume);
+        }
         next = { ...input, resume_run_id: resume.resume_run_id, resume_checkpoint: resume.resume_checkpoint };
       }
       throw new Error("PUBLIC_IMAGE_STEP_LIMIT_EXCEEDED");
     },
     async generatePageCandidates(input) {
+      if (!isLoopback && cloudSettings()?.credential_mode === "SERVER_MANAGED") throw new Error("SERVER_MANAGED_PAGE_CANDIDATES_DISABLED");
       return parsePageCandidateResponse(await post(candidateUrl, buildPageCandidateRequest(input)));
     },
   };

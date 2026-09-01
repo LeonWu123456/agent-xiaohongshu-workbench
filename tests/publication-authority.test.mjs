@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { generateContentPackage } from "../src/content-engine.mjs";
-import { derivePublicationAuthority } from "../src/publication-authority.mjs";
+import { buildHistoricalDraftAdoption, derivePublicationAuthority } from "../src/publication-authority.mjs";
+import { createDraftRecord } from "../src/workspace-state.mjs";
 
 function confirmedPair() {
   const content = generateContentPackage({ topic: "同一稿" });
@@ -47,11 +48,11 @@ test("unconfirmed or unassembled text cannot publish", () => {
   assert.equal(derivePublicationAuthority({ ...pair, assembledDraftId: null }).code, "TEXT_NOT_ASSEMBLED");
 });
 
-test("legacy content without a parallel text session remains editable and publishable", () => {
+test("a content-only boolean never grants publication authority", () => {
   const content = generateContentPackage({ topic: "旧稿" });
   const result = derivePublicationAuthority({ content, activatedAsContentOnly: true });
-  assert.equal(result.allowed, true);
-  assert.equal(result.mode, "CONTENT_ONLY");
+  assert.equal(result.allowed, false);
+  assert.equal(result.code, "HISTORICAL_CONFIRMATION_REQUIRED");
 });
 
 test("an unbound missing session cannot silently publish", () => {
@@ -61,10 +62,51 @@ test("an unbound missing session cannot silently publish", () => {
   assert.equal(result.code, "GENERATION_SESSION_MISSING");
 });
 
-test("an exact legacy session remains compatible until the next save backfills lineage", () => {
+test("an exact copy without the third lineage id remains locked", () => {
   const pair = confirmedPair();
   delete pair.content.generation.source_draft_id;
   const result = derivePublicationAuthority(pair);
-  assert.equal(result.allowed, true);
-  assert.equal(result.code, "LEGACY_EXACT_MATCH");
+  assert.equal(result.allowed, false);
+  assert.equal(result.code, "CONTENT_LINEAGE_MISSING");
+});
+
+test("zero-paid historical adoption preserves pages and images while entering the standard exact gate", () => {
+  const content = generateContentPackage({ topic: "旧稿也要明确确认后才能发布", pillar: "culture", goal: "save" });
+  content.body = "这是一份已经存在的历史成稿，用户现在明确确认它的标题、正文和标签就是要发布的唯一文案。确认动作只建立来源身份，不重新生成页面，不修改图片，不调用任何付费服务。为了满足发布文案的完整性，这段正文保留足够的信息，也明确说明历史稿需要人工确认后才能进入标准发布流程。".repeat(2);
+  const pagesBefore = JSON.stringify(content.pages);
+  const imageSourcesBefore = content.pages.map((page) => page.image_style.src);
+
+  const adopted = buildHistoricalDraftAdoption({
+    content,
+    draftId: "historical-record-1",
+    createdAt: "2026-08-31T15:00:00.000Z",
+  });
+
+  assert.equal(adopted.paid_image_calls, 0);
+  assert.equal(adopted.publication_authority.allowed, true);
+  assert.equal(adopted.publication_authority.code, "CONFIRMED_TEXT_AUTHORITY");
+  assert.equal(adopted.text_draft.draft_id, "historical-record-1");
+  assert.equal(adopted.content_package.generation.source_draft_id, "historical-record-1");
+  assert.equal(adopted.generation_session.assembled_draft_id, "historical-record-1");
+  assert.equal(adopted.generation_session.text_confirmed, true);
+  assert.equal(adopted.generation_session.image_resume, null);
+  assert.equal(JSON.stringify(adopted.content_package.pages), pagesBefore);
+  assert.deepEqual(adopted.content_package.pages.map((page) => page.image_style.src), imageSourcesBefore);
+  assert.equal(adopted.content_package.body, content.body);
+  assert.deepEqual(adopted.content_package.tags, content.tags);
+  const record = createDraftRecord({
+    draftId: "historical-record-1",
+    contentPackage: adopted.content_package,
+    generationSession: adopted.generation_session,
+    createdAt: "2026-08-31T15:00:00.000Z",
+  });
+  assert.equal(record.generation_session.text_draft.draft_id, "historical-record-1");
+});
+
+test("historical adoption rejects invalid copy without mutating the original content", () => {
+  const content = generateContentPackage({ topic: "不完整旧稿" });
+  content.body = "太短";
+  const before = structuredClone(content);
+  assert.throws(() => buildHistoricalDraftAdoption({ content, draftId: "historical-invalid" }), /TEXT_DRAFT_BODY_INVALID/);
+  assert.deepEqual(content, before);
 });

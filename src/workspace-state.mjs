@@ -7,6 +7,8 @@ export const WORKSPACE_BACKUP_V2_SCHEMA = "xiaoshimei.workspace-backup.v2";
 export const WORKSPACE_ENVELOPE_SCHEMA = "xiaoshimei.workspace-envelope.v2";
 export const DRAFT_RECORD_SCHEMA = "xiaoshimei.draft-record.v2";
 export const AUTHORING_SESSION_SCHEMA = "xiaoshimei.authoring-session.v2";
+export const WORKSPACE_LOCK_NAME = "xiaoshimei.workspace-envelope.v2.writer";
+export const WORKSPACE_ABSENT_TOKEN = "xiaoshimei.workspace-envelope.absent";
 
 const LOCAL_AUTHORITY_EFFECT = "LOCAL_EDITING_ONLY";
 // v1 allowed one current draft plus 50 library entries. A mismatched legacy
@@ -159,6 +161,28 @@ export function parseWorkspaceEnvelope(value) {
     catch { throw new TypeError("workspace envelope is not valid JSON"); }
   }
   return normalizeWorkspaceEnvelope(source);
+}
+
+export function workspaceEnvelopeToken(value) {
+  return value == null ? WORKSPACE_ABSENT_TOKEN : JSON.stringify(parseWorkspaceEnvelope(value));
+}
+
+export function draftRecordToken(value) {
+  if (value == null) return null;
+  const record = normalizeDraftRecord(value, "draft_record");
+  const content = structuredClone(record.content_package);
+  // DraftRecord identity lives in draft_id. Saving to the asset library may
+  // add id/saved_at and refresh timestamps without changing the author's copy,
+  // pages, generation parameters or resume state; those bookkeeping fields
+  // must not turn ordinary navigation into a paid-result conflict.
+  delete content.id;
+  delete content.saved_at;
+  return JSON.stringify({
+    schema: record.schema,
+    draft_id: record.draft_id,
+    content_package: content,
+    generation_session: record.generation_session,
+  });
 }
 
 export function activeDraftRecord(value) {
@@ -438,6 +462,71 @@ export function saveWorkspaceProfile(value, profile, { updatedAt = new Date().to
   });
 }
 
+function legacyArkSourceProjection(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/[。！？!?]+$/, "")
+    .trim();
+}
+
+function exactStringArray(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((item, index) => item === right[index]);
+}
+
+function canRepairLegacyArkSource(record) {
+  const content = record.content_package;
+  const session = record.generation_session;
+  const draft = session?.text_draft;
+  const generation = content?.generation;
+  if (!draft || session.text_confirmed !== true) return false;
+  if (session.assembled_draft_id !== draft.draft_id) return false;
+  if (generation?.mode !== "PROVIDER" || generation.provider !== "volcengine-ark") return false;
+  if (generation.strategy !== "resumable_public_image_steps_v1") return false;
+  if (generation.source_draft_id !== draft.draft_id) return false;
+  if (
+    content.pillar !== draft.pillar
+    || content.goal !== draft.goal
+    || content.selectedTitle !== draft.selected_title
+    || content.body !== draft.body
+    || !exactStringArray(content.tags, draft.tags)
+  ) return false;
+  if (content.source_input === draft.source_input) return false;
+  return content.source_input === legacyArkSourceProjection(draft.source_input);
+}
+
+// Repairs only the one known, paid Ark producer projection bug. This is a pure
+// transition: callers must commit it through fullCas so a concurrent workspace
+// change produces zero writes.
+export function repairLegacyArkSourceProjections(value, { updatedAt = new Date().toISOString() } = {}) {
+  const workspace = parseWorkspaceEnvelope(value);
+  const repairedDraftIds = [];
+  const drafts = workspace.drafts.map((record) => {
+    if (!canRepairLegacyArkSource(record)) return record;
+    repairedDraftIds.push(record.draft_id);
+    return createDraftRecord({
+      draftId: record.draft_id,
+      contentPackage: { ...record.content_package, source_input: record.generation_session.text_draft.source_input },
+      generationSession: record.generation_session,
+      createdAt: record.created_at,
+      updatedAt,
+    });
+  });
+  if (!repairedDraftIds.length) return { workspace, repaired: false, repaired_draft_ids: [] };
+  return {
+    workspace: workspaceFromNormalized({
+      profile: workspace.profile,
+      activeDraftId: workspace.active_draft_id,
+      drafts,
+      updatedAt,
+    }),
+    repaired: true,
+    repaired_draft_ids: repairedDraftIds,
+  };
+}
+
 export function buildWorkspaceBackupV2({ workspace, createdAt = new Date().toISOString() }) {
   const checked = parseWorkspaceEnvelope(workspace);
   return {
@@ -647,6 +736,315 @@ export function persistDraftRecordWithReadback(storage, value, keys, {
     workspace: readback,
     draft_record: record,
   };
+}
+
+export function readWorkspaceSnapshot(storage, envelopeKey) {
+  if (!storage || typeof storage.getItem !== "function") {
+    return { ok: false, code: "STORAGE_ADAPTER_INVALID", workspace: null, workspace_token: null };
+  }
+  let serialized;
+  try {
+    serialized = storage.getItem(requiredString(envelopeKey, "storage key"));
+  } catch (error) {
+    return {
+      ok: false,
+      code: "STORAGE_READ_FAILED",
+      message: String(error?.message || error),
+      workspace: null,
+      workspace_token: null,
+    };
+  }
+  if (serialized == null) {
+    return { ok: true, code: "WORKSPACE_ABSENT", workspace: null, workspace_token: WORKSPACE_ABSENT_TOKEN };
+  }
+  try {
+    const workspace = parseWorkspaceEnvelope(serialized);
+    return {
+      ok: true,
+      code: "WORKSPACE_SNAPSHOT_READ",
+      workspace,
+      workspace_token: workspaceEnvelopeToken(workspace),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      code: "WORKSPACE_ENVELOPE_INVALID",
+      message: String(error?.message || error),
+      workspace: null,
+      workspace_token: null,
+    };
+  }
+}
+
+function transactionReceipt({ ok, code, disposition, snapshot, targetDraftId = null, recoveredDraftId = null, reason = null, message = null }) {
+  const workspace = snapshot?.workspace || null;
+  const activeDraft = workspace?.drafts.find((draft) => draft.draft_id === workspace.active_draft_id) || null;
+  const targetDraft = targetDraftId == null
+    ? null
+    : workspace?.drafts.find((draft) => draft.draft_id === targetDraftId) || null;
+  const recoveredDraft = recoveredDraftId == null
+    ? null
+    : workspace?.drafts.find((draft) => draft.draft_id === recoveredDraftId) || null;
+  return {
+    ok,
+    code,
+    disposition,
+    reason,
+    ...(message == null ? {} : { message }),
+    workspace,
+    workspace_token: snapshot?.workspace_token || null,
+    active_draft: activeDraft,
+    target_draft: targetDraft,
+    target_draft_token: targetDraft == null ? null : draftRecordToken(targetDraft),
+    recovered_draft: recoveredDraft,
+  };
+}
+
+function syncBuilderResult(value, code) {
+  if (value && typeof value.then === "function") throw new TypeError(code);
+  return value;
+}
+
+function workspaceStorageKeys(keys) {
+  if (!keys || typeof keys !== "object") throw new TypeError("workspace storage keys are required");
+  const normalized = { ...keys, envelope: requiredString(keys.envelope, "keys.envelope") };
+  const legacyNames = ["content", "library", "profile", "generationSession"];
+  const supplied = legacyNames.filter((name) => typeof normalized[name] === "string" && normalized[name].trim());
+  if (supplied.length > 0 && supplied.length !== legacyNames.length) {
+    throw new TypeError("legacy mirror requires content, library, profile and generationSession keys");
+  }
+  return normalized;
+}
+
+// The coordinator is the only cross-tab-safe mutation surface. Web Locks
+// serialize the complete read/check/write/readback critical section; the v2
+// envelope remains the sole workspace authority.
+export function createWorkspaceCoordinator({
+  storage,
+  keys,
+  lockManager = globalThis.navigator?.locks,
+  lockName = WORKSPACE_LOCK_NAME,
+} = {}) {
+  const normalizedKeys = workspaceStorageKeys(keys);
+  const normalizedLockName = requiredString(lockName, "lockName");
+
+  function snapshot() {
+    return readWorkspaceSnapshot(storage, normalizedKeys.envelope);
+  }
+
+  async function underExclusiveLock(callback) {
+    if (!lockManager || typeof lockManager.request !== "function") {
+      return transactionReceipt({
+        ok: false,
+        code: "WORKSPACE_LOCK_UNAVAILABLE",
+        disposition: "NO_WRITE_LOCK_UNAVAILABLE",
+        snapshot: snapshot(),
+      });
+    }
+    try {
+      return await lockManager.request.call(lockManager, normalizedLockName, { mode: "exclusive" }, callback);
+    } catch (error) {
+      return transactionReceipt({
+        ok: false,
+        code: "WORKSPACE_LOCK_FAILED",
+        disposition: "NO_WRITE_LOCK_FAILED",
+        snapshot: snapshot(),
+        message: String(error?.message || error),
+      });
+    }
+  }
+
+  function persistAndReadback(nextWorkspace, { targetDraftId = null, recoveredDraftId = null, reason = null, disposition = "COMMITTED" } = {}) {
+    const expectedToken = workspaceEnvelopeToken(nextWorkspace);
+    let persisted;
+    try {
+      persisted = persistWorkspaceEnvelope(storage, nextWorkspace, normalizedKeys);
+    } catch (error) {
+      return transactionReceipt({
+        ok: false,
+        code: "WORKSPACE_PERSIST_FAILED",
+        disposition: "NO_WRITE_PERSIST_FAILED",
+        snapshot: snapshot(),
+        targetDraftId,
+        recoveredDraftId,
+        reason,
+        message: String(error?.message || error),
+      });
+    }
+    if (!persisted.ok) {
+      return transactionReceipt({
+        ok: false,
+        code: persisted.code,
+        disposition: "NO_WRITE_PERSIST_FAILED",
+        snapshot: snapshot(),
+        targetDraftId,
+        recoveredDraftId,
+        reason,
+        message: persisted.message,
+      });
+    }
+    const readback = snapshot();
+    if (!readback.ok) {
+      return transactionReceipt({
+        ok: false,
+        code: "WORKSPACE_READBACK_FAILED",
+        disposition: "WRITE_READBACK_FAILED",
+        snapshot: readback,
+        targetDraftId,
+        recoveredDraftId,
+        reason,
+        message: readback.message,
+      });
+    }
+    if (readback.workspace_token !== expectedToken) {
+      return transactionReceipt({
+        ok: false,
+        code: "WORKSPACE_READBACK_MISMATCH",
+        disposition: "WRITE_READBACK_MISMATCH",
+        snapshot: readback,
+        targetDraftId,
+        recoveredDraftId,
+        reason,
+      });
+    }
+    return transactionReceipt({
+      ok: true,
+      code: "WORKSPACE_COMMITTED_AND_VERIFIED",
+      disposition,
+      snapshot: readback,
+      targetDraftId,
+      recoveredDraftId,
+      reason,
+    });
+  }
+
+  async function fullCas({ expectedWorkspaceToken, workspace, buildWorkspace, reason = "FULL_CAS" } = {}) {
+    if (typeof expectedWorkspaceToken !== "string" || !expectedWorkspaceToken) throw new TypeError("expectedWorkspaceToken is required");
+    if (workspace === undefined && typeof buildWorkspace !== "function") throw new TypeError("workspace or buildWorkspace is required");
+    return underExclusiveLock(() => {
+      const latest = snapshot();
+      if (!latest.ok) {
+        return transactionReceipt({ ok: false, code: latest.code, disposition: "NO_WRITE_READ_FAILED", snapshot: latest, reason, message: latest.message });
+      }
+      if (latest.workspace_token !== expectedWorkspaceToken) {
+        return transactionReceipt({ ok: false, code: "WORKSPACE_CAS_CONFLICT", disposition: "NO_WRITE_CONFLICT", snapshot: latest, reason });
+      }
+      let candidate = workspace;
+      if (typeof buildWorkspace === "function") {
+        candidate = syncBuilderResult(buildWorkspace(latest.workspace), "WORKSPACE_ASYNC_BUILDER_FORBIDDEN");
+      }
+      const nextWorkspace = parseWorkspaceEnvelope(candidate);
+      if (workspaceEnvelopeToken(nextWorkspace) === latest.workspace_token) {
+        return transactionReceipt({ ok: true, code: "WORKSPACE_ALREADY_CURRENT", disposition: "NOOP_ALREADY_APPLIED", snapshot: latest, reason });
+      }
+      return persistAndReadback(nextWorkspace, { reason, disposition: "COMMITTED" });
+    });
+  }
+
+  async function mergeDraftCas({
+    draftId,
+    expectedDraftToken,
+    buildDraft,
+    replacementDraft,
+    requireActiveDraftId = null,
+    onConflict = null,
+    reason = "TARGET_MERGE",
+  } = {}) {
+    const targetId = requiredString(draftId, "draftId");
+    if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
+    if (replacementDraft === undefined && typeof buildDraft !== "function") throw new TypeError("replacementDraft or buildDraft is required");
+    if (onConflict != null && typeof onConflict !== "function") throw new TypeError("onConflict must be a function");
+    return underExclusiveLock(() => {
+      const latest = snapshot();
+      if (!latest.ok || !latest.workspace) {
+        return transactionReceipt({ ok: false, code: latest.ok ? "WORKSPACE_MISSING" : latest.code, disposition: "NO_WRITE_READ_FAILED", snapshot: latest, targetDraftId: targetId, reason, message: latest.message });
+      }
+      if (requireActiveDraftId != null && latest.workspace.active_draft_id !== requireActiveDraftId) {
+        return transactionReceipt({ ok: false, code: "WORKSPACE_ACTIVE_DRAFT_CONFLICT", disposition: "NO_WRITE_CONFLICT", snapshot: latest, targetDraftId: targetId, reason });
+      }
+      const targetIndex = latest.workspace.drafts.findIndex((draft) => draft.draft_id === targetId);
+      const target = targetIndex < 0 ? null : latest.workspace.drafts[targetIndex];
+      const targetMatches = target != null && draftRecordToken(target) === expectedDraftToken;
+
+      if (!targetMatches) {
+        if (onConflict == null) {
+          return transactionReceipt({ ok: false, code: "WORKSPACE_DRAFT_CAS_CONFLICT", disposition: "NO_WRITE_CONFLICT", snapshot: latest, targetDraftId: targetId, reason });
+        }
+        const siblingValue = syncBuilderResult(onConflict({ workspace: latest.workspace, target_draft: target }), "WORKSPACE_ASYNC_CONFLICT_BUILDER_FORBIDDEN");
+        if (siblingValue == null) {
+          return transactionReceipt({ ok: false, code: "WORKSPACE_DRAFT_CAS_CONFLICT", disposition: "NO_WRITE_CONFLICT", snapshot: latest, targetDraftId: targetId, reason });
+        }
+        const sibling = normalizeDraftRecord(siblingValue, "recovered_draft");
+        const existingSibling = latest.workspace.drafts.find((draft) => draft.draft_id === sibling.draft_id);
+        if (existingSibling) {
+          if (draftRecordToken(existingSibling) !== draftRecordToken(sibling)) {
+            return transactionReceipt({ ok: false, code: "WORKSPACE_RECOVERED_DRAFT_COLLISION", disposition: "NO_WRITE_CONFLICT", snapshot: latest, targetDraftId: targetId, recoveredDraftId: sibling.draft_id, reason });
+          }
+          return transactionReceipt({ ok: true, code: "WORKSPACE_RECOVERED_DRAFT_ALREADY_PRESENT", disposition: "NOOP_ALREADY_APPLIED", snapshot: latest, targetDraftId: targetId, recoveredDraftId: sibling.draft_id, reason });
+        }
+        if (latest.workspace.drafts.length >= MAX_DRAFT_RECORDS) {
+          return transactionReceipt({ ok: false, code: "WORKSPACE_DRAFT_LIMIT_REACHED", disposition: "NO_WRITE_CONFLICT", snapshot: latest, targetDraftId: targetId, recoveredDraftId: sibling.draft_id, reason });
+        }
+        const recoveredWorkspace = workspaceFromNormalized({
+          profile: latest.workspace.profile,
+          activeDraftId: latest.workspace.active_draft_id,
+          drafts: [sibling, ...latest.workspace.drafts],
+          updatedAt: sibling.updated_at,
+        });
+        return persistAndReadback(recoveredWorkspace, {
+          targetDraftId: targetId,
+          recoveredDraftId: sibling.draft_id,
+          reason,
+          disposition: "RECOVERED_SIBLING_COMMITTED",
+        });
+      }
+
+      let candidate = replacementDraft;
+      if (typeof buildDraft === "function") {
+        candidate = syncBuilderResult(buildDraft(target, latest.workspace), "WORKSPACE_ASYNC_BUILDER_FORBIDDEN");
+      }
+      const replacement = normalizeDraftRecord(candidate, "replacement_draft");
+      if (replacement.draft_id !== targetId) throw new TypeError("replacement draft identity cannot change");
+      if (replacement.created_at !== target.created_at) throw new TypeError("replacement draft creation time cannot change");
+      if (draftRecordToken(replacement) === expectedDraftToken) {
+        return transactionReceipt({ ok: true, code: "WORKSPACE_DRAFT_ALREADY_CURRENT", disposition: "NOOP_ALREADY_APPLIED", snapshot: latest, targetDraftId: targetId, reason });
+      }
+      const drafts = [...latest.workspace.drafts];
+      drafts[targetIndex] = replacement;
+      const nextWorkspace = workspaceFromNormalized({
+        profile: latest.workspace.profile,
+        activeDraftId: latest.workspace.active_draft_id,
+        drafts,
+        updatedAt: replacement.updated_at,
+      });
+      return persistAndReadback(nextWorkspace, { targetDraftId: targetId, reason, disposition: "COMMITTED" });
+    });
+  }
+
+  async function repairLegacyArkSourceCas({ expectedWorkspaceToken, updatedAt = new Date().toISOString() } = {}) {
+    let repair = null;
+    const receipt = await fullCas({
+      expectedWorkspaceToken,
+      reason: "LEGACY_ARK_SOURCE_REPAIR",
+      buildWorkspace: (latest) => {
+        if (latest == null) throw new TypeError("WORKSPACE_MISSING");
+        repair = repairLegacyArkSourceProjections(latest, { updatedAt });
+        return repair.workspace;
+      },
+    });
+    return {
+      ...receipt,
+      repaired: Boolean(repair?.repaired && receipt.ok),
+      repaired_draft_ids: receipt.ok ? (repair?.repaired_draft_ids || []) : [],
+    };
+  }
+
+  return Object.freeze({
+    snapshot,
+    fullCas,
+    mergeDraftCas,
+    repairLegacyArkSourceCas,
+  });
 }
 
 export function persistWorkspaceState(storage, state, keys) {

@@ -7,11 +7,16 @@ import {
   AUTHORING_SESSION_SCHEMA,
   DRAFT_RECORD_SCHEMA,
   WORKSPACE_BACKUP_V2_SCHEMA,
+  WORKSPACE_ABSENT_TOKEN,
   WORKSPACE_ENVELOPE_SCHEMA,
   activateDraftRecord,
   activeDraftRecord,
   beginNewDraft,
+  buildWorkspaceEnvelope,
   buildWorkspaceBackupV2,
+  createDraftRecord,
+  createWorkspaceCoordinator,
+  draftRecordToken,
   legacyStateFromWorkspaceEnvelope,
   libraryContents,
   loadOrMigrateWorkspaceEnvelope,
@@ -21,6 +26,7 @@ import {
   parseWorkspaceBackupV2,
   persistWorkspaceEnvelope,
   persistDraftRecordWithReadback,
+  repairLegacyArkSourceProjections,
   saveActiveDraft,
 } from "../src/workspace-state.mjs";
 
@@ -116,6 +122,29 @@ function memoryStorage(initial = {}) {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, String(value)),
     removeItem: (key) => values.delete(key),
+  };
+}
+
+function exclusiveLocks() {
+  let tail = Promise.resolve();
+  let active = 0;
+  let maxActive = 0;
+  const calls = [];
+  return {
+    calls,
+    get maxActive() { return maxActive; },
+    request(name, options, callback) {
+      calls.push({ name, options });
+      const before = tail;
+      let release;
+      tail = new Promise((resolve) => { release = resolve; });
+      return before.then(async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        try { return await callback(); }
+        finally { active -= 1; release(); }
+      });
+    },
   };
 }
 
@@ -426,4 +455,236 @@ test("an existing v2 envelope wins over stale legacy keys on reload", () => {
   const loaded = loadOrMigrateWorkspaceEnvelope(storage, KEYS, { createdAt: T1 });
   assert.equal(loaded.migrated, false);
   assert.equal(activeDraftRecord(loaded.workspace).content_package.source_input, "v2 权威稿");
+});
+
+test("origin Web Locks serialize full-envelope CAS and the stale writer performs zero writes", async () => {
+  const storage = memoryStorage();
+  const locks = exclusiveLocks();
+  const coordinatorA = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: locks });
+  const coordinatorB = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: locks });
+  const initial = migrateLegacyWorkspaceState({
+    profile: createProfileV2(),
+    currentContent: content("共同前像 A", "record-a"),
+    activeDraftId: "record-a",
+    createdAt: T0,
+  });
+  const boot = await coordinatorA.fullCas({ expectedWorkspaceToken: WORKSPACE_ABSENT_TOKEN, workspace: initial, reason: "BOOT" });
+  assert.equal(boot.ok, true);
+  const expected = boot.workspace_token;
+  const workspaceB = beginNewDraft(boot.workspace, { newDraftId: "record-b", savedAt: T1 }).workspace;
+  const workspaceA = saveActiveDraft(boot.workspace, { contentPackage: content("A 的迟到整包保存", "record-a"), savedAt: T1 });
+
+  const [createdB, staleA] = await Promise.all([
+    coordinatorB.fullCas({ expectedWorkspaceToken: expected, workspace: workspaceB, reason: "NEW_B" }),
+    coordinatorA.fullCas({ expectedWorkspaceToken: expected, workspace: workspaceA, reason: "STALE_A" }),
+  ]);
+
+  assert.equal(createdB.disposition, "COMMITTED");
+  assert.equal(staleA.code, "WORKSPACE_CAS_CONFLICT");
+  assert.equal(staleA.disposition, "NO_WRITE_CONFLICT");
+  assert.equal(staleA.workspace.active_draft_id, "record-b");
+  assert.ok(staleA.workspace.drafts.some((draft) => draft.draft_id === "record-a"));
+  assert.ok(staleA.workspace.drafts.some((draft) => draft.draft_id === "record-b"));
+  assert.equal(locks.maxActive, 1);
+  assert.ok(locks.calls.every((call) => call.options.mode === "exclusive"));
+});
+
+test("target-record CAS merges A into the latest workspace without replacing active B, profile, or unrelated drafts", async () => {
+  const storage = memoryStorage();
+  const locks = exclusiveLocks();
+  const coordinator = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: locks });
+  const initial = migrateLegacyWorkspaceState({
+    profile: createProfileV2({ displayName: "小师妹" }),
+    currentContent: content("A 原稿", "record-a"),
+    library: [content("无关旧稿", "record-old")],
+    activeDraftId: "record-a",
+    createdAt: T0,
+  });
+  const boot = await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_ABSENT_TOKEN, workspace: initial });
+  const withB = beginNewDraft(boot.workspace, { newDraftId: "record-b", savedAt: T1 }).workspace;
+  const switched = await coordinator.fullCas({ expectedWorkspaceToken: boot.workspace_token, workspace: withB });
+  const aBefore = switched.workspace.drafts.find((draft) => draft.draft_id === "record-a");
+  const bBefore = structuredClone(activeDraftRecord(switched.workspace));
+  const oldBefore = structuredClone(switched.workspace.drafts.find((draft) => draft.draft_id === "record-old"));
+  const profileBefore = structuredClone(switched.workspace.profile);
+  const replacementA = createDraftRecord({
+    draftId: "record-a",
+    contentPackage: content("A 后台进度", "record-a"),
+    generationSession: aBefore.generation_session,
+    createdAt: aBefore.created_at,
+    updatedAt: "2026-08-31T06:06:00.000Z",
+  });
+
+  const merged = await coordinator.mergeDraftCas({
+    draftId: "record-a",
+    expectedDraftToken: draftRecordToken(aBefore),
+    replacementDraft: replacementA,
+  });
+  assert.equal(merged.ok, true);
+  assert.equal(merged.workspace.active_draft_id, "record-b");
+  assert.deepEqual(activeDraftRecord(merged.workspace), bBefore);
+  assert.deepEqual(merged.workspace.profile, profileBefore);
+  assert.deepEqual(merged.workspace.drafts.find((draft) => draft.draft_id === "record-old"), oldBefore);
+  assert.equal(merged.target_draft.content_package.source_input, "A 后台进度");
+
+  const stale = await coordinator.mergeDraftCas({
+    draftId: "record-a",
+    expectedDraftToken: draftRecordToken(aBefore),
+    replacementDraft: replacementA,
+  });
+  assert.equal(stale.code, "WORKSPACE_DRAFT_CAS_CONFLICT");
+  assert.equal(stale.disposition, "NO_WRITE_CONFLICT");
+  assert.equal(stale.workspace_token, merged.workspace_token);
+});
+
+test("an active-bound autosave and an installation without Web Locks both fail closed", async () => {
+  const storage = memoryStorage();
+  const locks = exclusiveLocks();
+  const coordinator = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: locks });
+  const initial = migrateLegacyWorkspaceState({
+    profile: createProfileV2(),
+    currentContent: content("A", "record-a"),
+    activeDraftId: "record-a",
+    createdAt: T0,
+  });
+  const boot = await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_ABSENT_TOKEN, workspace: initial });
+  const withB = beginNewDraft(boot.workspace, { newDraftId: "record-b", savedAt: T1 }).workspace;
+  const switched = await coordinator.fullCas({ expectedWorkspaceToken: boot.workspace_token, workspace: withB });
+  const a = switched.workspace.drafts.find((draft) => draft.draft_id === "record-a");
+  const activeConflict = await coordinator.mergeDraftCas({
+    draftId: "record-a",
+    expectedDraftToken: draftRecordToken(a),
+    requireActiveDraftId: "record-a",
+    replacementDraft: createDraftRecord({
+      draftId: "record-a",
+      contentPackage: content("不应落盘的迟到 autosave", "record-a"),
+      generationSession: a.generation_session,
+      createdAt: a.created_at,
+      updatedAt: T1,
+    }),
+  });
+  assert.equal(activeConflict.code, "WORKSPACE_ACTIVE_DRAFT_CONFLICT");
+  assert.equal(activeConflict.workspace_token, switched.workspace_token);
+
+  let writes = 0;
+  const normalSet = storage.setItem;
+  storage.setItem = (key, value) => { writes += 1; normalSet(key, value); };
+  const unavailable = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: null });
+  const result = await unavailable.fullCas({ expectedWorkspaceToken: switched.workspace_token, workspace: initial });
+  assert.equal(result.code, "WORKSPACE_LOCK_UNAVAILABLE");
+  assert.equal(result.disposition, "NO_WRITE_LOCK_UNAVAILABLE");
+  assert.equal(writes, 0);
+});
+
+test("the coordinator keeps the lock through same-source readback and fails closed on drift", async () => {
+  const storage = memoryStorage();
+  const coordinator = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: exclusiveLocks() });
+  const initial = migrateLegacyWorkspaceState({
+    profile: createProfileV2(),
+    currentContent: content("readback A", "record-a"),
+    activeDraftId: "record-a",
+    createdAt: T0,
+  });
+  const boot = await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_ABSENT_TOKEN, workspace: initial });
+  const next = saveActiveDraft(boot.workspace, { contentPackage: content("readback B", "record-a"), savedAt: T1 });
+  const normalGet = storage.getItem;
+  const normalSet = storage.setItem;
+  let distort = false;
+  storage.setItem = (key, value) => {
+    normalSet(key, value);
+    if (key === KEYS.profile) distort = true;
+  };
+  storage.getItem = (key) => {
+    const serialized = normalGet(key);
+    if (!distort || key !== KEYS.envelope || serialized == null) return serialized;
+    const parsed = JSON.parse(serialized);
+    parsed.updated_at = T0;
+    return JSON.stringify(parsed);
+  };
+
+  const result = await coordinator.fullCas({ expectedWorkspaceToken: boot.workspace_token, workspace: next });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "WORKSPACE_READBACK_MISMATCH");
+  assert.equal(result.disposition, "WRITE_READBACK_MISMATCH");
+});
+
+test("the exact legacy Ark source projection is repaired under full CAS without changing paid pages or images", async () => {
+  const source = "久坐之后先活动肩颈，再慢慢调整呼吸。";
+  const draft = textDraft("text-ark", source);
+  const session = {
+    ...fullSession("text-ark"),
+    topic: source,
+    text_draft: draft,
+    assembled_draft_id: draft.draft_id,
+  };
+  const base = assembledContent(session, "record-ark");
+  const arkContent = {
+    ...base,
+    source_input: source.slice(0, -1),
+    generation: {
+      ...base.generation,
+      mode: "PROVIDER",
+      provider: "volcengine-ark",
+      production_mode: "smart",
+      source_draft_id: draft.draft_id,
+      strategy: "resumable_public_image_steps_v1",
+      notice: "已付费 resumable producer",
+    },
+  };
+  const workspace = buildWorkspaceEnvelope({
+    profile: createProfileV2(),
+    activeDraftId: "record-ark",
+    drafts: [createDraftRecord({ draftId: "record-ark", contentPackage: arkContent, generationSession: session, createdAt: T0 })],
+    updatedAt: T0,
+  });
+  const pagesBefore = JSON.stringify(activeDraftRecord(workspace).content_package.pages);
+  const storage = memoryStorage();
+  const coordinator = createWorkspaceCoordinator({ storage, keys: KEYS, lockManager: exclusiveLocks() });
+  const boot = await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_ABSENT_TOKEN, workspace });
+  const repaired = await coordinator.repairLegacyArkSourceCas({ expectedWorkspaceToken: boot.workspace_token, updatedAt: T1 });
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.repaired, true);
+  assert.deepEqual(repaired.repaired_draft_ids, ["record-ark"]);
+  assert.equal(repaired.target_draft, null);
+  assert.equal(activeDraftRecord(repaired.workspace).content_package.source_input, source);
+  assert.equal(JSON.stringify(activeDraftRecord(repaired.workspace).content_package.pages), pagesBefore);
+  assert.equal(loadWorkspaceEnvelope(storage, KEYS.envelope).drafts[0].content_package.source_input, source);
+});
+
+test("legacy Ark repair rejects body, provider, strategy, lineage and non-legacy source counterexamples", () => {
+  const source = "原文最后保留句号。";
+  const draft = textDraft("text-counter", source);
+  const session = { ...fullSession("text-counter"), topic: source, text_draft: draft, assembled_draft_id: draft.draft_id };
+  const base = assembledContent(session, "record-counter");
+  const eligible = {
+    ...base,
+    source_input: source.slice(0, -1),
+    generation: {
+      ...base.generation,
+      mode: "PROVIDER",
+      provider: "volcengine-ark",
+      production_mode: "smart",
+      source_draft_id: draft.draft_id,
+      strategy: "resumable_public_image_steps_v1",
+      notice: "已付费 resumable producer",
+    },
+  };
+  const variants = [
+    { ...eligible, body: `${eligible.body}发生漂移` },
+    { ...eligible, generation: { ...eligible.generation, provider: "other-provider" } },
+    { ...eligible, generation: { ...eligible.generation, strategy: "other-strategy" } },
+    { ...eligible, generation: { ...eligible.generation, source_draft_id: "other-text" } },
+    { ...eligible, source_input: "不是旧清洗结果" },
+  ];
+  variants.forEach((candidate, index) => {
+    const workspace = buildWorkspaceEnvelope({
+      profile: createProfileV2(),
+      activeDraftId: `record-${index}`,
+      drafts: [createDraftRecord({ draftId: `record-${index}`, contentPackage: candidate, generationSession: session, createdAt: T0 })],
+      updatedAt: T0,
+    });
+    const result = repairLegacyArkSourceProjections(workspace, { updatedAt: T1 });
+    assert.equal(result.repaired, false);
+    assert.equal(result.workspace.drafts[0].content_package.source_input, candidate.source_input);
+  });
 });

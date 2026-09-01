@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import sharp from "sharp";
 import {
   ARK_BASE_URL,
@@ -63,6 +63,12 @@ export const PUBLIC_GENERATION_RESPONSE_MAX_BYTES = 4_000_000;
 // wrapping is not resumable in production.
 const PUBLIC_TILE_PAYLOAD_BUDGET_BYTES = 2_300_000;
 const PUBLIC_IMAGE_STEP_RESPONSE_SCHEMA = "xiaoshimei.public-image-step-response.v1";
+export const ACCESS_SESSION_COOKIE = "__Host-xiaoshimei_session";
+export const ACCESS_SESSION_TTL_SECONDS = 12 * 60 * 60;
+export const IMAGE_LEDGER_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const IMAGE_LEDGER_IN_FLIGHT_LEASE_MS = 360_000;
+const SERVER_MANAGED_PROVIDER_ROUTES = new Set(["text-draft", "generate-images", "page-candidates"]);
+const IMAGE_LEDGER_MAX_CACHE_BYTES = PUBLIC_GENERATION_RESPONSE_MAX_BYTES + 64_000;
 
 export function publicTileBudgetForResponse(unitCount) {
   const count = Math.max(1, Number(unitCount) || 1);
@@ -107,9 +113,120 @@ function cleanModel(value, fallback) {
   return model;
 }
 
-function requestConfig(request) {
-  const serverApiKey = String(process.env.ARK_API_KEY || "").trim();
-  const authorization = String(request.headers.authorization || "");
+function serverApiKeyFromEnv(env = process.env) {
+  return String(env?.ARK_API_KEY || "").trim();
+}
+
+function configuredServerManaged(env = process.env) {
+  return serverApiKeyFromEnv(env).length >= 8;
+}
+
+function configuredOrigin(value) {
+  const raw = String(value || "").trim().replace(/\/$/, "");
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || parsed.origin !== raw || parsed.pathname !== "/" || parsed.search || parsed.hash) return "";
+    return parsed.origin;
+  } catch {
+    return "";
+  }
+}
+
+export function inspectServerAccessConfig(env = process.env) {
+  const accessCodeSha256 = String(env?.XIAOSHIMEI_ACCESS_CODE_SHA256 || "").trim().toLowerCase();
+  const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
+  const appOrigin = configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
+  const ready = /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
+  return { ready, accessCodeSha256, sessionSecret, appOrigin };
+}
+
+function imageLedgerEnv(env = process.env) {
+  const url = String(env?.UPSTASH_REDIS_REST_URL || env?.KV_REST_API_URL || "").trim().replace(/\/$/, "");
+  const token = String(env?.UPSTASH_REDIS_REST_TOKEN || env?.KV_REST_API_TOKEN || "").trim();
+  let validUrl = false;
+  try { validUrl = new URL(url).protocol === "https:"; } catch { validUrl = false; }
+  return { url, token, ready: validUrl && token.length >= 16 };
+}
+
+function requestHeader(request, name) {
+  const value = request?.headers?.[name] ?? request?.headers?.[name.toLowerCase()];
+  return Array.isArray(value) ? "" : String(value || "");
+}
+
+function requestHasExactOrigin(request, expectedOrigin) {
+  return Boolean(expectedOrigin) && requestHeader(request, "origin") === expectedOrigin;
+}
+
+function cookieValue(request, name) {
+  const header = requestHeader(request, "cookie");
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1) continue;
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return "";
+}
+
+function safeEqual(left, right) {
+  return Buffer.isBuffer(left) && Buffer.isBuffer(right) && left.length === right.length && timingSafeEqual(left, right);
+}
+
+export function mintAccessSession(configValue, { nowMs = Date.now(), sessionId = randomUUID() } = {}) {
+  if (!configValue?.ready) throw new TypeError("ACCESS_CONFIGURATION_REQUIRED");
+  const issuedAt = Math.floor(nowMs / 1000);
+  const payload = Buffer.from(JSON.stringify({ v: 1, sid: String(sessionId), iat: issuedAt, exp: issuedAt + ACCESS_SESSION_TTL_SECONDS })).toString("base64url");
+  const signature = createHmac("sha256", configValue.sessionSecret).update(payload).digest("base64url");
+  return { token: `${payload}.${signature}`, expiresAt: new Date((issuedAt + ACCESS_SESSION_TTL_SECONDS) * 1000) };
+}
+
+export function verifyAccessSession(token, configValue, { nowMs = Date.now() } = {}) {
+  if (!configValue?.ready || typeof token !== "string" || token.length > 1024) return false;
+  const parts = token.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  let actualSignature;
+  let payload;
+  try {
+    actualSignature = Buffer.from(parts[1], "base64url");
+    payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+  } catch {
+    return false;
+  }
+  const expectedSignature = createHmac("sha256", configValue.sessionSecret).update(parts[0]).digest();
+  if (!safeEqual(actualSignature, expectedSignature)) return false;
+  const now = Math.floor(nowMs / 1000);
+  return payload?.v === 1
+    && typeof payload.sid === "string" && payload.sid.length >= 8 && payload.sid.length <= 160
+    && Number.isInteger(payload.iat) && Number.isInteger(payload.exp)
+    && payload.iat <= now + 60 && payload.exp > now && payload.exp - payload.iat === ACCESS_SESSION_TTL_SECONDS;
+}
+
+function requestHasValidAccessSession(request, accessConfig, nowMs = Date.now()) {
+  return verifyAccessSession(cookieValue(request, ACCESS_SESSION_COOKIE), accessConfig, { nowMs });
+}
+
+function boundedAccessCode(body) {
+  let serialized;
+  try { serialized = JSON.stringify(body ?? null); } catch { throw new TypeError("ACCESS_CODE_INVALID"); }
+  if (Buffer.byteLength(serialized) > 1024 || !body || typeof body !== "object" || Array.isArray(body)) throw new TypeError("ACCESS_CODE_INVALID");
+  const code = body.code;
+  if (typeof code !== "string" || code.length < 1 || code.length > 256) throw new TypeError("ACCESS_CODE_INVALID");
+  return code;
+}
+
+function accessCodeMatches(code, accessConfig) {
+  if (!accessConfig?.ready) return false;
+  const actual = createHash("sha256").update(code, "utf8").digest();
+  const expected = Buffer.from(accessConfig.accessCodeSha256, "hex");
+  return safeEqual(actual, expected);
+}
+
+function accessSessionCookie(token, expiresAt) {
+  return `${ACCESS_SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ACCESS_SESSION_TTL_SECONDS}; Expires=${expiresAt.toUTCString()}`;
+}
+
+function requestConfig(request, env = process.env) {
+  const serverApiKey = serverApiKeyFromEnv(env);
+  const authorization = requestHeader(request, "authorization");
   const browserApiKey = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
   const apiKey = serverApiKey || browserApiKey;
   if (apiKey.length < 8) throw new TypeError("ARK_API_KEY_REQUIRED");
@@ -117,21 +234,28 @@ function requestConfig(request) {
   return {
     apiKey,
     credentialMode: serverManaged ? "SERVER_MANAGED" : "BROWSER_BYOK",
-    textModel: cleanModel(serverManaged ? process.env.ARK_TEXT_MODEL : request.headers["x-xiaoshimei-text-model"], DEFAULT_TEXT_MODEL),
-    imageModel: cleanModel(serverManaged ? process.env.ARK_IMAGE_MODEL : request.headers["x-xiaoshimei-image-model"], DEFAULT_IMAGE_MODEL),
+    textModel: cleanModel(serverManaged ? env?.ARK_TEXT_MODEL : requestHeader(request, "x-xiaoshimei-text-model"), DEFAULT_TEXT_MODEL),
+    imageModel: cleanModel(serverManaged ? env?.ARK_IMAGE_MODEL : requestHeader(request, "x-xiaoshimei-image-model"), DEFAULT_IMAGE_MODEL),
   };
 }
 
-function publicProviderConfig() {
-  const configured = String(process.env.ARK_API_KEY || "").trim().length >= 8;
+function publicProviderConfig(request, { env = process.env, nowMs = Date.now() } = {}) {
+  const configured = configuredServerManaged(env);
+  const access = inspectServerAccessConfig(env);
+  const ledger = imageLedgerEnv(env);
+  const authenticated = configured && access.ready && requestHasValidAccessSession(request, access, nowMs);
   return {
-    status: configured ? "CONFIGURED_UNVERIFIED" : "AWAITING_BYOK",
+    status: configured ? access.ready ? authenticated ? "CONFIGURED_UNVERIFIED" : "ACCESS_SESSION_REQUIRED" : "ACCESS_CONFIGURATION_REQUIRED" : "AWAITING_BYOK",
     configured,
+    access_required: configured,
+    access_configured: configured && access.ready,
+    authenticated,
+    image_ledger_configured: ledger.ready,
     provider: "volcengine-ark",
     provider_label: "火山方舟",
     base_url: ARK_BASE_URL,
-    text_model: cleanModel(process.env.ARK_TEXT_MODEL, DEFAULT_TEXT_MODEL),
-    image_model: cleanModel(process.env.ARK_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
+    text_model: cleanModel(env?.ARK_TEXT_MODEL, DEFAULT_TEXT_MODEL),
+    image_model: cleanModel(env?.ARK_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
     credential_mode: configured ? "SERVER_MANAGED" : "BROWSER_BYOK",
     key_store: configured ? "Vercel Sensitive Environment Variable" : "当前标签页 sessionStorage",
   };
@@ -420,6 +544,265 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+const IMAGE_LEDGER_INIT_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  if redis.call('HGET', KEYS[1], 'checkpoint_sha') == ARGV[1]
+    and redis.call('HGET', KEYS[1], 'nonce') == ARGV[2]
+    and redis.call('HGET', KEYS[1], 'attempt_index') == ARGV[3]
+    and redis.call('HGET', KEYS[1], 'job_index') == ARGV[4] then
+    return {'EXISTING'}
+  end
+  return {'CONFLICT'}
+end
+redis.call('HSET', KEYS[1],
+  'status', 'READY',
+  'checkpoint_sha', ARGV[1],
+  'nonce', ARGV[2],
+  'attempt_index', ARGV[3],
+  'job_index', ARGV[4],
+  'reservation_count', ARGV[3],
+  'max_calls', ARGV[5],
+  'expires_at_ms', ARGV[6])
+redis.call('PEXPIREAT', KEYS[1], ARGV[6])
+return {'INITIALIZED'}
+`;
+
+const IMAGE_LEDGER_RESERVE_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+  if redis.call('HGET', KEYS[2], 'nonce') ~= ARGV[2]
+    or redis.call('HGET', KEYS[2], 'checkpoint_sha') ~= ARGV[1] then
+    return {'NONCE_CONFLICT'}
+  end
+  local attempt_status = redis.call('HGET', KEYS[2], 'status')
+  if attempt_status == 'COMMITTED' then return {'CACHED'} end
+  if attempt_status == 'UNKNOWN' then return {'UNKNOWN'} end
+  if attempt_status == 'IN_FLIGHT' then
+    local reserved_at = tonumber(redis.call('HGET', KEYS[2], 'reserved_at_ms') or '0')
+    if tonumber(ARGV[5]) - reserved_at > tonumber(ARGV[6]) then
+      redis.call('HSET', KEYS[2], 'status', 'UNKNOWN')
+      redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+      return {'UNKNOWN'}
+    end
+    return {'IN_FLIGHT'}
+  end
+end
+local run_status = redis.call('HGET', KEYS[1], 'status')
+if redis.call('HGET', KEYS[1], 'checkpoint_sha') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'nonce') ~= ARGV[2]
+  or redis.call('HGET', KEYS[1], 'attempt_index') ~= ARGV[3]
+  or redis.call('HGET', KEYS[1], 'job_index') ~= ARGV[4] then
+  return {'CHECKPOINT_CONFLICT'}
+end
+if run_status == 'UNKNOWN' then return {'UNKNOWN'} end
+if run_status == 'COMPLETE' then return {'COMPLETE'} end
+if run_status == 'EXHAUSTED' then return {'BUDGET_EXHAUSTED'} end
+if run_status ~= 'READY' then return {'IN_FLIGHT'} end
+local count = tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '0')
+local max_calls = tonumber(redis.call('HGET', KEYS[1], 'max_calls') or ARGV[7])
+if count >= max_calls then
+  redis.call('HSET', KEYS[1], 'status', 'EXHAUSTED')
+  return {'BUDGET_EXHAUSTED'}
+end
+redis.call('HSET', KEYS[2],
+  'status', 'IN_FLIGHT',
+  'nonce', ARGV[2],
+  'checkpoint_sha', ARGV[1],
+  'reserved_at_ms', ARGV[5])
+redis.call('PEXPIREAT', KEYS[2], ARGV[8])
+redis.call('HSET', KEYS[1], 'status', 'IN_FLIGHT', 'reservation_count', count + 1)
+redis.call('PEXPIREAT', KEYS[1], ARGV[8])
+return {'RESERVED', tostring(count + 1)}
+`;
+
+const IMAGE_LEDGER_COMMIT_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[2], 'nonce') ~= ARGV[2]
+  or redis.call('HGET', KEYS[2], 'checkpoint_sha') ~= ARGV[1] then
+  return {'NONCE_CONFLICT'}
+end
+local attempt_status = redis.call('HGET', KEYS[2], 'status')
+if attempt_status == 'COMMITTED' then
+  if redis.call('HGET', KEYS[2], 'result_sha') == ARGV[3] then return {'COMMITTED'} end
+  return {'COMMIT_CONFLICT'}
+end
+if attempt_status ~= 'IN_FLIGHT' or redis.call('HGET', KEYS[1], 'status') ~= 'IN_FLIGHT' then
+  return {attempt_status or 'UNKNOWN'}
+end
+redis.call('HSET', KEYS[2],
+  'status', 'COMMITTED',
+  'result_sha', ARGV[3],
+  'http_status', ARGV[4],
+  'cache_body', ARGV[5])
+redis.call('PEXPIREAT', KEYS[2], ARGV[11])
+redis.call('HSET', KEYS[1],
+  'status', ARGV[10],
+  'checkpoint_sha', ARGV[6],
+  'nonce', ARGV[7],
+  'attempt_index', ARGV[8],
+  'job_index', ARGV[9],
+  'expires_at_ms', ARGV[11])
+redis.call('PEXPIREAT', KEYS[1], ARGV[11])
+return {'COMMITTED'}
+`;
+
+const IMAGE_LEDGER_UNKNOWN_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[2], 'nonce') ~= ARGV[2]
+  or redis.call('HGET', KEYS[2], 'checkpoint_sha') ~= ARGV[1] then
+  return {'NONCE_CONFLICT'}
+end
+local attempt_status = redis.call('HGET', KEYS[2], 'status')
+if attempt_status == 'COMMITTED' then return {'COMMITTED'} end
+redis.call('HSET', KEYS[2], 'status', 'UNKNOWN')
+redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+return {'UNKNOWN'}
+`;
+
+function imageLedgerKeys(runId, attemptIndex = null) {
+  const normalized = String(runId || "");
+  if (!/^images-[0-9TZ-]+-[0-9a-f]{8}$/.test(normalized)) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
+  const root = `xiaoshimei:image-run:{${normalized}}`;
+  return { run: `${root}:meta`, attempt: attemptIndex == null ? null : `${root}:attempt:${Number(attemptIndex)}` };
+}
+
+function ledgerReplyStatus(value) {
+  const result = Array.isArray(value) ? value : [value];
+  return { status: String(result[0] || "IMAGE_LEDGER_INVALID_REPLY"), value: result[1] == null ? null : result[1] };
+}
+
+export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fetch, timeoutMs = 5_000 } = {}) {
+  let endpoint;
+  try { endpoint = new URL(url); } catch { throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED"); }
+  if (endpoint.protocol !== "https:" || typeof token !== "string" || token.length < 16 || typeof fetchImpl !== "function") throw new TypeError("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
+  const evalLua = async (script, keys, args) => {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(["EVAL", script, String(keys.length), ...keys, ...args.map((value) => String(value))]),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+    }
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.error || payload?.result == null) throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+    return ledgerReplyStatus(payload.result);
+  };
+  const getCached = async (attemptKey) => {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(["HGET", attemptKey, "cache_body"]),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+    }
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.error || typeof payload?.result !== "string") throw new Error("IMAGE_LEDGER_CACHE_UNAVAILABLE");
+    return payload.result;
+  };
+  return {
+    async assertReady() {
+      let response;
+      try {
+        response = await fetchImpl(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify(["PING"]),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch {
+        throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+      }
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || payload?.error || payload?.result !== "PONG") throw new Error("IMAGE_LEDGER_UNAVAILABLE");
+      return true;
+    },
+    async init(identity) {
+      const keys = imageLedgerKeys(identity.runId);
+      return evalLua(IMAGE_LEDGER_INIT_LUA, [keys.run], [identity.checkpointSha256, identity.attemptNonce, identity.attemptIndex, identity.jobIndex, identity.maxCalls, identity.expiresAtMs]);
+    },
+    async reserve(identity, { nowMs = Date.now(), leaseMs = IMAGE_LEDGER_IN_FLIGHT_LEASE_MS } = {}) {
+      const keys = imageLedgerKeys(identity.runId, identity.attemptIndex);
+      const reply = await evalLua(IMAGE_LEDGER_RESERVE_LUA, [keys.run, keys.attempt], [identity.checkpointSha256, identity.attemptNonce, identity.attemptIndex, identity.jobIndex, nowMs, leaseMs, identity.maxCalls, identity.expiresAtMs]);
+      return reply.status === "CACHED" ? { ...reply, cachedBody: await getCached(keys.attempt) } : reply;
+    },
+    async commit(identity, { outcome, nextIdentity = null, status = "READY" } = {}) {
+      const serialized = JSON.stringify(outcome);
+      if (Buffer.byteLength(serialized) > IMAGE_LEDGER_MAX_CACHE_BYTES) throw new Error("IMAGE_LEDGER_CACHE_TOO_LARGE");
+      const keys = imageLedgerKeys(identity.runId, identity.attemptIndex);
+      const next = nextIdentity || { checkpointSha256: "", attemptNonce: "", attemptIndex: identity.attemptIndex + 1, jobIndex: identity.jobIndex };
+      return evalLua(IMAGE_LEDGER_COMMIT_LUA, [keys.run, keys.attempt], [identity.checkpointSha256, identity.attemptNonce, sha256Bytes(Buffer.from(serialized)), outcome.kind === "SUCCESS" ? 200 : 422, serialized, next.checkpointSha256, next.attemptNonce, next.attemptIndex, next.jobIndex, status, identity.expiresAtMs]);
+    },
+    async markUnknown(identity) {
+      const keys = imageLedgerKeys(identity.runId, identity.attemptIndex);
+      return evalLua(IMAGE_LEDGER_UNKNOWN_LUA, [keys.run, keys.attempt], [identity.checkpointSha256, identity.attemptNonce]);
+    },
+  };
+}
+
+export function createUpstashImageLedgerFromEnv(env = process.env, options = {}) {
+  const value = imageLedgerEnv(env);
+  return value.ready ? createUpstashImageLedger({ url: value.url, token: value.token, ...options }) : null;
+}
+
+function publicRunCreatedAtMs(runId) {
+  const match = /^images-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z-[0-9a-f]{8}$/.exec(String(runId || ""));
+  if (!match) throw new TypeError("IMAGE_LEDGER_RUN_ID_INVALID");
+  return Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]), Number(match[7]));
+}
+
+export function imageLedgerIdentity(checkpoint, apiKey) {
+  const parsed = parsePublicImageRun(checkpoint);
+  if (!parsed.signature) throw new TypeError("PUBLIC_IMAGE_RESUME_SIGNATURE_INVALID");
+  const checkpointSha256 = sha256Bytes(Buffer.from(canonicalJson(parsed)));
+  return {
+    runId: parsed.run_id,
+    checkpointSha256,
+    attemptNonce: createHmac("sha256", apiKey).update(`xiaoshimei-image-ledger-attempt-v1:${checkpointSha256}`).digest("hex"),
+    attemptIndex: parsed.actual_image_calls,
+    jobIndex: parsed.next_job_index,
+    maxCalls: parsed.max_image_calls,
+    expiresAtMs: publicRunCreatedAtMs(parsed.run_id) + IMAGE_LEDGER_RUN_TTL_MS,
+  };
+}
+
+function cachedOutcome(value) {
+  let outcome;
+  try { outcome = typeof value === "string" ? JSON.parse(value) : value; } catch { throw new Error("IMAGE_LEDGER_CACHE_INVALID"); }
+  if (outcome?.kind === "SUCCESS") return outcome.value;
+  if (outcome?.kind === "ERROR") {
+    const error = new Error(String(outcome.code || "IMAGE_LEDGER_CACHED_ERROR"));
+    if (outcome.details && typeof outcome.details === "object") error.details = structuredClone(outcome.details);
+    throw error;
+  }
+  throw new Error("IMAGE_LEDGER_CACHE_INVALID");
+}
+
+function imageLedgerStateError(status, identity, details = {}) {
+  const code = status === "BUDGET_EXHAUSTED" ? "IMAGE_CALL_BUDGET_EXHAUSTED"
+    : status === "IN_FLIGHT" ? "IMAGE_STEP_IN_FLIGHT"
+      : status === "UNKNOWN" ? "IMAGE_STEP_UNKNOWN"
+        : status === "COMPLETE" ? "IMAGE_RUN_ALREADY_COMPLETE"
+          : status === "RUN_MISSING" ? "IMAGE_LEDGER_RUN_MISSING"
+            : status === "NONCE_CONFLICT" || status === "CHECKPOINT_CONFLICT" || status === "COMMIT_CONFLICT" || status === "CONFLICT" ? "IMAGE_LEDGER_REPLAY_CONFLICT"
+              : "IMAGE_LEDGER_UNAVAILABLE";
+  const error = new Error(code);
+  error.details = {
+    resume_run_id: identity?.runId || null,
+    retry_scope: status === "IN_FLIGHT" ? "CHECK_SAME_STEP_WITHOUT_UPSTREAM" : status === "BUDGET_EXHAUSTED" ? "NO_MORE_PAID_CALLS_IN_THIS_RUN" : "OPEN_NEW_RUN_ONLY_AFTER_USER_DECISION",
+    ledger_status: status,
+    ...details,
+  };
+  return error;
+}
+
 function checkpointWithoutSignature(value) {
   const checkpoint = structuredClone(value);
   delete checkpoint.signature;
@@ -513,11 +896,13 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
   let pages;
   let planError;
   const planAttempts = [];
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  const serverManaged = settings.credentialMode === "SERVER_MANAGED";
+  const maxPlanAttempts = serverManaged ? 1 : 3;
+  for (let attempt = 1; attempt <= maxPlanAttempts; attempt += 1) {
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
     const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
     try {
-      pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: attempt === 3 });
+      pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: !serverManaged && attempt === 3 });
       assertXhsPublishQuality(pages.map((page) => ({
         page_role: page.pageRole,
         eyebrow: page.eyebrow,
@@ -613,7 +998,41 @@ function assemblePublicImageContent(checkpoint, input, settings) {
   return parseContentPackage(JSON.stringify(content));
 }
 
-export async function generateImages(input, settings) {
+function imageLedgerErrorOutcome(error) {
+  return {
+    kind: "ERROR",
+    code: String(error?.message || error || "IMAGE_STEP_FAILED").slice(0, 360),
+    ...(error?.details && typeof error.details === "object" ? { details: structuredClone(error.details) } : {}),
+  };
+}
+
+async function markImageLedgerUnknown(imageLedger, identity, cause) {
+  try {
+    const result = await imageLedger.markUnknown(identity);
+    if (result?.status === "COMMITTED") return true;
+  } catch {
+    // The authority could not prove a durable result, so the old run remains
+    // frozen. Never infer safety from a failed readback.
+  }
+  const error = imageLedgerStateError("UNKNOWN", identity, { cause: String(cause?.message || cause || "IMAGE_LEDGER_COMMIT_FAILED").slice(0, 180) });
+  error.cause = cause;
+  throw error;
+}
+
+async function commitImageLedgerOutcome(imageLedger, identity, { outcome, nextIdentity, status }) {
+  let result;
+  try {
+    result = await imageLedger.commit(identity, { outcome, nextIdentity, status });
+  } catch (error) {
+    if (await markImageLedgerUnknown(imageLedger, identity, error)) return;
+  }
+  if (result?.status !== "COMMITTED") throw imageLedgerStateError(result?.status || "UNKNOWN", identity);
+}
+
+export async function generateImages(input, settings, { imageLedger = null, nowMs = Date.now(), ledgerReady = false } = {}) {
+  const serverManaged = settings.credentialMode === "SERVER_MANAGED";
+  if (serverManaged && !imageLedger) throw new Error("IMAGE_LEDGER_CONFIGURATION_REQUIRED");
+  if (serverManaged && !ledgerReady && typeof imageLedger.assertReady === "function") await imageLedger.assertReady();
   const pageCount = input.image_count === "AUTO" ? input.draft.recommended_image_count : input.image_count;
   const draftSha256 = sha256Bytes(Buffer.from(JSON.stringify(input.draft)));
   const referenceFingerprint = publicReferenceFingerprint(input);
@@ -624,19 +1043,79 @@ export async function generateImages(input, settings) {
   } else {
     if (input.resume_run_id) throw new TypeError("PUBLIC_IMAGE_RESUME_CHECKPOINT_REQUIRED");
     checkpoint = await createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint);
-    return publicImageStepResponse(checkpoint, settings);
+    const result = publicImageStepResponse(checkpoint, settings);
+    if (serverManaged) {
+      const identity = imageLedgerIdentity(result.resume.resume_checkpoint, settings.apiKey);
+      if (identity.expiresAtMs <= nowMs) throw imageLedgerStateError("RUN_MISSING", identity, { reason: "RUN_EXPIRED" });
+      const initialized = await imageLedger.init(identity);
+      if (!new Set(["INITIALIZED", "EXISTING"]).has(initialized?.status)) throw imageLedgerStateError(initialized?.status || "UNKNOWN", identity);
+    }
+    return result;
   }
-  if (checkpoint.status === "COMPLETE") return assemblePublicImageContent(checkpoint, input, settings);
-  if (checkpoint.status === "EXHAUSTED") throw new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
-  if (checkpoint.actual_image_calls >= checkpoint.max_image_calls) throw publicImageBudgetError(checkpoint, settings);
-  checkpoint = await executePublicImageJob(checkpoint, input, settings);
-  if (checkpoint.status === "EXHAUSTED") {
-    const signed = signPublicImageCheckpoint(checkpoint, settings.apiKey);
-    const error = new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
-    error.details = { ...publicImageRunProgress(signed, IMAGE_PRICE_CNY), resume_checkpoint: signed, retry_scope: "CHANGE_VISUAL_INPUTS_THEN_RESTART", unresolved_unit_ids: checkpoint.failure?.unresolved_unit_ids || [] };
+  if (!serverManaged) {
+    if (checkpoint.status === "COMPLETE") return assemblePublicImageContent(checkpoint, input, settings);
+    if (checkpoint.status === "EXHAUSTED") throw new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+    if (checkpoint.actual_image_calls >= checkpoint.max_image_calls) throw publicImageBudgetError(checkpoint, settings);
+    checkpoint = await executePublicImageJob(checkpoint, input, settings);
+    if (checkpoint.status === "EXHAUSTED") {
+      const signed = signPublicImageCheckpoint(checkpoint, settings.apiKey);
+      const error = new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+      error.details = { ...publicImageRunProgress(signed, IMAGE_PRICE_CNY), resume_checkpoint: signed, retry_scope: "CHANGE_VISUAL_INPUTS_THEN_RESTART", unresolved_unit_ids: checkpoint.failure?.unresolved_unit_ids || [] };
+      throw error;
+    }
+    return checkpoint.status === "COMPLETE" ? assemblePublicImageContent(checkpoint, input, settings) : publicImageStepResponse(checkpoint, settings);
+  }
+
+  const identity = imageLedgerIdentity(input.resume_checkpoint, settings.apiKey);
+  if (identity.expiresAtMs <= nowMs) throw imageLedgerStateError("RUN_MISSING", identity, { reason: "RUN_EXPIRED" });
+  const reservation = await imageLedger.reserve(identity, { nowMs });
+  if (reservation?.status === "CACHED") return cachedOutcome(reservation.cachedBody);
+  if (reservation?.status === "BUDGET_EXHAUSTED") {
+    if (checkpoint.status === "EXHAUSTED") {
+      const error = new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+      error.details = { ...publicImageRunProgress(input.resume_checkpoint, IMAGE_PRICE_CNY), resume_checkpoint: input.resume_checkpoint, retry_scope: "CHANGE_VISUAL_INPUTS_THEN_RESTART", unresolved_unit_ids: checkpoint.failure?.unresolved_unit_ids || [] };
+      throw error;
+    }
+    if (checkpoint.actual_image_calls >= checkpoint.max_image_calls) throw publicImageBudgetError(checkpoint, settings);
+    throw imageLedgerStateError("BUDGET_EXHAUSTED", identity, { reason: "COUNTER_CHECKPOINT_MISMATCH" });
+  }
+  if (reservation?.status === "COMPLETE" && checkpoint.status === "COMPLETE") return assemblePublicImageContent(checkpoint, input, settings);
+  if (reservation?.status !== "RESERVED") throw imageLedgerStateError(reservation?.status || "UNKNOWN", identity);
+
+  let result;
+  let nextCheckpoint;
+  let terminalStatus = "READY";
+  try {
+    checkpoint = await executePublicImageJob(checkpoint, input, settings);
+    if (checkpoint.status === "EXHAUSTED") {
+      nextCheckpoint = signPublicImageCheckpoint(checkpoint, settings.apiKey);
+      terminalStatus = "EXHAUSTED";
+      const error = new Error(checkpoint.failure?.code || "PUBLIC_IMAGE_REPAIR_EXHAUSTED");
+      error.details = { ...publicImageRunProgress(nextCheckpoint, IMAGE_PRICE_CNY), resume_checkpoint: nextCheckpoint, retry_scope: "CHANGE_VISUAL_INPUTS_THEN_RESTART", unresolved_unit_ids: checkpoint.failure?.unresolved_unit_ids || [] };
+      throw error;
+    }
+    if (checkpoint.status === "COMPLETE") {
+      nextCheckpoint = signPublicImageCheckpoint(checkpoint, settings.apiKey);
+      terminalStatus = "COMPLETE";
+      result = assemblePublicImageContent(checkpoint, input, settings);
+    } else {
+      result = publicImageStepResponse(checkpoint, settings);
+      nextCheckpoint = result.resume.resume_checkpoint;
+    }
+  } catch (error) {
+    const resumableCheckpoint = nextCheckpoint || error?.details?.resume_checkpoint;
+    if (!resumableCheckpoint) {
+      await markImageLedgerUnknown(imageLedger, identity, error);
+      throw error;
+    }
+    const nextIdentity = imageLedgerIdentity(resumableCheckpoint, settings.apiKey);
+    await commitImageLedgerOutcome(imageLedger, identity, { outcome: imageLedgerErrorOutcome(error), nextIdentity, status: terminalStatus });
     throw error;
   }
-  return checkpoint.status === "COMPLETE" ? assemblePublicImageContent(checkpoint, input, settings) : publicImageStepResponse(checkpoint, settings);
+
+  const nextIdentity = imageLedgerIdentity(nextCheckpoint, settings.apiKey);
+  await commitImageLedgerOutcome(imageLedger, identity, { outcome: { kind: "SUCCESS", value: result }, nextIdentity, status: terminalStatus });
+  return result;
 }
 
 async function generatePageCandidates(input, settings) {
@@ -649,20 +1128,78 @@ async function generatePageCandidates(input, settings) {
   return { schema: PAGE_CANDIDATE_RESPONSE_SCHEMA, run_id: `candidate-web-${Date.now()}-${randomUUID().slice(0, 8)}`, candidates };
 }
 
-export default async function handler(request, response) {
-  const route = routeName(request);
-  if (request.method === "GET" && route === "health") return send(response, 200, publicProviderConfig());
-  if (request.method === "GET" && route === "config") return send(response, 200, publicProviderConfig());
-  if (request.method !== "POST") return send(response, 405, { error: "METHOD_NOT_ALLOWED" });
-  try {
-    const settings = requestConfig(request);
-    if (route === "text-draft") return send(response, 200, await generateTextDraft(parseTextDraftRequest(request.body), settings));
-    if (route === "generate-images") return send(response, 200, await generateImages(parseImageGenerationRequest(request.body), settings));
-    if (route === "page-candidates") return send(response, 200, await generatePageCandidates(parsePageCandidateRequest(request.body), settings, request));
-    return send(response, 404, { error: "ROUTE_NOT_FOUND" });
-  } catch (error) {
-    const code = String(error?.message || error || "PROVIDER_FAILED").slice(0, 360);
-    const status = code.includes("API_KEY_REQUIRED") ? 401 : code.includes("INVALID") || error instanceof TypeError ? 400 : 422;
-    return send(response, status, { error: "ARK_PROBE_FAILED", code, stage: route === "text-draft" ? "text" : "image", ...(error?.details && typeof error.details === "object" ? { details: error.details } : {}) });
-  }
+function providerErrorStatus(code, error) {
+  if (code.includes("API_KEY_REQUIRED")) return 401;
+  if (new Set(["IMAGE_STEP_IN_FLIGHT", "IMAGE_STEP_UNKNOWN", "IMAGE_LEDGER_REPLAY_CONFLICT", "IMAGE_RUN_ALREADY_COMPLETE"]).has(code)) return 409;
+  if (code.startsWith("IMAGE_LEDGER_") || code === "IMAGE_LEDGER_CONFIGURATION_REQUIRED") return 503;
+  if (code.includes("INVALID") || error instanceof TypeError) return 400;
+  return 422;
 }
+
+export function createProviderHandler(options = {}) {
+  const env = options.env || process.env;
+  const currentTime = () => typeof options.nowMs === "function" ? Number(options.nowMs()) : Number(options.nowMs ?? Date.now());
+  const resolveImageLedger = async () => {
+    const injected = typeof options.imageLedger === "function" ? await options.imageLedger() : options.imageLedger;
+    return injected || createUpstashImageLedgerFromEnv(env, { fetchImpl: options.ledgerFetchImpl || globalThis.fetch });
+  };
+
+  return async function providerHandler(request, response) {
+    const route = routeName(request);
+    const nowMs = currentTime();
+    if (request.method === "GET" && route === "health") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
+    if (request.method === "GET" && route === "config") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
+    if (request.method !== "POST") return send(response, 405, { error: "METHOD_NOT_ALLOWED" });
+
+    const serverManaged = configuredServerManaged(env);
+    const accessConfig = inspectServerAccessConfig(env);
+    if (route === "access-session") {
+      if (!serverManaged || !accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      if (!requestHasExactOrigin(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      let code;
+      try { code = boundedAccessCode(request.body); }
+      catch { return send(response, 400, { error: "ACCESS_CODE_INVALID" }); }
+      if (!accessCodeMatches(code, accessConfig)) return send(response, 401, { error: "ACCESS_DENIED" });
+      const sessionOptions = { nowMs };
+      if (typeof options.sessionId === "function") sessionOptions.sessionId = options.sessionId();
+      else if (options.sessionId != null) sessionOptions.sessionId = options.sessionId;
+      const session = mintAccessSession(accessConfig, sessionOptions);
+      response.setHeader("set-cookie", accessSessionCookie(session.token, session.expiresAt));
+      return send(response, 200, { authenticated: true, credential_mode: "SERVER_MANAGED", expires_at: session.expiresAt.toISOString() });
+    }
+
+    let imageLedger = null;
+    if (serverManaged) {
+      if (!accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      if (!requestHasExactOrigin(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      if (!requestHasValidAccessSession(request, accessConfig, nowMs)) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      if (!SERVER_MANAGED_PROVIDER_ROUTES.has(route)) return send(response, 404, { error: "ROUTE_NOT_FOUND" });
+      if (route === "page-candidates") return send(response, 403, { error: "SERVER_MANAGED_PAGE_CANDIDATES_DISABLED" });
+      if (route === "generate-images") {
+        imageLedger = await resolveImageLedger().catch(() => null);
+        if (!imageLedger) return send(response, 503, { error: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" });
+        try {
+          if (typeof imageLedger.assertReady === "function") await imageLedger.assertReady();
+        } catch {
+          return send(response, 503, { error: "IMAGE_LEDGER_UNAVAILABLE" });
+        }
+      }
+    }
+
+    try {
+      const settings = requestConfig(request, env);
+      if (route === "text-draft") return send(response, 200, await generateTextDraft(parseTextDraftRequest(request.body), settings));
+      if (route === "generate-images") return send(response, 200, await generateImages(parseImageGenerationRequest(request.body), settings, { imageLedger, nowMs, ledgerReady: true }));
+      if (route === "page-candidates") return send(response, 200, await generatePageCandidates(parsePageCandidateRequest(request.body), settings));
+      return send(response, 404, { error: "ROUTE_NOT_FOUND" });
+    } catch (error) {
+      const code = String(error?.message || error || "PROVIDER_FAILED").slice(0, 360);
+      return send(response, providerErrorStatus(code, error), { error: "ARK_PROBE_FAILED", code, stage: route === "text-draft" ? "text" : "image", ...(error?.details && typeof error.details === "object" ? { details: error.details } : {}) });
+    }
+  };
+}
+
+const handler = createProviderHandler();
+export default handler;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assembleArkContent, assembleArkContentFromDraft, buildArkDraftTextRequest, buildArkImageQaRequest, buildArkImageRequest, buildArkPageCandidatePrompt, buildArkPagePlanRequest, buildArkTextRequest, classifyArkImageForStudio, composeArkPageImagePrompt, decodeArkImage, deriveArkVisualActionContract, extractArkImageQa, extractArkPagePlan, extractArkPlan, extractArkTextDraft, inspectImageBytes, isThreeByFourImage, pagePlanRetryGuidance, textQualityRetryGuidance } from "../src/ark-provider-core.mjs";
+import { assembleArkContent, assembleArkContentFromDraft, buildArkDraftTextRequest, buildArkImageQaRequest, buildArkImageRequest, buildArkPageCandidatePrompt, buildArkPagePlanRequest, buildArkTextRequest, classifyArkImageForStudio, composeArkPageImagePrompt, decodeArkImage, deriveArkVisualActionContract, extractArkImageQa, extractArkPagePlan, extractArkPlan, extractArkTextDraft, inspectImageBytes, isThreeByFourImage, pagePlanRetryGuidance, repairLegacyArkPublicationProjection, textQualityRetryGuidance } from "../src/ark-provider-core.mjs";
 import { buildGenerationContract, createProfileV2 } from "../src/profile-v2.mjs";
 
 function input() { return { topic: "书院筹备中的三种进入路径", pillar: "academy", goal: "save", profile_contract: buildGenerationContract(createProfileV2()) }; }
@@ -210,7 +210,7 @@ test("page candidates preserve page semantics and force both sides of a comparis
 
 test("assembled generated pages keep visual action and image prompt for later page regeneration", () => {
   const draft = {
-    schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-semantic", created_at: new Date().toISOString(), source_input: "中日茶艺差异", content_type: "knowledge_card",
+    schema: "xiaoshimei.text-draft-response.v1", draft_id: "draft-semantic", created_at: new Date().toISOString(), source_input: "  中日茶艺差异。\n\n保留连续  空白!?  ", content_type: "knowledge_card",
     text_requirements: "", prompt_context: {}, pillar: "culture", goal: "save", titles: ["中日茶艺差异怎么理解", "中日茶艺的日常差异", "两种茶艺的实践重点"], selected_title: "中日茶艺差异怎么理解",
     body: "中国茶艺和日本茶艺在器物、程序和关注点上有不同。这里做日常文化比较，不判断高低。".repeat(5), tags: ["中日茶艺", "茶文化", "东方生活", "泡茶", "文化比较"], recommended_image_count: 1, facts: [], risks: [],
     style_lock: buildGenerationContract(createProfileV2()).style_lock,
@@ -222,6 +222,95 @@ test("assembled generated pages keep visual action and image prompt for later pa
   assert.equal(content.pages[0].image_prompt, pages[0].imagePrompt);
   assert.equal(content.generation.production_mode, "smart");
   assert.equal(content.generation.source_draft_id, draft.draft_id);
+  assert.equal(content.source_input, draft.source_input);
+  assert.equal(content.pillar, draft.pillar);
+  assert.equal(content.goal, draft.goal);
+  assert.deepEqual(content.titles, draft.titles);
+  assert.equal(content.selectedTitle, draft.selected_title);
+  assert.equal(content.body, draft.body);
+  assert.deepEqual(content.tags, draft.tags);
+});
+
+function legacyArkProjectionFixture() {
+  const textDraft = {
+    schema: "xiaoshimei.text-draft-response.v1",
+    draft_id: "text-production-1",
+    source_input: "第一行保留原样。\n\n第二行也保留。",
+    pillar: "wellness",
+    goal: "save",
+    selected_title: "确认稿标题逐字保留",
+    body: "确认稿正文逐字保留。",
+    tags: ["标签一", "标签二", "标签三", "标签四", "标签五"],
+  };
+  const pages = [{ image_style: { src: "/generated/paid-image.jpg" }, title: "已付费页面" }];
+  const content = {
+    schema_version: "xiaoshimei.content-package.v1",
+    source_input: "第一行保留原样。 第二行也保留",
+    pillar: textDraft.pillar,
+    goal: textDraft.goal,
+    selectedTitle: textDraft.selected_title,
+    body: textDraft.body,
+    tags: [...textDraft.tags],
+    pages,
+    generation: {
+      mode: "PROVIDER",
+      provider: "volcengine-ark",
+      strategy: "resumable_public_image_steps_v1",
+      source_draft_id: textDraft.draft_id,
+    },
+  };
+  return {
+    content,
+    textDraft,
+    textConfirmed: true,
+    assembledDraftId: textDraft.draft_id,
+  };
+}
+
+test("legacy Ark repair changes only the proven old source transform and preserves paid pages", () => {
+  const fixture = legacyArkProjectionFixture();
+  const original = structuredClone(fixture.content);
+  const result = repairLegacyArkPublicationProjection(fixture);
+  assert.equal(result.repaired, true);
+  assert.equal(result.code, "LEGACY_ARK_SOURCE_PROJECTION_REPAIRED");
+  assert.equal(result.content.source_input, fixture.textDraft.source_input);
+  assert.deepEqual(result.content, { ...original, source_input: fixture.textDraft.source_input });
+  assert.strictEqual(result.content.pages, fixture.content.pages);
+  assert.deepEqual(fixture.content, original);
+});
+
+test("legacy Ark repair rejects every producer, lineage, copy, and source near-match", () => {
+  const cases = [
+    ["unconfirmed", (value) => { value.textConfirmed = false; }],
+    ["mode", (value) => { value.content.generation.mode = "DEMO_TEMPLATE"; }],
+    ["provider", (value) => { value.content.generation.provider = "another-provider"; }],
+    ["strategy", (value) => { value.content.generation.strategy = "another-strategy"; }],
+    ["text draft id", (value) => { value.textDraft.draft_id = "other-draft"; }],
+    ["assembled id", (value) => { value.assembledDraftId = "other-draft"; }],
+    ["content source id", (value) => { value.content.generation.source_draft_id = "other-draft"; }],
+    ["pillar", (value) => { value.content.pillar = "culture"; }],
+    ["goal", (value) => { value.content.goal = "consult"; }],
+    ["title", (value) => { value.content.selectedTitle += "改"; }],
+    ["body", (value) => { value.content.body += "改"; }],
+    ["tags", (value) => { value.content.tags = [...value.content.tags].reverse(); }],
+    ["source near-match", (value) => { value.content.source_input = "第一行保留原样。 第二行也保留。"; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const fixture = legacyArkProjectionFixture();
+    mutate(fixture);
+    const before = structuredClone(fixture.content);
+    const result = repairLegacyArkPublicationProjection(fixture);
+    assert.equal(result.repaired, false, name);
+    assert.strictEqual(result.content, fixture.content, name);
+    assert.deepEqual(fixture.content, before, name);
+  }
+
+  const exact = legacyArkProjectionFixture();
+  exact.content.source_input = exact.textDraft.source_input;
+  const result = repairLegacyArkPublicationProjection(exact);
+  assert.equal(result.repaired, false);
+  assert.equal(result.code, "LEGACY_ARK_REPAIR_ALREADY_EXACT");
+  assert.strictEqual(result.content, exact.content);
 });
 
 test("knowledge infographic mode binds distinct native text boxes to matching illustrations", () => {

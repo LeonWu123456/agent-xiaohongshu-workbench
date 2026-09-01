@@ -817,6 +817,75 @@ export function isThreeByFourImage(imageInfo) {
     && imageInfo.width * 4 === imageInfo.height * 3;
 }
 
+const LEGACY_ARK_RESUMABLE_STRATEGY = "resumable_public_image_steps_v1";
+
+function legacyArkSourceTransform(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/[。！？!?]+$/, "")
+    .trim();
+}
+
+function exactStringList(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+export function repairLegacyArkPublicationProjection({
+  content,
+  textDraft,
+  textConfirmed = false,
+  assembledDraftId = null,
+} = {}) {
+  const noRepair = (code) => ({ repaired: false, code, content });
+  if (
+    !content || typeof content !== "object" || Array.isArray(content)
+    || content.schema_version !== "xiaoshimei.content-package.v1"
+    || !textDraft || typeof textDraft !== "object" || Array.isArray(textDraft)
+    || textDraft.schema !== "xiaoshimei.text-draft-response.v1"
+    || typeof content.source_input !== "string"
+    || typeof textDraft.source_input !== "string"
+  ) return noRepair("LEGACY_ARK_REPAIR_INPUT_INVALID");
+  if (textConfirmed !== true) return noRepair("LEGACY_ARK_REPAIR_TEXT_UNCONFIRMED");
+
+  const generation = content.generation;
+  if (
+    generation?.mode !== "PROVIDER"
+    || generation.provider !== "volcengine-ark"
+    || generation.strategy !== LEGACY_ARK_RESUMABLE_STRATEGY
+  ) return noRepair("LEGACY_ARK_REPAIR_PRODUCER_MISMATCH");
+
+  const draftId = textDraft.draft_id;
+  if (
+    typeof draftId !== "string" || !draftId
+    || assembledDraftId !== draftId
+    || generation.source_draft_id !== draftId
+  ) return noRepair("LEGACY_ARK_REPAIR_LINEAGE_MISMATCH");
+
+  if (
+    content.pillar !== textDraft.pillar
+    || content.goal !== textDraft.goal
+    || content.selectedTitle !== textDraft.selected_title
+    || content.body !== textDraft.body
+    || !exactStringList(content.tags, textDraft.tags)
+  ) return noRepair("LEGACY_ARK_REPAIR_COPY_MISMATCH");
+
+  if (content.source_input === textDraft.source_input) {
+    return noRepair("LEGACY_ARK_REPAIR_ALREADY_EXACT");
+  }
+  if (content.source_input !== legacyArkSourceTransform(textDraft.source_input)) {
+    return noRepair("LEGACY_ARK_REPAIR_SOURCE_TRANSFORM_MISMATCH");
+  }
+
+  return {
+    repaired: true,
+    code: "LEGACY_ARK_SOURCE_PROJECTION_REPAIRED",
+    content: { ...content, source_input: textDraft.source_input },
+  };
+}
+
 export function assembleArkContent(input, plan, assetUrls, modelInfo) {
   if (!Array.isArray(assetUrls) || assetUrls.length !== 2) throw new TypeError("two local image assets are required");
   const base = generateContentPackage({ topic: input.topic, pillar: input.pillar, goal: input.goal });
@@ -849,6 +918,9 @@ export function assembleArkContentFromDraft(draft, pages, assetUrls, modelInfo, 
   });
   const content = {
     ...base,
+    source_input: draft.source_input,
+    pillar: draft.pillar,
+    goal: draft.goal,
     titles: draft.titles,
     selectedTitle: draft.selected_title,
     body: draft.body,

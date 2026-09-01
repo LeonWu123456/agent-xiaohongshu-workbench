@@ -1,9 +1,277 @@
+import { createDraftRecord, draftRecordToken } from "./workspace-state.mjs";
+
 export const PUBLIC_IMAGE_RUN_SCHEMA = "xiaoshimei.public-image-run.v1";
 export const PUBLIC_IMAGE_CALL_LIMIT = 6;
+export const DRAFT_BOUND_IMAGE_OPERATION_SCHEMA = "xiaoshimei.draft-bound-image-operation.v1";
 
 const PHASES = new Set(["PRIMARY", "GROUPED_REPAIR", "STANDALONE_REPAIR", "COMPLETE", "EXHAUSTED"]);
 const STATUSES = new Set(["GENERATING", "IMAGE_CALL_IN_PROGRESS", "PARTIAL_FAILURE_RESUMABLE", "COMPLETE", "EXHAUSTED"]);
 const MAX_CHECKPOINT_BYTES = 3_800_000;
+
+function jsonClone(value, code) {
+  try { return structuredClone(value); }
+  catch { throw new TypeError(code); }
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.values(value).forEach(deepFreeze);
+  return Object.freeze(value);
+}
+
+function exactJson(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function confirmedCopyFromTextDraft(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("IMAGE_OPERATION_TEXT_DRAFT_INVALID");
+  return {
+    source_input: typeof value.source_input === "string" ? value.source_input : "",
+    pillar: typeof value.pillar === "string" ? value.pillar : "",
+    goal: typeof value.goal === "string" ? value.goal : "",
+    selected_title: typeof value.selected_title === "string" ? value.selected_title : "",
+    body: typeof value.body === "string" ? value.body : "",
+    tags: Array.isArray(value.tags) ? [...value.tags] : [],
+  };
+}
+
+function confirmedCopyFromContent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("IMAGE_OPERATION_CONTENT_INVALID");
+  return {
+    source_input: typeof value.source_input === "string" ? value.source_input : "",
+    pillar: typeof value.pillar === "string" ? value.pillar : "",
+    goal: typeof value.goal === "string" ? value.goal : "",
+    selected_title: typeof value.selectedTitle === "string" ? value.selectedTitle : "",
+    body: typeof value.body === "string" ? value.body : "",
+    tags: Array.isArray(value.tags) ? [...value.tags] : [],
+  };
+}
+
+function normalizeOperationRecord(value, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(code);
+  try {
+    return createDraftRecord({
+      draftId: value.draft_id,
+      contentPackage: value.content_package,
+      generationSession: value.generation_session,
+      createdAt: value.created_at,
+      updatedAt: value.updated_at,
+    });
+  } catch (error) {
+    throw new TypeError(`${code}:${error.message}`);
+  }
+}
+
+export function parseDraftBoundImageOperation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.schema !== DRAFT_BOUND_IMAGE_OPERATION_SCHEMA) {
+    throw new TypeError("IMAGE_OPERATION_INVALID");
+  }
+  const operationId = requiredString(value.operation_id, "IMAGE_OPERATION_ID_INVALID", 120);
+  const targetDraftId = requiredString(value.target_draft_id, "IMAGE_OPERATION_DRAFT_ID_INVALID", 160);
+  const recoveredDraftId = requiredString(value.recovered_draft_id, "IMAGE_OPERATION_RECOVERED_ID_INVALID", 160);
+  if (recoveredDraftId === targetDraftId) throw new TypeError("IMAGE_OPERATION_RECOVERED_ID_INVALID");
+  const record = normalizeOperationRecord(value.record_snapshot, "IMAGE_OPERATION_RECORD_INVALID");
+  if (record.draft_id !== targetDraftId) throw new TypeError("IMAGE_OPERATION_DRAFT_ID_MISMATCH");
+  if (typeof value.expected_draft_token !== "string" || value.expected_draft_token !== draftRecordToken(record)) {
+    throw new TypeError("IMAGE_OPERATION_DRAFT_TOKEN_INVALID");
+  }
+  const session = record.generation_session;
+  const textDraft = session?.text_draft;
+  if (!textDraft || session.text_confirmed !== true) throw new TypeError("IMAGE_OPERATION_TEXT_NOT_CONFIRMED");
+  const textDraftId = requiredString(value.text_draft_id, "IMAGE_OPERATION_TEXT_DRAFT_ID_INVALID", 160);
+  if (textDraft.draft_id !== textDraftId) throw new TypeError("IMAGE_OPERATION_TEXT_DRAFT_ID_MISMATCH");
+  if (session.assembled_draft_id != null && session.assembled_draft_id !== textDraftId) {
+    throw new TypeError("IMAGE_OPERATION_SESSION_LINEAGE_INVALID");
+  }
+  const confirmedCopy = confirmedCopyFromTextDraft(textDraft);
+  if (!exactJson(value.confirmed_copy, confirmedCopy)) throw new TypeError("IMAGE_OPERATION_COPY_SNAPSHOT_INVALID");
+  const requestSnapshot = jsonClone(value.request_snapshot, "IMAGE_OPERATION_REQUEST_INVALID");
+  if (!requestSnapshot || typeof requestSnapshot !== "object" || Array.isArray(requestSnapshot)) {
+    throw new TypeError("IMAGE_OPERATION_REQUEST_INVALID");
+  }
+  return deepFreeze({
+    schema: DRAFT_BOUND_IMAGE_OPERATION_SCHEMA,
+    operation_id: operationId,
+    target_draft_id: targetDraftId,
+    recovered_draft_id: recoveredDraftId,
+    text_draft_id: textDraftId,
+    expected_draft_token: value.expected_draft_token,
+    record_snapshot: record,
+    confirmed_copy: confirmedCopy,
+    request_snapshot: requestSnapshot,
+  });
+}
+
+export function createDraftBoundImageOperation({
+  operationId,
+  sourceDraftRecord,
+  requestSnapshot,
+  recoveredDraftId = null,
+} = {}) {
+  const operation = requiredString(operationId, "IMAGE_OPERATION_ID_INVALID", 120);
+  const record = normalizeOperationRecord(sourceDraftRecord, "IMAGE_OPERATION_RECORD_INVALID");
+  const fallbackRecoveredId = `${record.draft_id}--recovered--${operation}`;
+  const resolvedRecoveredId = recoveredDraftId == null ? fallbackRecoveredId : recoveredDraftId;
+  const textDraft = record.generation_session?.text_draft;
+  return parseDraftBoundImageOperation({
+    schema: DRAFT_BOUND_IMAGE_OPERATION_SCHEMA,
+    operation_id: operation,
+    target_draft_id: record.draft_id,
+    recovered_draft_id: resolvedRecoveredId,
+    text_draft_id: textDraft?.draft_id,
+    expected_draft_token: draftRecordToken(record),
+    record_snapshot: record,
+    confirmed_copy: confirmedCopyFromTextDraft(textDraft),
+    request_snapshot: jsonClone(requestSnapshot, "IMAGE_OPERATION_REQUEST_INVALID"),
+  });
+}
+
+export function claimDraftBoundImageOperation(currentOperation, nextOperation) {
+  if (currentOperation != null) throw new TypeError("IMAGE_GENERATION_ALREADY_RUNNING");
+  return parseDraftBoundImageOperation(nextOperation);
+}
+
+function operationSession(operation, imageResume, assembledDraftId) {
+  return {
+    ...jsonClone(operation.record_snapshot.generation_session, "IMAGE_OPERATION_SESSION_INVALID"),
+    text_confirmed: true,
+    assembled_draft_id: assembledDraftId,
+    image_resume: imageResume == null ? null : jsonClone(imageResume, "IMAGE_OPERATION_RESUME_INVALID"),
+  };
+}
+
+function operationRecord(operation, { draftId, contentPackage, imageResume, assembledDraftId, updatedAt, createdAt }) {
+  return createDraftRecord({
+    draftId,
+    contentPackage,
+    generationSession: operationSession(operation, imageResume, assembledDraftId),
+    createdAt,
+    updatedAt,
+  });
+}
+
+function evolvedOperation(operation, record) {
+  return parseDraftBoundImageOperation({
+    ...operation,
+    expected_draft_token: draftRecordToken(record),
+    record_snapshot: record,
+  });
+}
+
+function operationCoordinator(value) {
+  if (!value || typeof value.mergeDraftCas !== "function") throw new TypeError("IMAGE_OPERATION_COORDINATOR_INVALID");
+  return value;
+}
+
+function stoppedOperationResult(receipt, operation) {
+  return {
+    ...receipt,
+    action: "STOP",
+    operation,
+    recovered_draft_id: receipt.recovered_draft?.draft_id || null,
+  };
+}
+
+export async function persistDraftBoundImageProgress({
+  operation: value,
+  coordinator: coordinatorValue,
+  imageResume,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const operation = parseDraftBoundImageOperation(value);
+  const coordinator = operationCoordinator(coordinatorValue);
+  const timestamp = requiredString(updatedAt, "IMAGE_OPERATION_UPDATED_AT_INVALID");
+  if (!imageResume || typeof imageResume !== "object" || Array.isArray(imageResume)) throw new TypeError("IMAGE_OPERATION_RESUME_INVALID");
+  const recovered = operationRecord(operation, {
+    draftId: operation.recovered_draft_id,
+    contentPackage: operation.record_snapshot.content_package,
+    imageResume,
+    assembledDraftId: operation.record_snapshot.generation_session.assembled_draft_id,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  const receipt = await coordinator.mergeDraftCas({
+    draftId: operation.target_draft_id,
+    expectedDraftToken: operation.expected_draft_token,
+    buildDraft: (target) => operationRecord(operation, {
+      draftId: target.draft_id,
+      contentPackage: target.content_package,
+      imageResume,
+      assembledDraftId: operation.record_snapshot.generation_session.assembled_draft_id,
+      createdAt: target.created_at,
+      updatedAt: timestamp,
+    }),
+    onConflict: () => recovered,
+    reason: `IMAGE_PARTIAL:${operation.operation_id}`,
+  });
+  if (!receipt.ok || receipt.disposition === "RECOVERED_SIBLING_COMMITTED" || receipt.recovered_draft) {
+    return stoppedOperationResult(receipt, operation);
+  }
+  if (!receipt.target_draft) return stoppedOperationResult({ ...receipt, ok: false, code: "IMAGE_OPERATION_READBACK_MISSING" }, operation);
+  return {
+    ...receipt,
+    action: "CONTINUE",
+    operation: evolvedOperation(operation, receipt.target_draft),
+    recovered_draft_id: null,
+  };
+}
+
+function assertCompletedContent(operation, contentPackage) {
+  if (contentPackage?.generation?.source_draft_id !== operation.text_draft_id) {
+    throw new TypeError("IMAGE_OPERATION_RESULT_LINEAGE_MISMATCH");
+  }
+  if (!exactJson(confirmedCopyFromContent(contentPackage), operation.confirmed_copy)) {
+    throw new TypeError("IMAGE_OPERATION_RESULT_COPY_MISMATCH");
+  }
+}
+
+export async function persistDraftBoundImageCompletion({
+  operation: value,
+  coordinator: coordinatorValue,
+  contentPackage,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const operation = parseDraftBoundImageOperation(value);
+  const coordinator = operationCoordinator(coordinatorValue);
+  const resultContent = jsonClone(contentPackage, "IMAGE_OPERATION_CONTENT_INVALID");
+  assertCompletedContent(operation, resultContent);
+  const timestamp = requiredString(updatedAt, "IMAGE_OPERATION_UPDATED_AT_INVALID");
+  const recovered = operationRecord(operation, {
+    draftId: operation.recovered_draft_id,
+    contentPackage: resultContent,
+    imageResume: null,
+    assembledDraftId: operation.text_draft_id,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  const receipt = await coordinator.mergeDraftCas({
+    draftId: operation.target_draft_id,
+    expectedDraftToken: operation.expected_draft_token,
+    buildDraft: (target) => operationRecord(operation, {
+      draftId: target.draft_id,
+      contentPackage: resultContent,
+      imageResume: null,
+      assembledDraftId: operation.text_draft_id,
+      createdAt: target.created_at,
+      updatedAt: timestamp,
+    }),
+    onConflict: () => recovered,
+    reason: `IMAGE_COMPLETE:${operation.operation_id}`,
+  });
+  if (!receipt.ok) return stoppedOperationResult(receipt, operation);
+  const committedRecord = receipt.recovered_draft || receipt.target_draft;
+  if (!committedRecord) return stoppedOperationResult({ ...receipt, ok: false, code: "IMAGE_OPERATION_READBACK_MISSING" }, operation);
+  if (committedRecord.generation_session?.assembled_draft_id !== operation.text_draft_id || committedRecord.generation_session?.image_resume != null) {
+    return stoppedOperationResult({ ...receipt, ok: false, code: "IMAGE_OPERATION_FINAL_READBACK_MISMATCH" }, operation);
+  }
+  return {
+    ...receipt,
+    action: "COMPLETE",
+    operation: receipt.target_draft ? evolvedOperation(operation, receipt.target_draft) : operation,
+    recovered_draft_id: receipt.recovered_draft?.draft_id || null,
+    adopt_current_ui: receipt.recovered_draft == null && receipt.workspace?.active_draft_id === operation.target_draft_id,
+  };
+}
 
 function requiredString(value, code, max = 240) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(code);

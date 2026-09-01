@@ -26,18 +26,26 @@ import {
   activeDraftRecord,
   beginNewDraft,
   buildWorkspaceBackupV2,
+  createWorkspaceCoordinator,
+  draftRecordToken,
   libraryContents,
   loadOrMigrateWorkspaceEnvelope,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
-  persistDraftRecordWithReadback,
   parseWorkspaceBackup,
-  persistWorkspaceEnvelope,
+  readWorkspaceSnapshot,
   saveDraftRecord,
   saveWorkspaceProfile,
+  workspaceEnvelopeToken,
 } from "./workspace-state.mjs";
 import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
-import { derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
+import { buildHistoricalDraftAdoption, derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
+import {
+  claimDraftBoundImageOperation,
+  createDraftBoundImageOperation,
+  persistDraftBoundImageCompletion,
+  persistDraftBoundImageProgress,
+} from "./public-image-run.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
 import { REALITY_METRICS, REALITY_WINDOWS, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
@@ -179,6 +187,7 @@ function loadProfile() {
 }
 
 function loadInitialWorkspace() {
+  const authoritySnapshot = readWorkspaceSnapshot(localStorage, WORKSPACE_KEY);
   const fallbackContent = loadStored() || generateContentPackage({ topic: DEFAULT_TOPIC });
   const fallbackProfile = loadProfile();
   const fallbackLibrary = loadLibrary();
@@ -191,10 +200,13 @@ function loadInitialWorkspace() {
     fallbackProfile,
     fallbackGenerationSession,
   });
-  const persistence = loaded.migrated
-    ? persistWorkspaceEnvelope(localStorage, loaded.workspace, STORAGE_KEYS)
-    : { ok: true, code: "WORKSPACE_ALREADY_V2" };
-  return { ...loaded, persistence };
+  return {
+    ...loaded,
+    authoritySnapshot,
+    persistence: authoritySnapshot.ok
+      ? { ok: true, code: loaded.migrated ? "WORKSPACE_MIGRATION_PENDING_MOUNT_LOCK" : "WORKSPACE_ALREADY_V2" }
+      : authoritySnapshot,
+  };
 }
 
 function loadPromptMemory() {
@@ -223,7 +235,20 @@ async function downloadBlob(name, blob) {
 }
 
 async function prepareBlobDownload(name, blob) {
-  const { url, revoke, transport, savedPath } = await resolveDownloadTarget({ name, blob, isPublicRuntime: IS_PUBLIC_RUNTIME });
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 8000);
+  let resolved;
+  try {
+    resolved = await resolveDownloadTarget({
+      name,
+      blob,
+      isPublicRuntime: IS_PUBLIC_RUNTIME,
+      fetchImpl: (target, init = {}) => fetch(target, { ...init, signal: controller.signal }),
+    });
+  } finally {
+    window.clearTimeout(timer);
+  }
+  const { url, revoke, transport, savedPath } = resolved;
   window.__xiaoshimeiLastDownload = { name, size: blob.size, type: blob.type, transport, saved_path: savedPath, completed_at: new Date().toISOString() };
   return { name, url, revoke, transport, savedPath, size: blob.size, type: blob.type };
 }
@@ -257,6 +282,73 @@ function explainExportFailure(error) {
   if (message.includes("HTML_EXPORT_IMAGE_LOAD_FAILED")) return "有插图尚未加载完成，发布包未生成。原稿已保留，请等待图片出现后重试。";
   if (message.includes("EXPORT_BLANK_OR_FLAT")) return "检测到空白导出页，发布包未生成。原稿已保留，请检查当前页后重试。";
   return `下载没有完成：${message.split("\n")[0]}`;
+}
+
+// MAIN_AUTHORITY_RUNTIME_START
+export function createMainAuthorityRuntime(readTarget) {
+  if (typeof readTarget !== "function") throw new TypeError("MAIN_AUTHORITY_TARGET_READER_REQUIRED");
+  let semanticEpoch = 0;
+  let operationSerial = 0;
+
+  const target = () => {
+    const value = readTarget() || {};
+    return {
+      draftId: String(value.draftId || ""),
+      pageId: value.pageId == null ? null : String(value.pageId),
+      workspaceToken: value.workspaceToken == null ? null : String(value.workspaceToken),
+    };
+  };
+
+  const isCurrent = (operation) => {
+    if (!operation || typeof operation !== "object") return false;
+    const current = target();
+    return operation.semanticEpoch === semanticEpoch
+      && operation.draftId === current.draftId
+      && (operation.pageId == null || operation.pageId === current.pageId)
+      && (operation.workspaceToken == null || operation.workspaceToken === current.workspaceToken);
+  };
+
+  return Object.freeze({
+    markSemanticMutation() {
+      semanticEpoch += 1;
+      return semanticEpoch;
+    },
+    capture(label, { pageScoped = false, envelopeScoped = false } = {}) {
+      const current = target();
+      return Object.freeze({
+        id: `main-operation-${++operationSerial}`,
+        label: String(label || "operation"),
+        draftId: current.draftId,
+        pageId: pageScoped ? current.pageId : null,
+        workspaceToken: envelopeScoped ? current.workspaceToken : null,
+        semanticEpoch,
+      });
+    },
+    isCurrent,
+    commit(operation, effect) {
+      if (!isCurrent(operation)) return { applied: false, code: "STALE_MAIN_OPERATION" };
+      if (typeof effect !== "function") throw new TypeError("MAIN_AUTHORITY_EFFECT_REQUIRED");
+      const value = effect();
+      return { applied: true, code: "MAIN_OPERATION_COMMITTED", value };
+    },
+    epoch() {
+      return semanticEpoch;
+    },
+  });
+}
+// MAIN_AUTHORITY_RUNTIME_END
+
+function pageSemanticIdentity(page, pageIndex) {
+  if (!page || typeof page !== "object") return `missing-page:${pageIndex}`;
+  return JSON.stringify([
+    pageIndex,
+    page.id || page.page_id || null,
+    page.page_role || null,
+    page.layout || null,
+    page.title || "",
+    page.body || "",
+    Array.isArray(page.info_panels) ? page.info_panels.map((panel) => panel?.id || null) : [],
+  ]);
 }
 
 
@@ -440,20 +532,37 @@ function App() {
   const initialPromptMemory = useMemo(() => loadPromptMemory(), []);
   const [workspaceEnvelope, setWorkspaceEnvelope] = useState(initialWorkspace);
   const workspaceEnvelopeRef = useRef(initialWorkspace);
+  const workspaceCoordinator = useMemo(() => createWorkspaceCoordinator({ storage: localStorage, keys: STORAGE_KEYS }), []);
+  const authorityTargetRef = useRef({
+    draftId: initialWorkspace.active_draft_id,
+    pageId: pageSemanticIdentity(initial.pages?.[0], 0),
+    workspaceToken: workspaceEnvelopeToken(initialWorkspace),
+  });
+  const mainAuthority = useMemo(() => createMainAuthorityRuntime(() => authorityTargetRef.current), []);
+  const activeImageOperationRef = useRef(null);
+  const candidateAuthorityOperationRef = useRef(null);
+  const historicalAdoptionRef = useRef(false);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [workspaceWriteBlocked, setWorkspaceWriteBlocked] = useState(false);
+  const workspaceWriteBlockedRef = useRef(false);
   const [previousDraftId, setPreviousDraftId] = useState(null);
   const [activatedAsContentOnly, setActivatedAsContentOnly] = useState(initialGenerationSession == null);
   const [contentHistory, setContentHistory] = useState(() => createEditorHistory(initial));
   const [layoutRefreshToken, setLayoutRefreshToken] = useState(0);
   const content = contentHistory.present;
   const setContent = useCallback((updater, options = {}) => {
+    if (options.semantic !== false) mainAuthority.markSemanticMutation();
     setContentHistory((history) => {
       const next = typeof updater === "function" ? updater(history.present) : updater;
       return updateEditorHistory(history, next, options);
     });
-  }, []);
-  const resetContent = useCallback((next) => setContentHistory(createEditorHistory(next)), []);
-  const undo = useCallback(() => { setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, []);
-  const redo = useCallback(() => { setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, []);
+  }, [mainAuthority]);
+  const resetContent = useCallback((next, { semantic = true } = {}) => {
+    if (semantic) mainAuthority.markSemanticMutation();
+    setContentHistory(createEditorHistory(next));
+  }, [mainAuthority]);
+  const undo = useCallback(() => { mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority]);
+  const redo = useCallback(() => { mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority]);
   const [topic, setTopic] = useState(initialGenerationSession?.topic || initialPromptMemory.defaults.source_topic || initial.source_input);
   const [pillar, setPillar] = useState(initialGenerationSession?.pillar || initial.pillar);
   const [goal, setGoal] = useState(initialGenerationSession?.goal || initial.goal);
@@ -504,6 +613,11 @@ function App() {
   const [actionReferenceNote, setActionReferenceNote] = useState("");
   const [providerHealth, setProviderHealth] = useState(PROVIDER_URL ? "CHECKING" : "DEMO");
   const [providerMeta, setProviderMeta] = useState(null);
+  const [accessRequired, setAccessRequired] = useState(false);
+  const [accessCode, setAccessCode] = useState("");
+  const [accessBusy, setAccessBusy] = useState(false);
+  const [accessError, setAccessError] = useState("");
+  const [historicalAdoptionBusy, setHistoricalAdoptionBusy] = useState(false);
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
   const [providerSettingsForm, setProviderSettingsForm] = useState({ provider: "volcengine-ark", label: "火山方舟", base_url: "https://ark.cn-beijing.volces.com/api/v3", text_model: "", image_model: "", api_key: "" });
@@ -511,6 +625,7 @@ function App() {
   const [imageCandidates, setImageCandidates] = useState([]);
   const [candidateLoadState, setCandidateLoadState] = useState({});
   const [candidatePageIndex, setCandidatePageIndex] = useState(null);
+  const [candidatePageIdentity, setCandidatePageIdentity] = useState(null);
   const [candidateRunId, setCandidateRunId] = useState(null);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const provider = useMemo(() => {
@@ -547,15 +662,16 @@ function App() {
   const canUndo = contentHistory.past.length > 0;
   const canRedo = contentHistory.future.length > 0;
   const isGenerating = generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
-  const providerCanAttempt = providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED";
-  const providerStatusLabel = providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
+  const providerCanAttempt = !accessRequired && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
+  const providerStatusLabel = accessRequired ? "需要访问验证" : providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
   const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
   const reusableImageAssets = useMemo(() => collectReusableImageAssets(content, library), [content, library]);
   const resolvedPageCount = textDraft ? (imageCountMode === "AUTO" ? textDraft.recommended_image_count : Number(customImageCount)) : 0;
   const motherSheetEstimate = textDraft && resolvedPageCount ? estimateMotherSheetPlan(resolvedPageCount, productionMode) : null;
   const motherSheetRange = motherSheetEstimate ? (motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? `${motherSheetEstimate.minMotherSheets}` : `${motherSheetEstimate.minMotherSheets}–${motherSheetEstimate.maxMotherSheets}`) : "0";
   const illustrationUnitRange = motherSheetEstimate ? (motherSheetEstimate.minIllustrationUnits === motherSheetEstimate.maxIllustrationUnits ? `${motherSheetEstimate.minIllustrationUnits}` : `${motherSheetEstimate.minIllustrationUnits}–${motherSheetEstimate.maxIllustrationUnits}`) : "0";
-  const hasConfirmedContent = contentHasRenderableCanvas(content, { activatedAsContentOnly });
+  const historicalAdoptionVisible = textDraft?.generation?.adoption === "historical_content_only_v1" && Boolean(content.saved_at);
+  const hasConfirmedContent = contentHasRenderableCanvas(content, { activatedAsContentOnly: activatedAsContentOnly || historicalAdoptionVisible });
   const isDraftInputOnly = !hasConfirmedContent;
   const isFreshDraft = isDraftInputOnly && !String(topic || "").trim() && !textDraft;
   const requiredImageCount = textConfirmed
@@ -580,6 +696,12 @@ function App() {
     assembledDraftId,
     activatedAsContentOnly,
   }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly]);
+  authorityTargetRef.current = {
+    draftId: workspaceEnvelopeRef.current.active_draft_id,
+    pageId: pageSemanticIdentity(currentPage, pageIndex),
+    workspaceToken: workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+  };
+  const editorAuthorityOperation = mainAuthority.capture("editor-callback", { pageScoped: true });
   contentRef.current = content;
   publicationAuthorityRef.current = publicationAuthority;
 
@@ -601,28 +723,39 @@ function App() {
     });
   }
 
-  function persistImageResumeBeforeNextRequest(progress) {
-    const result = persistDraftRecordWithReadback(
-      localStorage,
-      workspaceEnvelopeRef.current,
-      STORAGE_KEYS,
-      {
-        contentPackage: contentRef.current,
-        generationSession: currentAuthoringSession(progress),
-      },
-    );
-    if (!result.ok) {
-      setStorageIssue("配图进度未可靠落盘，续跑已暂停；旧稿与已保存资产仍保留。");
-      const error = new Error(`IMAGE_CHECKPOINT_PERSIST_FAILED:${result.code}`);
-      error.code = result.code;
-      throw error;
+  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false } = {}) {
+    workspaceEnvelopeRef.current = nextWorkspace;
+    authorityTargetRef.current = {
+      ...authorityTargetRef.current,
+      draftId: nextWorkspace.active_draft_id,
+      workspaceToken: workspaceEnvelopeToken(nextWorkspace),
+    };
+    setWorkspaceEnvelope(nextWorkspace);
+    setLibrary(libraryContents(nextWorkspace));
+    if (nextProfile) setProfile(nextProfile);
+    if (previousId !== undefined) setPreviousDraftId(previousId);
+    if (applyRecord) {
+      const recordId = record?.draft_id || nextWorkspace.active_draft_id;
+      const persistedRecord = nextWorkspace.drafts.find((draft) => draft.draft_id === recordId);
+      if (persistedRecord) applyDraftRecord(persistedRecord);
     }
-    workspaceEnvelopeRef.current = result.workspace;
-    setWorkspaceEnvelope(result.workspace);
-    setLibrary(libraryContents(result.workspace));
-    setImageResume(result.draft_record.generation_session.image_resume);
-    setStorageIssue("");
-    return result.draft_record.generation_session.image_resume;
+    setWorkspaceReady(true);
+  }
+
+  function setWorkspaceBlocked(value) {
+    workspaceWriteBlockedRef.current = Boolean(value);
+    setWorkspaceWriteBlocked(Boolean(value));
+  }
+
+  function handleWorkspaceConflict(receipt, fallbackMessage) {
+    const latest = receipt?.workspace;
+    if (latest?.active_draft_id && latest.active_draft_id !== authorityTargetRef.current.draftId) {
+      const latestRecord = latest.drafts.find((draft) => draft.draft_id === latest.active_draft_id);
+      if (latestRecord) adoptWorkspaceState(latest, { record: latestRecord, applyRecord: true });
+      setToast("另一标签页已经切换稿件；这里已读回最新稿，旧数据没有覆盖它");
+    }
+    setWorkspaceBlocked(true);
+    setStorageIssue(fallbackMessage);
   }
 
   useEffect(() => {
@@ -630,32 +763,94 @@ function App() {
       if (current?.revoke) URL.revokeObjectURL(current.url);
       return null;
     });
-    setExportState((current) => current === "READY" || current === "COMPLETE" ? "IDLE" : current);
+    setExportState((current) => ["GENERATING", "READY", "COMPLETE"].includes(current) ? "IDLE" : current);
   }, [content, publicationAuthority.token]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
+    let active = true;
+    const boot = async () => {
+      const initialSnapshot = initialWorkspaceLoad.authoritySnapshot;
+      if (!initialSnapshot?.ok) {
+        if (active) handleWorkspaceConflict(initialSnapshot, "工作台权威无法读取；所有写入已暂停，请先下载备份并刷新。");
+        return;
+      }
+      let receipt = {
+        ok: true,
+        code: "WORKSPACE_ALREADY_V2",
+        workspace: initialWorkspace,
+        workspace_token: workspaceEnvelopeToken(initialWorkspace),
+      };
+      if (initialWorkspaceLoad.migrated) {
+        receipt = await workspaceCoordinator.fullCas({
+          expectedWorkspaceToken: initialSnapshot.workspace_token,
+          workspace: initialWorkspace,
+          reason: "BOOT_MIGRATION",
+        });
+      }
+      if (!active) return;
+      if (!receipt.ok || !receipt.workspace) {
+        handleWorkspaceConflict(receipt, "旧工作台已安全读入，但迁移未能在跨标签锁内落盘；写入已暂停。");
+        return;
+      }
+      const repaired = await workspaceCoordinator.repairLegacyArkSourceCas({ expectedWorkspaceToken: receipt.workspace_token });
+      if (!active) return;
+      const finalReceipt = repaired.ok ? repaired : receipt;
+      if (!repaired.ok && repaired.code !== "WORKSPACE_CAS_CONFLICT") {
+        handleWorkspaceConflict(repaired, "历史稿校验没有完成；写入已暂停，原稿仍保留。");
+        return;
+      }
+      const finalWorkspace = finalReceipt.workspace;
+      const finalRecord = finalWorkspace.drafts.find((draft) => draft.draft_id === finalWorkspace.active_draft_id);
+      adoptWorkspaceState(finalWorkspace, {
+        record: finalRecord,
+        applyRecord: Boolean(repaired.repaired),
+      });
+      setWorkspaceBlocked(false);
+      setStorageIssue("");
+    };
+    boot().catch((error) => {
+      console.warn(error);
+      if (active) handleWorkspaceConflict(null, "工作台启动事务失败；所有写入已暂停，原稿仍保留。");
+    });
+    return () => { active = false; };
+  }, [initialWorkspace, initialWorkspaceLoad, workspaceCoordinator]);
+
+  useEffect(() => {
+    if (!workspaceReady || workspaceWriteBlocked) return undefined;
+    const timer = window.setTimeout(async () => {
+      const operation = mainAuthority.capture("autosave");
       try {
-        const next = saveDraftRecord(workspaceEnvelopeRef.current, {
+        const baseWorkspace = workspaceEnvelopeRef.current;
+        const draftId = baseWorkspace.active_draft_id;
+        const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+        const next = saveDraftRecord(baseWorkspace, {
           contentPackage: content,
           generationSession: currentAuthoringSession(),
         });
-        const persisted = persistWorkspaceEnvelope(localStorage, next, STORAGE_KEYS);
-        if (!persisted.ok) {
-          setStorageIssue("当前稿尚未可靠落盘；旧数据已回滚，请立即备份工作台。");
+        const replacementDraft = next.drafts.find((draft) => draft.draft_id === draftId);
+        const receipt = await workspaceCoordinator.mergeDraftCas({
+          draftId,
+          expectedDraftToken: draftRecordToken(baseRecord),
+          buildDraft: (target) => mainAuthority.isCurrent(operation) ? replacementDraft : target,
+          requireActiveDraftId: draftId,
+          reason: "AUTOSAVE",
+        });
+        if (!receipt.ok) {
+          mainAuthority.commit(operation, () => handleWorkspaceConflict(receipt, "当前编辑未能在跨标签锁内落盘；旧数据没有被覆盖，请先备份或刷新。"));
           return;
         }
-        workspaceEnvelopeRef.current = next;
-        setWorkspaceEnvelope(next);
-        setLibrary(libraryContents(next));
-        setStorageIssue("");
+        mainAuthority.commit(operation, () => {
+          adoptWorkspaceState(receipt.workspace);
+          setWorkspaceBlocked(false);
+          setStorageIssue("");
+        });
       } catch (error) {
         console.warn(error);
-        setStorageIssue("当前稿结构无效，自动保存已暂停；原有草稿未被覆盖。");
+        mainAuthority.commit(operation, () => setStorageIssue("当前稿结构无效，自动保存已暂停；原有草稿未被覆盖。"));
       }
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [content, topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume, activatedAsContentOnly]);
+  }, [content, topic, pillar, goal, textRequirements, textDraft, textConfirmed, assembledDraftId, imageCountMode, customImageCount, productionMode, imageResume, activatedAsContentOnly, workspaceReady, workspaceWriteBlocked, workspaceCoordinator, mainAuthority]);
 
   function beginImageCrop() {
     const imageSelected = selectedObject === "image" || infoObjectSelection(selectedObject)?.kind === "image";
@@ -672,7 +867,7 @@ function App() {
 
   function cancelImageCrop() {
     const snapshot = cropSessionRef.current;
-    if (snapshot?.pageIndex === pageIndex) setContentHistory(snapshot.history);
+    if (snapshot?.pageIndex === pageIndex) { mainAuthority.markSemanticMutation(); setContentHistory(snapshot.history); }
     cropSessionRef.current = null;
     setImageEditMode("frame");
   }
@@ -712,6 +907,33 @@ function App() {
     }
   }
 
+  function adoptProviderStatus(value) {
+    const next = value && typeof value === "object" ? value : {};
+    setProviderMeta(next);
+    setAccessRequired(next.credential_mode === "SERVER_MANAGED" && next.authenticated !== true && next.access_required === true);
+    setProviderHealth(providerHealthState(next));
+  }
+
+  async function loginProviderAccess(event) {
+    event?.preventDefault?.();
+    if (!provider?.authenticateAccess || accessBusy || !accessCode.trim()) return;
+    setAccessBusy(true);
+    setAccessError("");
+    try {
+      await provider.authenticateAccess(accessCode);
+      const health = await provider.checkHealth();
+      adoptProviderStatus(health);
+      setAccessCode("");
+      setProviderSettingsOpen(false);
+      setToast("访问验证已通过；现在可以使用服务器生成服务");
+    } catch (error) {
+      setAccessRequired(true);
+      setAccessError(error?.providerCode === "ACCESS_DENIED" ? "访问码不正确，请重新输入" : error?.providerCode === "ORIGIN_FORBIDDEN" ? "当前网页来源不受信任，已拒绝登录" : "访问服务尚未配置好，生成保持关闭");
+    } finally {
+      setAccessBusy(false);
+    }
+  }
+
   async function saveProviderSettings() {
     if (!provider?.updateSettings || providerSettingsSaving) return;
     setProviderSettingsSaving(true);
@@ -741,8 +963,11 @@ function App() {
   }
 
   function setPromptFieldValue(fieldId, value) {
+    mainAuthority.markSemanticMutation();
+    setGenerationState("IDLE");
     setActivatedAsContentOnly(false);
     setAssembledDraftId(null);
+    setImageResume(null);
     if (fieldId === "source_topic") { setTopic(value); setTextConfirmed(false); return; }
     if (fieldId === "text_requirements") { setTextRequirements(value); setTextConfirmed(false); return; }
     if (TEXT_CONTEXT_FIELDS.some((field) => field.id === fieldId)) setTextConfirmed(false);
@@ -768,7 +993,7 @@ function App() {
     const check = async () => {
       try {
         const health = await provider.checkHealth();
-        if (active) { setProviderHealth(providerHealthState(health)); setProviderMeta(health); }
+        if (active) adoptProviderStatus(health);
       }
       catch { if (active) setProviderHealth("OFFLINE"); }
     };
@@ -782,17 +1007,29 @@ function App() {
   }, [view]);
 
   useEffect(() => {
+    if (!workspaceReady || workspaceWriteBlockedRef.current) return undefined;
     const draft = new URL(window.location.href).searchParams.get("draft");
     if (!draft) return;
     let active = true;
+    const operation = mainAuthority.capture("url-draft-import", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     loadLocalDraft(draft, { origin: window.location.origin })
-      .then((imported) => {
-        if (!active || !imported) return;
-        createContentOnlyRecord(imported, "同源 AI 草稿已加载并保存到本机；尚未独立评测");
+      .then(async (imported) => {
+        if (!active || !imported || !mainAuthority.isCurrent(operation)) return;
+        await createContentOnlyRecord(imported, "同源 AI 草稿已加载并保存到本机；尚未独立评测", {
+          baseWorkspace,
+          currentContent,
+          currentSession,
+          expectedWorkspaceToken,
+          operation,
+        });
       })
-      .catch((error) => { console.warn(error); if (active) setToast("草稿链接无效，原内容未改变"); });
+      .catch((error) => { console.warn(error); if (active) mainAuthority.commit(operation, () => setToast("草稿链接无效，原内容未改变")); });
     return () => { active = false; };
-  }, []);
+  }, [workspaceReady]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = setTimeout(() => setToast(""), 2200);
@@ -934,9 +1171,11 @@ function App() {
     const [file] = event.target.files;
     event.target.value = "";
     if (!file || !file.type.startsWith("image/")) return;
+    const operation = mainAuthority.capture("info-panel-image-reader", { pageScoped: true });
     const targetIndex = selectedInfoPanelIndex;
     const reader = new FileReader();
-    reader.onload = () => changeInfoPanel(targetIndex, { image_style: { src: String(reader.result), hidden: false, fit: "cover", focalX: 50, focalY: 50, scale: 108, crop: { x: 0, y: 0, width: 1, height: 1 } } }, `panel-${pageIndex}-${targetIndex}-replace-image`);
+    reader.onload = () => mainAuthority.commit(operation, () => changeInfoPanel(targetIndex, { image_style: { src: String(reader.result), hidden: false, fit: "cover", focalX: 50, focalY: 50, scale: 108, crop: { x: 0, y: 0, width: 1, height: 1 } } }, `panel-${pageIndex}-${targetIndex}-replace-image`));
+    reader.onerror = () => mainAuthority.commit(operation, () => setToast("插图读取失败，原图片未改变"));
     reader.readAsDataURL(file);
   }
 
@@ -956,9 +1195,15 @@ function App() {
   }
 
   function applyDraftRecord(record) {
+    mainAuthority.markSemanticMutation();
     const nextContent = record.content_package;
     const session = record.generation_session;
-    resetContent(nextContent);
+    authorityTargetRef.current = {
+      draftId: record.draft_id,
+      pageId: pageSemanticIdentity(nextContent.pages?.[0], 0),
+      workspaceToken: workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+    };
+    resetContent(nextContent, { semantic: false });
     setTopic(session?.topic ?? nextContent.source_input ?? "");
     setPillar(session?.pillar || nextContent.pillar);
     setGoal(session?.goal || nextContent.goal);
@@ -975,6 +1220,12 @@ function App() {
     setSelectedObject("title");
     setActionReferences([]);
     setActionReferenceNote("");
+    setCandidateState("IDLE");
+    setImageCandidates([]);
+    setCandidateLoadState({});
+    setCandidatePageIndex(null);
+    setCandidatePageIdentity(null);
+    setCandidateRunId(null);
     setGenerationState("IDLE");
     setGenerationError(null);
     try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
@@ -985,39 +1236,75 @@ function App() {
     setExportState("IDLE");
   }
 
-  function persistAndAdoptWorkspace(nextWorkspace, { record = null, previousId, nextProfile } = {}) {
-    const persisted = persistWorkspaceEnvelope(localStorage, nextWorkspace, STORAGE_KEYS);
-    if (!persisted.ok) {
-      setStorageIssue("切换稿件失败：旧稿与当前页面均未改变，请先下载工作台备份。");
-      setToast("切换已暂停，旧稿没有丢失");
+  async function persistAndAdoptWorkspace(nextWorkspace, {
+    record = null,
+    previousId,
+    nextProfile,
+    expectedWorkspaceToken = workspaceEnvelopeToken(workspaceEnvelopeRef.current),
+    reason = "WORKSPACE_REPLACE",
+    operation: capturedOperation = null,
+  } = {}) {
+    if (!workspaceReady || workspaceWriteBlockedRef.current) {
+      setToast("工作台写入已暂停；请先备份并刷新到最新稿件");
       return false;
     }
-    workspaceEnvelopeRef.current = nextWorkspace;
-    setWorkspaceEnvelope(nextWorkspace);
-    setLibrary(libraryContents(nextWorkspace));
-    if (nextProfile) setProfile(nextProfile);
-    if (previousId !== undefined) setPreviousDraftId(previousId);
-    if (record) applyDraftRecord(record);
-    setStorageIssue("");
-    return true;
+    const operation = capturedOperation || mainAuthority.capture(reason, { envelopeScoped: true });
+    if (!mainAuthority.isCurrent(operation)) return false;
+    const receipt = await workspaceCoordinator.fullCas({
+      expectedWorkspaceToken,
+      buildWorkspace: (latest) => mainAuthority.isCurrent(operation) ? nextWorkspace : latest,
+      reason,
+    });
+    if (!receipt.ok || !receipt.workspace) {
+      mainAuthority.commit(operation, () => {
+        handleWorkspaceConflict(receipt, "切换稿件失败：另一标签页或本机存储已变化，旧稿没有被覆盖。");
+        setToast("切换已暂停，旧稿没有丢失");
+      });
+      return false;
+    }
+    const recordId = record?.draft_id || receipt.workspace.active_draft_id;
+    const persistedRecord = receipt.workspace.drafts.find((draft) => draft.draft_id === recordId);
+    const committed = mainAuthority.commit(operation, () => {
+      authorityTargetRef.current = {
+        ...authorityTargetRef.current,
+        draftId: receipt.workspace.active_draft_id,
+        pageId: record ? pageSemanticIdentity(persistedRecord?.content_package?.pages?.[0], 0) : authorityTargetRef.current.pageId,
+        workspaceToken: receipt.workspace_token,
+      };
+      adoptWorkspaceState(receipt.workspace, {
+        record: persistedRecord,
+        previousId,
+        nextProfile,
+        applyRecord: Boolean(record),
+      });
+      setWorkspaceBlocked(false);
+      setStorageIssue("");
+    });
+    return committed.applied;
   }
 
-  function workspaceWithCurrentSnapshot() {
-    return saveDraftRecord(workspaceEnvelopeRef.current, {
-      contentPackage: content,
-      generationSession: currentAuthoringSession(),
+  function workspaceWithCurrentSnapshot(baseWorkspace = workspaceEnvelopeRef.current, contentPackage = content, generationSession = currentAuthoringSession()) {
+    return saveDraftRecord(baseWorkspace, {
+      contentPackage,
+      generationSession,
     });
   }
 
-  function createContentOnlyRecord(nextContent, successMessage) {
+  async function createContentOnlyRecord(nextContent, successMessage, {
+    baseWorkspace = workspaceEnvelopeRef.current,
+    currentContent = content,
+    currentSession = currentAuthoringSession(),
+    expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace),
+    operation = null,
+  } = {}) {
     try {
-      const created = beginNewDraft(workspaceEnvelopeRef.current, {
+      const created = beginNewDraft(baseWorkspace, {
         newDraftId: crypto.randomUUID(),
-        currentContent: content,
-        currentSession: currentAuthoringSession(),
+        currentContent,
+        currentSession,
         contentPackage: nextContent,
       });
-      if (!persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId })) return false;
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, reason: "CREATE_CONTENT_ONLY_DRAFT", operation })) return false;
       setView("compose");
       setCreatorOpen(false);
       setToast(successMessage);
@@ -1029,7 +1316,7 @@ function App() {
     }
   }
 
-  function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
+  async function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
     try {
       const contentPackage = {
         ...generateContentPackage({ topic: "", pillar: nextPillar, goal: nextGoal }),
@@ -1062,7 +1349,7 @@ function App() {
         generationSession: session,
       });
       const nextRecord = activeDraftRecord(nextWorkspace);
-      if (!persistAndAdoptWorkspace(nextWorkspace, { record: nextRecord, previousId: created.previousDraftId })) return false;
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { record: nextRecord, previousId: created.previousDraftId, reason: "CREATE_AUTHORING_DRAFT" })) return false;
       setView("compose");
       setCreatorOpen(true);
       setMobileInspectorOpen(true);
@@ -1075,11 +1362,11 @@ function App() {
     }
   }
 
-  function activateWorkspaceDraft(draftId) {
+  async function activateWorkspaceDraft(draftId) {
     try {
       const snapshotted = workspaceWithCurrentSnapshot();
       const activated = activateDraftRecord(snapshotted, draftId);
-      if (!persistAndAdoptWorkspace(activated.workspace, { record: activated.activeDraft, previousId: activated.previousDraftId })) return false;
+      if (!await persistAndAdoptWorkspace(activated.workspace, { record: activated.activeDraft, previousId: activated.previousDraftId, reason: "ACTIVATE_DRAFT" })) return false;
       setRealityFeedbackId(null);
       setView("compose");
       setCreatorOpen(Boolean(activated.activeDraft.generation_session));
@@ -1092,7 +1379,44 @@ function App() {
     }
   }
 
-  function openCreator() {
+  async function adoptHistoricalDraft() {
+    if (publicationAuthorityRef.current?.code !== "HISTORICAL_CONFIRMATION_REQUIRED" || historicalAdoptionRef.current) return;
+    const operation = mainAuthority.capture("historical-draft-adoption", { envelopeScoped: true });
+    historicalAdoptionRef.current = true;
+    setHistoricalAdoptionBusy(true);
+    try {
+      const baseWorkspace = workspaceEnvelopeRef.current;
+      const draftId = baseWorkspace.active_draft_id;
+      const sourceRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      if (!sourceRecord) throw new TypeError("HISTORICAL_DRAFT_RECORD_MISSING");
+      const adoption = buildHistoricalDraftAdoption({
+        content: contentRef.current,
+        draftId,
+        createdAt: sourceRecord.created_at,
+      });
+      const nextWorkspace = saveDraftRecord(baseWorkspace, {
+        draftId,
+        contentPackage: adoption.content_package,
+        generationSession: adoption.generation_session,
+      });
+      const nextRecord = nextWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      if (!await persistAndAdoptWorkspace(nextWorkspace, {
+        record: nextRecord,
+        expectedWorkspaceToken: workspaceEnvelopeToken(baseWorkspace),
+        reason: "ADOPT_HISTORICAL_DRAFT",
+        operation,
+      })) return;
+      setToast("现有标题、正文、标签与页面已确认为同一稿；未重新生成文字或图片");
+    } catch (error) {
+      console.warn(error);
+      mainAuthority.commit(operation, () => setToast("现有文案未能确认，原稿没有改变"));
+    } finally {
+      historicalAdoptionRef.current = false;
+      setHistoricalAdoptionBusy(false);
+    }
+  }
+
+  async function openCreator() {
     if (isFreshDraft && workspaceEnvelopeRef.current.active_draft_id === workspaceEnvelope.active_draft_id) {
       setView("compose"); setCreatorOpen(true); setMobileInspectorOpen(true);
       scrollCreatorStage("creator-source");
@@ -1105,7 +1429,7 @@ function App() {
         currentSession: currentAuthoringSession(),
         contentPackage: generateContentPackage({ topic: "", pillar: "wellness", goal: "save" }),
       });
-      if (!persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId })) return;
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, reason: "BEGIN_NEW_DRAFT" })) return;
       setView("compose");
       setCreatorOpen(true);
       setMobileInspectorOpen(true);
@@ -1134,11 +1458,12 @@ function App() {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "请打开模型设置，填入自己的火山方舟 API Key 后从当前节点重试。" : "工作台地址没有填错。请确认本机生成服务正在运行，然后从当前节点重试。" });
       return;
     }
-    if (provider && !providerCanAttempt) { setToast(IS_PUBLIC_RUNTIME ? "先在模型设置里连接自己的火山方舟" : "本机生成服务暂时不可连接，请稍后再试"); return; }
+    if (provider && !providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
     if (String(topic || "").trim().length < 8) {
       failGeneration({ code: "INPUT_TOO_SHORT", title: "请再多写一点", detail: "至少写清楚一个选题，或者粘贴一段原始文本。当前内容还不足以开始创作。" });
       return;
     }
+    const operation = mainAuthority.capture("text-generation");
     try {
       setActivatedAsContentOnly(false);
       rememberAllPromptInputs();
@@ -1146,22 +1471,28 @@ function App() {
       clearGenerationFailure();
       setToast("请求已收到：现在只生成文字，不会产生图片费用");
       const draft = await provider.generateTextDraft({ topic, text_requirements: textRequirements, prompt_context: promptContextForProvider(promptValues), pillar, goal, profile_contract: buildGenerationContract(profile) });
-      setProviderHealth("ONLINE");
-      setTextDraft(draft);
-      setTextConfirmed(false);
-      setAssembledDraftId(null);
-      setImageResume(null);
-      setCustomImageCount(draft.recommended_image_count);
-      setGenerationState("IDLE");
-      clearGenerationFailure();
-      setToast("文字草稿已生成，请先检查和微调");
+      mainAuthority.commit(operation, () => {
+        setProviderHealth("ONLINE");
+        setTextDraft(draft);
+        setTextConfirmed(false);
+        setAssembledDraftId(null);
+        setImageResume(null);
+        setCustomImageCount(draft.recommended_image_count);
+        setGenerationState("IDLE");
+        clearGenerationFailure();
+        setToast("文字草稿已生成，请先检查和微调");
+      });
     } catch (error) {
       console.warn(error);
-      failGeneration(generationFailureFeedback(error));
+      mainAuthority.commit(operation, () => {
+        if (error?.requiresAccess) { setAccessRequired(true); setAccessError("访问会话已失效，请重新输入访问码"); }
+        failGeneration(generationFailureFeedback(error));
+      });
     }
   }
 
   function editTextDraft(field, value, index = null) {
+    mainAuthority.markSemanticMutation();
     setActivatedAsContentOnly(false);
     setImageResume(null);
     setTextConfirmed(false);
@@ -1179,6 +1510,7 @@ function App() {
   }
 
   function chooseDraftTitle(title) {
+    mainAuthority.markSemanticMutation();
     setActivatedAsContentOnly(false);
     setTextConfirmed(false);
     setAssembledDraftId(null);
@@ -1193,6 +1525,7 @@ function App() {
   }
 
   async function addActionReferences(event) {
+    const operation = mainAuthority.capture("action-reference-reader", { pageScoped: true });
     const files = [...event.target.files]; event.target.value = "";
     const room = Math.max(0, 3 - actionReferences.length);
     const accepted = files.filter((file) => new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type) && file.size <= 3_000_000).slice(0, room);
@@ -1203,14 +1536,20 @@ function App() {
     });
     try {
       const next = await Promise.all(accepted.map(async (file) => ({ id: crypto.randomUUID(), name: file.name, size: file.size, data_url: await readDataUrl(file) })));
-      setActionReferences((current) => [...current, ...next].slice(0, 3));
-      setImageResume(null);
-      setAssembledDraftId(null);
-      setToast(`已加入 ${next.length} 张动作参考图`);
-    } catch { setToast("参考图读取失败，原选择未改变"); }
+      mainAuthority.commit(operation, () => {
+        mainAuthority.markSemanticMutation();
+        setActionReferences((current) => [...current, ...next].slice(0, 3));
+        setImageResume(null);
+        setAssembledDraftId(null);
+        setToast(`已加入 ${next.length} 张动作参考图`);
+      });
+    } catch {
+      mainAuthority.commit(operation, () => setToast("参考图读取失败，原选择未改变"));
+    }
   }
 
   function removeActionReference(id) {
+    mainAuthority.markSemanticMutation();
     setActionReferences((current) => current.filter((item) => item.id !== id));
     setImageResume(null);
     setAssembledDraftId(null);
@@ -1222,53 +1561,149 @@ function App() {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "文字草稿和当前画布已经保留。请在模型设置中连接自己的火山方舟，再重试图片。" : "文字草稿和当前画布已经保留。请确认本机生成服务正在运行，然后重试图片。", stage: "image" });
       return;
     }
+    if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
+    if (activeImageOperationRef.current) { setToast("当前稿已有图片步骤在保存，请稍后再试"); return; }
     if (!textDraftIsReady()) return;
+    const mainOperation = mainAuthority.capture("image-generation");
+    let claimedOperation = null;
     try {
       rememberAllPromptInputs();
-      setGenerationState("IMAGE_GENERATING"); clearGenerationFailure();
       const count = imageCountMode === "AUTO" ? "AUTO" : Number(customImageCount);
       const resolvedCount = count === "AUTO" ? textDraft.recommended_image_count : count;
       const estimate = estimateMotherSheetPlan(resolvedCount, productionMode);
       const estimatedSheets = estimate.minMotherSheets === estimate.maxMotherSheets ? `${estimate.minMotherSheets}` : `${estimate.minMotherSheets}–${estimate.maxMotherSheets}`;
-      setToast(imageResume?.completed_image_steps != null ? `正在从图片步骤 ${imageResume.completed_image_steps + 1} 继续，已回写的插画不会重做` : imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       const draftForImages = { ...textDraft, prompt_context: promptContextForProvider(promptValues) };
-      const result = parseContentPackage(JSON.stringify(await provider.generateImages({ draft: draftForImages, production_mode: productionMode, image_count: count, resume_run_id: imageResume?.resume_run_id || null, resume_checkpoint: imageResume?.resume_checkpoint || null, reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })), reference_note: actionReferenceNote }, async (progress) => {
-        const persistedProgress = persistImageResumeBeforeNextRequest(progress);
-        const remaining = Number.isInteger(persistedProgress.remaining_image_calls) ? `，剩余 ${persistedProgress.remaining_image_calls} 次` : "";
-        setToast(persistedProgress.completed_image_steps === 0 ? `配图规划已保存；将分 ${persistedProgress.total_image_steps} 个可恢复步骤生成${remaining}` : `图片步骤 ${persistedProgress.completed_image_steps}/${persistedProgress.total_image_steps} 已保存${remaining}；下一步只生成剩余内容`);
-      })));
-      setProviderHealth("ONLINE");
-      resetContent(result); setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
-      setAssembledDraftId(textDraft.draft_id);
-      clearGenerationFailure();
-      setImageResume(null);
-      setToast(`${productionModeLabel(productionMode)} · ${resolvedCount} 个画板已完成母图切分与排版，向下继续编辑`);
-    } catch (error) {
-      console.warn(error);
-      if (error?.providerDetails?.resume_run_id && error?.checkpointPersisted !== true) {
-        try {
-          persistImageResumeBeforeNextRequest(error.providerDetails);
-          error.checkpointPersisted = true;
-        } catch (persistError) {
-          failGeneration(generationFailureFeedback(persistError));
-          return;
-        }
-      }
-      if (error?.providerDetails?.retry_scope === "NO_MORE_PAID_CALLS_IN_THIS_RUN") {
-        const resume = error.providerDetails;
-        failGeneration({
-          code: "IMAGE_CALL_BUDGET_EXHAUSTED",
-          title: "本轮 6 次图片调用已用完",
-          detail: `已可靠保存图片步骤 ${resume.completed_image_steps || 0}/${resume.total_image_steps || 0} 和全部可用资产；服务器不会发起第 7 次图片调用。请调整画面要求后重新开始一轮，或直接编辑现有结果。`,
-          stage: "image",
+      const requestSnapshot = {
+        draft: draftForImages,
+        production_mode: productionMode,
+        image_count: count,
+        resume_run_id: imageResume?.resume_run_id || null,
+        resume_checkpoint: imageResume?.resume_checkpoint || null,
+        reference_images: actionReferences.map(({ name, data_url }) => ({ name, data_url })),
+        reference_note: actionReferenceNote,
+      };
+      const baseWorkspace = workspaceEnvelopeRef.current;
+      const targetDraftId = baseWorkspace.active_draft_id;
+      const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
+      const snapshottedWorkspace = saveDraftRecord(baseWorkspace, {
+        contentPackage: contentRef.current,
+        generationSession: currentAuthoringSession(),
+      });
+      const replacementDraft = snapshottedWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
+      mainAuthority.commit(mainOperation, () => {
+        setGenerationState("IMAGE_GENERATING");
+        clearGenerationFailure();
+        setToast(imageResume?.completed_image_steps != null ? `正在从图片步骤 ${imageResume.completed_image_steps + 1} 继续，已回写的插画不会重做` : imageResume?.completed_mother_sheets != null ? `正在从第 ${imageResume.completed_mother_sheets + 1} 张母图继续，已切片结果不会重做` : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
+      });
+      const snapshotReceipt = await workspaceCoordinator.mergeDraftCas({
+        draftId: targetDraftId,
+        expectedDraftToken: draftRecordToken(baseRecord),
+        buildDraft: (target) => mainAuthority.isCurrent(mainOperation) ? replacementDraft : target,
+        requireActiveDraftId: targetDraftId,
+        reason: "IMAGE_PRECALL_SNAPSHOT",
+      });
+      if (!snapshotReceipt.ok || !snapshotReceipt.target_draft) {
+        mainAuthority.commit(mainOperation, () => {
+          setGenerationState("IDLE");
+          handleWorkspaceConflict(snapshotReceipt, "配图前的稿件快照没有可靠落盘；尚未发起图片调用，旧稿没有被覆盖。");
+          setToast("配图已暂停；尚未产生图片费用");
         });
         return;
       }
-      failGeneration(generationFailureFeedback(error));
+      if (!mainAuthority.isCurrent(mainOperation)) return;
+      mainAuthority.commit(mainOperation, () => adoptWorkspaceState(snapshotReceipt.workspace));
+      claimedOperation = claimDraftBoundImageOperation(null, createDraftBoundImageOperation({
+        operationId: crypto.randomUUID(),
+        sourceDraftRecord: snapshotReceipt.target_draft,
+        requestSnapshot,
+      }));
+      activeImageOperationRef.current = claimedOperation;
+      const providerResult = await provider.generateImages(claimedOperation.request_snapshot, async (progress) => {
+        const currentOperation = activeImageOperationRef.current;
+        if (!currentOperation || currentOperation.operation_id !== claimedOperation.operation_id) return { action: "STOP" };
+        const progressReceipt = await persistDraftBoundImageProgress({
+          operation: currentOperation,
+          coordinator: workspaceCoordinator,
+          imageResume: progress,
+        });
+        if (progressReceipt.action === "CONTINUE") activeImageOperationRef.current = progressReceipt.operation;
+        if (progressReceipt.workspace) {
+          if (mainAuthority.isCurrent(mainOperation)) {
+            mainAuthority.commit(mainOperation, () => {
+              adoptWorkspaceState(progressReceipt.workspace);
+              if (progressReceipt.action === "CONTINUE") {
+                setImageResume(progress);
+                const remaining = Number.isInteger(progress.remaining_image_calls) ? `，剩余 ${progress.remaining_image_calls} 次` : "";
+                setToast(progress.completed_image_steps === 0 ? `配图规划已保存；将分 ${progress.total_image_steps} 个可恢复步骤生成${remaining}` : `图片步骤 ${progress.completed_image_steps}/${progress.total_image_steps} 已保存${remaining}；下一步只生成剩余内容`);
+              } else {
+                setToast("稿件在生成期间发生变化；图片步骤已保存到恢复稿，后续付费调用已停止");
+              }
+            });
+          } else {
+            adoptWorkspaceState(progressReceipt.workspace);
+          }
+        }
+        return progressReceipt;
+      });
+      const result = parseContentPackage(JSON.stringify(providerResult));
+      const completionOperation = activeImageOperationRef.current;
+      if (!completionOperation || completionOperation.operation_id !== claimedOperation.operation_id) throw new Error("IMAGE_OPERATION_LOST");
+      const completionReceipt = await persistDraftBoundImageCompletion({
+        operation: completionOperation,
+        coordinator: workspaceCoordinator,
+        contentPackage: result,
+      });
+      if (completionReceipt.workspace) {
+        if (completionReceipt.adopt_current_ui && mainAuthority.isCurrent(mainOperation)) {
+          mainAuthority.commit(mainOperation, () => {
+            adoptWorkspaceState(completionReceipt.workspace);
+            setProviderHealth("ONLINE");
+            resetContent(result);
+            setPageIndex(0); setSelectedObject("title"); setCreatorOpen(true); setView("compose"); setGenerationState("IDLE");
+            setAssembledDraftId(textDraft.draft_id);
+            clearGenerationFailure();
+            setImageResume(null);
+            setToast(`${productionModeLabel(productionMode)} · ${resolvedCount} 个画板已完成母图切分与排版，向下继续编辑`);
+          });
+        } else {
+          adoptWorkspaceState(completionReceipt.workspace);
+          mainAuthority.commit(mainOperation, () => {
+            setGenerationState("IDLE");
+            setToast("图片结果已安全保存到资产库恢复稿；当前正在编辑的稿件没有被替换");
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(error);
+      if (error?.intentionalStop || error?.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT") {
+        mainAuthority.commit(mainOperation, () => {
+          setGenerationState("IDLE");
+          setToast("图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费");
+        });
+        return;
+      }
+      mainAuthority.commit(mainOperation, () => {
+        if (error?.requiresAccess) { setAccessRequired(true); setAccessError("访问会话已失效，请重新输入访问码"); }
+        if (error?.providerDetails?.retry_scope === "NO_MORE_PAID_CALLS_IN_THIS_RUN") {
+          const resume = error.providerDetails;
+          failGeneration({
+            code: "IMAGE_CALL_BUDGET_EXHAUSTED",
+            title: "本轮 6 次图片调用已用完",
+            detail: `已可靠保存图片步骤 ${resume.completed_image_steps || 0}/${resume.total_image_steps || 0} 和全部可用资产；服务器不会发起第 7 次图片调用。请调整画面要求后重新开始一轮，或直接编辑现有结果。`,
+            stage: "image",
+          });
+          return;
+        }
+        failGeneration(generationFailureFeedback(error));
+      });
+    } finally {
+      if (claimedOperation && activeImageOperationRef.current?.operation_id === claimedOperation.operation_id) {
+        activeImageOperationRef.current = null;
+      }
     }
   }
 
-  function saveDraft() {
+  async function saveDraft() {
     try {
       const now = new Date().toISOString();
       const backfilledGeneration = publicationAuthority.code === "LEGACY_EXACT_MATCH" && textDraft?.draft_id
@@ -1285,7 +1720,7 @@ function App() {
         generationSession: currentAuthoringSession(),
         updatedAt: now,
       });
-      if (!persistAndAdoptWorkspace(nextWorkspace)) return;
+      if (!await persistAndAdoptWorkspace(nextWorkspace)) return;
       setContent(entry, { record: false });
       setToast(publicationAuthority.allowed ? "已保存到本机资产库" : "草稿已完整保存；发布仍锁定，未发生串稿");
     } catch (error) {
@@ -1299,8 +1734,14 @@ function App() {
     const files = [...event.target.files];
     event.target.value = "";
     if (!files.length) return;
+    const operation = mainAuthority.capture("content-package-import", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
       const serializedFiles = await Promise.all(files.map(async (file) => ({ file, serialized: await file.text() })));
+      if (!mainAuthority.isCurrent(operation)) return;
       const values = serializedFiles.map((item) => { try { return { ...item, value: JSON.parse(item.serialized) }; } catch { return { ...item, value: null }; } });
       const producerItem = values.find((item) => inspectImportContract(item.value).contract === "PRODUCER_TWO_PAGE");
       const verdictItem = values.find((item) => item.value?.schema === "xiaoshimei.visual-verdict.v1");
@@ -1312,14 +1753,16 @@ function App() {
         const admission = await admitProducerWithVerdict(producerItem.serialized, verdictItem.serialized, evaluatorInputItem.serialized);
         if (expansionItem && !expansionHandoffItem) throw new TypeError("EXPANSION_HANDOFF_REQUIRED");
         const imported = expansionItem ? await admitSingleExpansion(admission, expansionItem.serialized, expansionHandoffItem.serialized) : admission.content;
-        setAuthorityAdmission(admission);
-        createContentOnlyRecord(imported, expansionItem ? `已绑定 KEEP 并导入唯一 ${imported.visible_pages} 页扩展包` : "已核验根目录 KEEP，真实两页 Producer 包已导入");
+        if (!mainAuthority.isCurrent(operation)) return;
+        const created = await createContentOnlyRecord(imported, expansionItem ? `已绑定 KEEP 并导入唯一 ${imported.visible_pages} 页扩展包` : "已核验根目录 KEEP，真实两页 Producer 包已导入", { baseWorkspace, currentContent, currentSession, expectedWorkspaceToken, operation });
+        if (created) setAuthorityAdmission(admission);
         return;
       }
       if (expansionItem && authorityAdmission) {
         if (!expansionHandoffItem) throw new TypeError("EXPANSION_HANDOFF_REQUIRED");
         const imported = await admitSingleExpansion(authorityAdmission, expansionItem.serialized, expansionHandoffItem.serialized);
-        createContentOnlyRecord(imported, `已导入唯一 ${imported.visible_pages} 页扩展包；等待新评测`); return;
+        if (!mainAuthority.isCurrent(operation)) return;
+        await createContentOnlyRecord(imported, `已导入唯一 ${imported.visible_pages} 页扩展包；等待新评测`, { baseWorkspace, currentContent, currentSession, expectedWorkspaceToken, operation }); return;
       }
       const serialized = values[0].serialized;
       const contract = inspectImportContract(serialized);
@@ -1329,19 +1772,19 @@ function App() {
       }
       if (contract.status !== "READY") throw new TypeError(contract.code);
       const imported = importLocalEditableDraft(serialized);
-      createContentOnlyRecord(imported, contract.contract === "LEGACY_SEVEN_PAGE" ? "7 页 legacy 草稿已安全回载" : `${imported.visible_pages} 页本地草稿已安全回载`);
+      await createContentOnlyRecord(imported, contract.contract === "LEGACY_SEVEN_PAGE" ? "7 页 legacy 草稿已安全回载" : `${imported.visible_pages} 页本地草稿已安全回载`, { baseWorkspace, currentContent, currentSession, expectedWorkspaceToken, operation });
     } catch (error) {
       console.warn(error);
-      setToast("内容包不受支持，当前草稿未改变");
+      mainAuthority.commit(operation, () => setToast("内容包不受支持，当前草稿未改变"));
     }
   }
 
-  function saveProfile() {
+  async function saveProfile() {
     try {
       const checked = parseProfileV2(JSON.stringify(profile));
       const snapshotted = workspaceWithCurrentSnapshot();
       const nextWorkspace = saveWorkspaceProfile(snapshotted, checked);
-      if (!persistAndAdoptWorkspace(nextWorkspace, { nextProfile: checked })) return;
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { nextProfile: checked })) return;
       setToast("Profile v2 已保存到本机");
     } catch (error) {
       console.warn(error);
@@ -1352,14 +1795,20 @@ function App() {
 
   async function importProfile(event) {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
+    const operation = mainAuthority.capture("profile-import", { envelopeScoped: true });
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    const expectedWorkspaceToken = workspaceEnvelopeToken(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
     try {
       const next = parseProfileV2(await file.text());
-      const snapshotted = workspaceWithCurrentSnapshot();
+      if (!mainAuthority.isCurrent(operation)) return;
+      const snapshotted = workspaceWithCurrentSnapshot(baseWorkspace, currentContent, currentSession);
       const nextWorkspace = saveWorkspaceProfile(snapshotted, next);
-      if (!persistAndAdoptWorkspace(nextWorkspace, { nextProfile: next })) return;
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { nextProfile: next, expectedWorkspaceToken, operation, reason: "IMPORT_PROFILE" })) return;
       setToast("Profile v2 已回载");
     }
-    catch { setToast("Profile v2 合同无效，原档案未改变"); }
+    catch { mainAuthority.commit(operation, () => setToast("Profile v2 合同无效，原档案未改变")); }
   }
 
   function downloadWorkspaceBackup() {
@@ -1374,8 +1823,11 @@ function App() {
 
   async function restoreWorkspaceBackup(event) {
     const [file] = event.target.files; event.target.value = ""; if (!file) return;
+    const operation = mainAuthority.capture("workspace-backup-restore", { envelopeScoped: true });
+    const expectedWorkspaceToken = workspaceEnvelopeToken(workspaceEnvelopeRef.current);
     try {
       const restored = parseWorkspaceBackup(await file.text());
+      if (!mainAuthority.isCurrent(operation)) return;
       const nextWorkspace = restored.workspaceEnvelope || migrateLegacyWorkspaceState({
         profile: restored.profile,
         currentContent: restored.currentContent,
@@ -1384,10 +1836,10 @@ function App() {
         activeDraftId: restored.currentContent.id || crypto.randomUUID(),
       });
       const record = activeDraftRecord(nextWorkspace);
-      if (!persistAndAdoptWorkspace(nextWorkspace, { record, previousId: null, nextProfile: nextWorkspace.profile })) return;
+      if (!await persistAndAdoptWorkspace(nextWorkspace, { record, previousId: null, nextProfile: nextWorkspace.profile, expectedWorkspaceToken, operation, reason: "RESTORE_WORKSPACE_BACKUP" })) return;
       setView("compose"); setToast("工作台已完整恢复；文字会话与各稿件同步回载，不携带新的评测或放量权限");
     } catch (error) {
-      console.warn(error); setToast("工作台备份无效或无法落盘，原数据未改变");
+      console.warn(error); mainAuthority.commit(operation, () => setToast("工作台备份无效或无法落盘，原数据未改变"));
     }
   }
 
@@ -1395,8 +1847,10 @@ function App() {
     const [file] = event.target.files;
     event.target.value = "";
     if (!file || !file.type.startsWith("image/")) return;
+    const operation = mainAuthority.capture("page-image-reader", { pageScoped: true });
     const reader = new FileReader();
-    reader.onload = () => mutatePage((page) => ({ ...page, visual: "character", image_style: { ...page.image_style, src: String(reader.result) } }));
+    reader.onload = () => mainAuthority.commit(operation, () => mutatePage((page) => ({ ...page, visual: "character", image_style: { ...page.image_style, src: String(reader.result) } })));
+    reader.onerror = () => mainAuthority.commit(operation, () => setToast("图片读取失败，当前页未改变"));
     reader.readAsDataURL(file);
   }
 
@@ -1453,17 +1907,21 @@ function App() {
       if (file) setToast("请选择 8MB 以内的 PNG、JPG 或 WebP 背景图");
       return;
     }
+    const operation = mainAuthority.capture("background-image-reader", { pageScoped: true });
     const reader = new FileReader();
-    reader.onload = () => changeBackground({ kind: "image", imageSrc: String(reader.result), focalX: 50, focalY: 50, scale: 100, opacity: 1 });
-    reader.onerror = () => setToast("背景图读取失败，原背景未改变");
+    reader.onload = () => mainAuthority.commit(operation, () => changeBackground({ kind: "image", imageSrc: String(reader.result), focalX: 50, focalY: 50, scale: 100, opacity: 1 }));
+    reader.onerror = () => mainAuthority.commit(operation, () => setToast("背景图读取失败，原背景未改变"));
     reader.readAsDataURL(file);
   }
 
   async function generateImageCandidates() {
     if (!provider?.generatePageCandidates) { setToast("当前未连接可用的图片候选服务"); return; }
-    if (!providerCanAttempt) { setToast(IS_PUBLIC_RUNTIME ? "先在模型设置里连接自己的火山方舟" : "本机生成服务暂时不可连接，请稍后再试"); return; }
+    if (providerServerManaged) { setToast("生产模式已关闭单页候选付费支线；请在同一篇稿的配图步骤生成并继续精修"); return; }
+    if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
+    const operation = mainAuthority.capture("page-image-candidates", { pageScoped: true });
+    candidateAuthorityOperationRef.current = operation;
     try {
-      setCandidateState("GENERATING"); setImageCandidates([]); setCandidateLoadState({}); setCandidatePageIndex(pageIndex); setCandidateRunId(null);
+      setCandidateState("GENERATING"); setImageCandidates([]); setCandidateLoadState({}); setCandidatePageIndex(pageIndex); setCandidatePageIdentity(operation.pageId); setCandidateRunId(null);
       setToast("正在为当前页生成 3 张候选图…");
       const result = await provider.generatePageCandidates({
         page_index: pageIndex,
@@ -1478,18 +1936,23 @@ function App() {
         style_lock: content.content_strategy?.style_lock || textDraft?.style_lock || null,
         prompt_context: promptContextForProvider(promptValues),
       });
-      setImageCandidates(result.candidates); setCandidateLoadState(Object.fromEntries(result.candidates.map((candidate) => [candidate.sha256, "LOADING"]))); setCandidateRunId(result.run_id); setCandidateState("READY");
-      setToast("3 张候选图已生成，请选择一张");
+      mainAuthority.commit(operation, () => {
+        setImageCandidates(result.candidates); setCandidateLoadState(Object.fromEntries(result.candidates.map((candidate) => [candidate.sha256, "LOADING"]))); setCandidateRunId(result.run_id); setCandidateState("READY");
+        setToast("3 张候选图已生成，请选择一张");
+      });
     } catch (error) {
-      console.warn(error); setCandidateState("FAILED"); setImageCandidates([]); setCandidateLoadState({}); setToast("候选图生成失败，当前图片未改变");
+      console.warn(error);
+      mainAuthority.commit(operation, () => { setCandidateState("FAILED"); setImageCandidates([]); setCandidateLoadState({}); setToast("候选图生成失败，当前图片未改变"); });
+    } finally {
+      if (candidateAuthorityOperationRef.current?.id === operation.id) candidateAuthorityOperationRef.current = null;
     }
   }
 
   function chooseImageCandidate(candidate) {
-    if (candidatePageIndex !== pageIndex || !candidateRunId || candidateLoadState[candidate.sha256] !== "READY") return;
+    if (candidatePageIndex !== pageIndex || candidatePageIdentity !== pageSemanticIdentity(currentPage, pageIndex) || !candidateRunId || candidateLoadState[candidate.sha256] !== "READY") return;
     mutatePage((page) => ({ ...page, visual: "character", image_style: { ...page.image_style, src: candidate.src, focalX: 50, focalY: 50, scale: 100 } }));
     setContent((current) => ({ ...current, generation: { ...current.generation, notice: `${current.generation.notice}; page ${pageIndex + 1} candidate ${candidateRunId}:${candidate.sha256}` } }));
-    setImageCandidates([]); setCandidateLoadState({}); setCandidateState("SELECTED");
+    setImageCandidates([]); setCandidateLoadState({}); setCandidatePageIdentity(null); setCandidateState("SELECTED");
     setToast("候选图已应用；可撤销，也可重新生成");
   }
 
@@ -1516,33 +1979,38 @@ function App() {
 
   async function copyPublicationCopy() {
     const gate = publicationAuthorityRef.current;
+    const operation = mainAuthority.capture("copy-publication-copy");
     try {
       const result = await runGuardedPublicationAction({
         gate,
         action: () => copyTextToClipboard(publishCopy(contentRef.current)),
       });
       if (!result.allowed) {
-        setToast(publicationBlockMessage(gate?.code));
+        mainAuthority.commit(operation, () => setToast(publicationBlockMessage(gate?.code)));
         return;
       }
-      setToast("完整发布文字已复制");
+      mainAuthority.commit(operation, () => setToast("完整发布文字已复制"));
     } catch {
-      setToast("浏览器没有允许复制；当前稿未改变，可改用下载发布包");
+      mainAuthority.commit(operation, () => setToast("浏览器没有允许复制；当前稿未改变，可改用下载发布包"));
     }
   }
 
   async function downloadZip() {
     const initialGate = publicationAuthorityRef.current;
+    const operation = mainAuthority.capture("prepare-publication-zip");
     if (!publicationSnapshotDecision({ gate: initialGate }).allowed) {
-      setToast(publicationBlockMessage(initialGate?.code));
+      mainAuthority.commit(operation, () => setToast(publicationBlockMessage(initialGate?.code)));
       return;
     }
     const authorityToken = initialGate.token;
     const contentSnapshot = contentRef.current;
     const pageSnapshots = contentSnapshot.pages.slice(0, contentSnapshot.visible_pages);
+    let prepared = null;
     try {
-      setExportState("GENERATING");
-      setToast("正在渲染发布包…");
+      mainAuthority.commit(operation, () => {
+        setExportState("GENERATING");
+        setToast("正在渲染发布包…");
+      });
       const pngPages = [];
       for (let index = 0; index < pageSnapshots.length; index += 1) {
         const page = pageSnapshots[index];
@@ -1552,28 +2020,35 @@ function App() {
         const bytes = Uint8Array.from(atob(dataUrl.split(",")[1]), (character) => character.charCodeAt(0));
         pngPages.push(bytes);
       }
+      if (!mainAuthority.isCurrent(operation)) throw new Error("STALE_MAIN_OPERATION");
       const afterRenderDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
       if (!afterRenderDecision.allowed) {
         throw new Error("PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
       }
-      const prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(contentSnapshot, pngPages, { createdAt: contentSnapshot.created_at }));
+      prepared = await prepareBlobDownload("小师妹-发布包.zip", await buildPublishZip(contentSnapshot, pngPages, { createdAt: contentSnapshot.created_at }));
       const finalDecision = publicationSnapshotDecision({ gate: publicationAuthorityRef.current, expectedToken: authorityToken, currentContent: contentRef.current, expectedContent: contentSnapshot });
-      if (!finalDecision.allowed) {
+      if (!finalDecision.allowed || !mainAuthority.isCurrent(operation)) {
         if (prepared.revoke) URL.revokeObjectURL(prepared.url);
-        throw new Error("PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
+        prepared = null;
+        throw new Error(finalDecision.allowed ? "STALE_MAIN_OPERATION" : "PUBLICATION_AUTHORITY_CHANGED_DURING_EXPORT");
       }
-      setPreparedExport({ ...prepared, pageCount: pageSnapshots.length, authorityToken, contentSnapshot });
-      setExportState("READY");
-      setToast(`发布包已生成并校验：${pageSnapshots.length} 张 PNG + 文案 + 数据。请点击“保存发布包”。`);
+      mainAuthority.commit(operation, () => {
+        setPreparedExport({ ...prepared, pageCount: pageSnapshots.length, authorityToken, contentSnapshot });
+        setExportState("READY");
+        setToast(`发布包已生成并校验：${pageSnapshots.length} 张 PNG + 文案 + 数据。请点击“保存发布包”。`);
+      });
     } catch (error) {
-      setExportState("FAILED");
-      document.documentElement.dataset.xsmExportFailure = String(error?.message || error);
-      window.__xiaoshimeiLastExportFailure = {
-        message: String(error?.message || error),
-        completed_at: new Date().toISOString(),
-      };
-      console.error(error);
-      setToast(explainExportFailure(error));
+      if (prepared?.revoke) URL.revokeObjectURL(prepared.url);
+      mainAuthority.commit(operation, () => {
+        setExportState("FAILED");
+        document.documentElement.dataset.xsmExportFailure = String(error?.message || error);
+        window.__xiaoshimeiLastExportFailure = {
+          message: String(error?.message || error),
+          completed_at: new Date().toISOString(),
+        };
+        console.error(error);
+        setToast(explainExportFailure(error));
+      });
     }
   }
 
@@ -1662,14 +2137,14 @@ function App() {
     });
   }
 
-  function saveRealityFeedback(draftRecordId, feedback) {
+  async function saveRealityFeedback(draftRecordId, feedback) {
     try {
       const checked = normalizeRealityFeedback(feedback);
       const target = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === draftRecordId);
       if (!target) throw new TypeError("draft record is missing");
       const nextContent = { ...target.content_package, reality_feedback: checked };
       const nextWorkspace = saveDraftRecord(workspaceEnvelopeRef.current, { draftId: draftRecordId, contentPackage: nextContent });
-      if (!persistAndAdoptWorkspace(nextWorkspace)) return;
+      if (!await persistAndAdoptWorkspace(nextWorkspace)) return;
       if (workspaceEnvelopeRef.current.active_draft_id === draftRecordId) setContent(nextContent, { record: false });
       setToast("现实反馈已保存");
     } catch (error) {
@@ -1690,16 +2165,16 @@ function App() {
 
       <section id="creator-source" className="workbench-section workbench-source">
         <header><div><strong>原文</strong><small>写清素材，再用 AI 扩写</small></div><button className="creator-flow-close" type="button" onClick={() => setCreatorOpen(false)} disabled={isGenerating} title="收起原文" aria-label="收起原文"><X /></button></header>
-        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} onChange={(value) => { setActivatedAsContentOnly(false); setTopic(value); setTextConfirmed(false); setAssembledDraftId(null); if (generationState === "FAILED") { setGenerationState("IDLE"); setGenerationError(null); } }} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
+        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} onChange={(value) => setPromptFieldValue("source_topic", value)} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
         <details className="prompt-context-panel creator-requirements-panel">
           <summary><div><strong>补充要求</strong><small>{textRequirements.trim() ? "已填写" : "选填"}</small></div><ChevronDown /></summary>
-          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} onChange={(value) => { setActivatedAsContentOnly(false); setTextRequirements(value); setTextConfirmed(false); setAssembledDraftId(null); }} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
+          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} onChange={(value) => setPromptFieldValue("text_requirements", value)} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
         </details>
         <details className="prompt-context-panel">
           <summary><div><strong>口吻与结构</strong><small>9 项</small></div><ChevronDown /></summary>
           <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => { setActivatedAsContentOnly(false); setPillar(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => { setActivatedAsContentOnly(false); setGoal(event.target.value); setTextConfirmed(false); setAssembledDraftId(null); }} disabled={isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
+        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => { mainAuthority.markSemanticMutation(); setActivatedAsContentOnly(false); setPillar(event.target.value); setTextConfirmed(false); setImageResume(null); setAssembledDraftId(null); }} disabled={isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => { mainAuthority.markSemanticMutation(); setActivatedAsContentOnly(false); setGoal(event.target.value); setTextConfirmed(false); setImageResume(null); setAssembledDraftId(null); }} disabled={isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
         {generationState === "TEXT_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>正在生成文字</strong></div></div>}
         <button className="creator-submit" onClick={generateTextNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
         {generationState === "FAILED" && generationError?.stage !== "image" && <FailureNotice feedback={generationError} onRetry={generateTextNode} />}
@@ -1712,7 +2187,7 @@ function App() {
           <label><span>最终标题</span><input value={textDraft.selected_title} onChange={(event) => editTextDraft("selected_title", event.target.value)} /></label>
           <label><span>发布正文 <small>{textDraft.body.replace(/\s/g, "").length} 字</small></span><textarea rows="11" value={textDraft.body} onChange={(event) => editTextDraft("body", event.target.value)} /></label>
           <div className="draft-tags"><span>标签</span>{textDraft.tags.map((tag, index) => <input key={index} value={tag} onChange={(event) => editTextDraft("tag", event.target.value, index)} />)}</div>
-          <button className="text-confirm-button" type="button" onClick={() => { if (textDraftIsReady()) { setTextConfirmed(true); clearGenerationFailure(); setToast("文字已确认，现在可以决定页数与配图"); } }}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
+          <button className="text-confirm-button" type="button" onClick={() => { if (textDraftIsReady()) { mainAuthority.markSemanticMutation(); setTextConfirmed(true); clearGenerationFailure(); setToast("文字已确认，现在可以决定页数与配图"); } }}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
         </div>
       </section>}
 
@@ -1721,16 +2196,16 @@ function App() {
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
           <div className="production-mode-options">{PRODUCTION_MODES.map((mode) => <label key={mode.id} className={productionMode === mode.id ? "is-selected" : ""}>
-            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={Boolean(imageResume) || isGenerating} onChange={() => { setProductionMode(mode.id); setImageResume(null); setAssembledDraftId(null); }} />
+            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={Boolean(imageResume) || isGenerating} onChange={() => { mainAuthority.markSemanticMutation(); setProductionMode(mode.id); setImageResume(null); setAssembledDraftId(null); }} />
             <span><strong>{mode.label}{mode.id === "smart" && <em>推荐</em>}</strong><small>{mode.fit}</small><b>{mode.result}</b></span>
           </label>)}</div>
         </fieldset>
-        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("AUTO"); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { setImageCountMode("CUSTOM"); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { setCustomImageCount(Number(event.target.value)); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
+        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={Boolean(imageResume)} onChange={() => { mainAuthority.markSemanticMutation(); setImageCountMode("AUTO"); setImageResume(null); setAssembledDraftId(null); }} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={Boolean(imageResume)} onChange={() => { mainAuthority.markSemanticMutation(); setImageCountMode("CUSTOM"); setImageResume(null); setAssembledDraftId(null); }} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={Boolean(imageResume)} onChange={(event) => { mainAuthority.markSemanticMutation(); setCustomImageCount(Number(event.target.value)); setImageResume(null); setAssembledDraftId(null); }}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
         <section className="action-reference-panel">
           <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
           {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.id}><img src={item.data_url} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" onClick={() => removeActionReference(item.id)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
-          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => { setActionReferenceNote(event.target.value); setImageResume(null); setAssembledDraftId(null); }} /></label>
+          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => { mainAuthority.markSemanticMutation(); setActionReferenceNote(event.target.value); setImageResume(null); setAssembledDraftId(null); }} /></label>
           <p>身份仍以小师妹固定图为准；参考图不进账号档案。</p>
         </section>
         <details className="prompt-context-panel prompt-context-panel--image">
@@ -1738,7 +2213,7 @@ function App() {
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
-        <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中` : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        <button className="creator-submit" onClick={generateImageNode} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? `${productionModeLabel(productionMode)}生成中` : accessRequired ? "先验证访问码" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={generationError} onRetry={generateImageNode} />}
       </section>}
     </>;
@@ -1773,7 +2248,7 @@ function App() {
         {providerSettingsOpen && <div className="provider-settings-layer" role="presentation" onClick={() => setProviderSettingsOpen(false)}>
           <section className="provider-settings-card" role="dialog" aria-modal="true" aria-label="生成服务设置" onClick={(event) => event.stopPropagation()}>
             <header><div><strong>生成服务</strong><span>{providerServerManaged ? "生产服务已接好；密钥由服务端保管，不进入浏览器、草稿或发布包。" : IS_PUBLIC_RUNTIME ? "个人体验密钥只保存在当前标签页；关闭标签页即清除。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
-            {providerServerManaged ? <div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key。</p></div> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
+            {providerServerManaged ? <><div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key；访问码只用于建立当前浏览器的短期生产会话。</p></div>{accessRequired && <form id="provider-access-form" onSubmit={loginProviderAccess}><label><span>小师妹 Studio 访问码</span><input type="password" autoComplete="current-password" autoFocus value={accessCode} onChange={(event) => { setAccessCode(event.target.value); setAccessError(""); }} placeholder="输入访问码后继续生成" /></label>{accessError && <p role="alert">{accessError}</p>}</form>}</> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
               const nextProvider = event.target.value;
               setProviderSettingsForm((current) => ({
                 ...current,
@@ -1788,7 +2263,7 @@ function App() {
             <label><span>API Key</span><input type="password" autoComplete="new-password" placeholder={providerMeta?.configured ? (IS_PUBLIC_RUNTIME ? "留空则继续使用当前标签页中的密钥" : "留空则继续使用钥匙串中的密钥") : (IS_PUBLIC_RUNTIME ? "输入后仅保存到当前标签页" : "输入后保存到本机钥匙串")} value={providerSettingsForm.api_key} onChange={(event) => setProviderSettingsForm((current) => ({ ...current, api_key: event.target.value }))} /></label>
             <p>{IS_PUBLIC_RUNTIME ? "公网体验当前使用火山方舟 Responses 与 Images Generations；服务端只转发本次调用，不落库、不回显 API Key。" : "兼容服务需同时支持 OpenAI Responses 与 Images Generations 接口；工作台不会把 Key 写进浏览器存储或导出包。"}</p>
             </>}
-            <footer>{providerServerManaged ? <button type="button" className="provider-settings-save" onClick={() => setProviderSettingsOpen(false)}>知道了</button> : <><button type="button" className="provider-settings-cancel" onClick={() => setProviderSettingsOpen(false)}>取消</button><button type="button" className="provider-settings-save" disabled={providerSettingsSaving} onClick={saveProviderSettings}>{providerSettingsSaving ? "保存中…" : "保存并切换"}</button></>}</footer>
+            <footer>{providerServerManaged ? accessRequired ? <><button type="button" className="provider-settings-cancel" onClick={() => setProviderSettingsOpen(false)}>稍后验证</button><button type="submit" form="provider-access-form" className="provider-settings-save" disabled={accessBusy || !accessCode.trim()}>{accessBusy ? "验证中…" : "验证并继续"}</button></> : <button type="button" className="provider-settings-save" onClick={() => setProviderSettingsOpen(false)}>知道了</button> : <><button type="button" className="provider-settings-cancel" onClick={() => setProviderSettingsOpen(false)}>取消</button><button type="button" className="provider-settings-save" disabled={providerSettingsSaving} onClick={saveProviderSettings}>{providerSettingsSaving ? "保存中…" : "保存并切换"}</button></>}</footer>
           </section>
         </div>}
 
@@ -1819,19 +2294,19 @@ function App() {
                   {canReturnPrevious && <button type="button" className="is-secondary" onClick={() => activateWorkspaceDraft(previousDraftId)}><RotateCcw />返回上一稿</button>}
                 </div>
               </section> : currentEditorMode === "html" ? <HtmlPageEditor
-                key={`html-${pageIndex}-${layoutRefreshToken}`}
+                key={`html-${workspaceEnvelope.active_draft_id}-${pageSemanticIdentity(currentPage, pageIndex)}-${layoutRefreshToken}`}
                 page={currentPage}
                 pageIndex={pageIndex}
                 totalPages={visiblePages.length}
-                onStateChange={(htmlState, options = {}) => mutatePage((page) => ({ ...page, html_state: htmlState }), { group: `html-layout-${pageIndex}`, ...options })}
-                onPagePatch={(patch) => mutatePage((page) => ({ ...page, ...patch }), { group: `html-copy-${pageIndex}` })}
+                onStateChange={(htmlState, options = {}) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, html_state: htmlState }), { group: `html-layout-${pageIndex}`, ...options }))}
+                onPagePatch={(patch) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, ...patch }), { group: `html-copy-${pageIndex}` }))}
               /> : <MaturePageEditor
-                key={`fabric-${pageIndex}-${layoutRefreshToken}`}
+                key={`fabric-${workspaceEnvelope.active_draft_id}-${pageSemanticIdentity(currentPage, pageIndex)}-${layoutRefreshToken}`}
                 page={currentPage}
                 pageIndex={pageIndex}
                 totalPages={visiblePages.length}
                 onAutoArrange={autoArrangeInfoPanels}
-                onSceneChange={(editorState) => mutatePage((page) => ({ ...page, editor_state: editorState }), { group: `mature-editor-${pageIndex}` })}
+                onSceneChange={(editorState) => mainAuthority.commit(editorAuthorityOperation, () => mutatePage((page) => ({ ...page, editor_state: editorState }), { group: `mature-editor-${pageIndex}` }))}
               />}
             </div>
 
@@ -1867,6 +2342,7 @@ function App() {
                   <span>文字稿：{textDraft?.selected_title || "未确认"}</span>
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
+                  {publicationAuthority.code === "HISTORICAL_CONFIRMATION_REQUIRED" && <button type="button" className="copy-publish" disabled={historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>
