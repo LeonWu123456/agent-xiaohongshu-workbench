@@ -35,6 +35,7 @@ import {
   createWorkspaceCoordinator,
   createWorkspaceV3Coordinator,
   commitDraftImageCompletionV3,
+  commitDraftImagePlannerFailureV3,
   commitDraftImageProgressV3,
   draftRecordToken,
   legacyStateFromWorkspaceEnvelope,
@@ -1596,6 +1597,59 @@ test("READY and READY_DISCOVERY persist as planning-ready while only PARTIAL rec
     responseStatus: "COMPLETE",
   }), /IMAGE_TRANSACTION_RESPONSE_STATUS_INVALID/);
   assert.equal(writes, 0);
+});
+
+test("planner-only zero-image failure atomically releases the exact draft input lock and repeats idempotently", async () => {
+  const session = { ...fullSession("planner-failed-text"), image_resume: null };
+  const pending = createPendingImageOperation({
+    operationNonce: "a".repeat(64),
+    operationSnapshot: imageOperationSnapshot("planner-failed-record", session.text_draft),
+    operationSnapshotHash: "b".repeat(64),
+    inputHash: "c".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "BOOTSTRAP",
+  });
+  const record = createDraftRecordV3({
+    draftId: "planner-failed-record",
+    contentPackage: assembledContent(session, "planner-failed-record"),
+    generationSession: session,
+    pendingImageOperation: pending,
+    createdAt: T0,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: record.draft_id,
+    drafts: [record],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({ storage: memoryStorage(), keys: { envelope: "planner-v2", envelopeV3: "planner-v3" }, lockManager: exclusiveLocks() });
+  await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace });
+
+  const released = await commitDraftImagePlannerFailureV3({
+    coordinator,
+    draftId: record.draft_id,
+    expectedDraftToken: draftRecordToken(record),
+    operationSnapshot: record,
+    updatedAt: T1,
+  });
+  assert.equal(released.action, "RELEASED");
+  assert.equal(released.target_draft.pending_image_operation, null);
+  assert.equal(released.target_draft.generation_session.image_resume, null);
+  assert.equal(released.target_draft.generation_session.text_draft.draft_id, session.text_draft.draft_id);
+  assert.deepEqual(released.target_draft.content_package, record.content_package);
+
+  const stale = await commitDraftImagePlannerFailureV3({
+    coordinator,
+    draftId: record.draft_id,
+    expectedDraftToken: draftRecordToken(record),
+    operationSnapshot: record,
+    updatedAt: "2026-08-31T06:10:00.000Z",
+  });
+  assert.equal(stale.action, "RELEASED");
+  assert.equal(stale.target_draft.pending_image_operation, null);
 });
 
 test("workspace media-first adapter consumes the real media-store manifest-only put response and verifies bytes by a separate readback", async () => {

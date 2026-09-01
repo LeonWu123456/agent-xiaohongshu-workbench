@@ -100,6 +100,19 @@ export function generationFailureFeedback(error) {
   const inferredStage = error?.providerStage || (/IMAGE_|PAGE_PLAN|image/i.test(technicalCode) ? "image" : "text");
   const meta = { technical_code: technicalCode, stage: inferredStage, failure_id: error?.failureId || null, failed_at: new Date().toISOString() };
   const resume = error?.providerDetails;
+  if (technicalCode === "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS") {
+    return {
+      ...meta,
+      stage: "image",
+      code: "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS",
+      title: "分镜规划没有通过，图片还没开始生成",
+      detail: "本次图片调用数为 0，当前文字稿和旧画布均已保留，页数与画面设置已经重新开放。调整后点击下方按钮会重新规划，并在规划通过后进入新的付费图片步骤。",
+      recovery_action: "EDIT_VISUAL_INPUTS_THEN_RESTART",
+      expected_image_upstream_calls_so_far: 0,
+      direct_paid_retry_allowed: true,
+      retry_label: "调整后重新规划并生成",
+    };
+  }
   const exactRecoveryCode = Object.keys(IMAGE_RECOVERY_STATES).find((code) => technicalCode === code || technicalCode.startsWith(`${code}:`));
   const exactRecovery = imageRecoveryFeedback(exactRecoveryCode, meta);
   if (exactRecovery) return exactRecovery;

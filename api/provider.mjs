@@ -1171,7 +1171,17 @@ if status == 'PLANNING' then
   local lease_until = tonumber(redis.call('HGET', KEYS[1], 'planner_lease_until_ms') or '0')
   if now_ms > lease_until then
     redis.call('HSET', KEYS[1], 'status', 'UNKNOWN')
+    status = 'UNKNOWN'
   end
+end
+if status == 'UNKNOWN'
+  and redis.call('HEXISTS', KEYS[1], 'run_json') == 0
+  and redis.call('HEXISTS', KEYS[1], 'checkpoint_sha') == 0
+  and tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '0') == 0 then
+  redis.call('HSET', KEYS[1],
+    'status', 'PLANNER_FAILED',
+    'planner_failure_code', 'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS')
+  status = 'PLANNER_FAILED'
 end
 local record = redis.call('HGETALL', KEYS[1])
 local reply = {'FOUND'}
@@ -1249,6 +1259,23 @@ redis.call('HSET', KEYS[1],
   'checkpoint_sha', ARGV[6],
   'logical_step_id', ARGV[7],
   'cached_response_json', ARGV[8])
+return {'COMMITTED'}
+`;
+
+const D36_MARK_PLANNER_FAILED_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return {'RUN_MISSING'} end
+if redis.call('HGET', KEYS[1], 'status') == 'READY' then return {'COMMITTED'} end
+if redis.call('HGET', KEYS[1], 'status') == 'PLANNER_FAILED' then return {'COMMITTED'} end
+if redis.call('HGET', KEYS[1], 'status') ~= 'PLANNING'
+  or redis.call('HGET', KEYS[1], 'planner_owner') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'planner_fence') ~= ARGV[2] then return {'CONFLICT'} end
+if redis.call('HEXISTS', KEYS[1], 'run_json') == 1
+  or redis.call('HEXISTS', KEYS[1], 'checkpoint_sha') == 1
+  or tonumber(redis.call('HGET', KEYS[1], 'reservation_count') or '0') ~= 0 then return {'CONFLICT'} end
+redis.call('HSET', KEYS[1],
+  'status', 'PLANNER_FAILED',
+  'planner_failure_code', ARGV[3],
+  'cached_response_json', ARGV[4])
 return {'COMMITTED'}
 `;
 
@@ -1510,6 +1537,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       checkpointPreimageSha256: record.checkpoint_sha || null,
       logicalStepId: record.logical_step_id || null,
       cachedResponse: record.cached_response_json ? JSON.parse(record.cached_response_json) : null,
+      plannerFailureCode: record.planner_failure_code || null,
     };
   };
   const discoverD36 = async ({ runId, appScopeId, bootstrapNonce = "", inputSha256 = "", requireExternalIdentity = false } = {}) => {
@@ -1776,6 +1804,14 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     },
     async markPlannerUnknown({ runId, appScopeId, ownerToken, fence } = {}) {
       const reply = await evalLua(D36_MARK_PLANNER_UNKNOWN_LUA, [`${d36RunRoot(runId, appScopeId)}:meta`], [ownerToken, fence]);
+      return { status: reply.status };
+    },
+    async markPlannerFailed({ runId, appScopeId, ownerToken, fence, errorCode, response } = {}) {
+      const reply = await evalLua(
+        D36_MARK_PLANNER_FAILED_LUA,
+        [`${d36RunRoot(runId, appScopeId)}:meta`],
+        [ownerToken, fence, errorCode, canonicalJson(response)],
+      );
       return { status: reply.status };
     },
     async discover({ runId, appScopeId, bootstrapNonce, inputSha256 } = {}) {
@@ -2339,6 +2375,65 @@ async function markPlannerUnknown(imageLedger, claim, cause) {
   throw error;
 }
 
+function plannerFailureResponse({ bootstrapNonce, inputSha256, runId, recoverableUntil, cause, cached = false, upstreamCalls = 1 } = {}) {
+  const causeText = String(cause?.message || cause || "PLANNER_FAILED").slice(0, 180);
+  return d36Response({
+    status: "ERROR",
+    bootstrapNonce,
+    inputSha256,
+    runId,
+    progress: {
+      state: "PLANNER_FAILED",
+      image_upstream_calls: 0,
+      planner_upstream_calls_may_have_occurred: upstreamCalls > 0 ? 1 : 0,
+    },
+    cached,
+    recoverableUntil,
+    upstreamCalls,
+    error: {
+      code: "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS",
+      details: {
+        cause: causeText,
+        image_upstream_calls: 0,
+        retry_scope: "EDIT_VISUAL_INPUTS_THEN_RESTART",
+      },
+    },
+  });
+}
+
+async function commitPlannerFailure(imageLedger, claim, input, cause, recoverableUntil) {
+  const response = plannerFailureResponse({
+    bootstrapNonce: input.bootstrap_nonce,
+    inputSha256: input.input_sha256,
+    runId: claim.runId,
+    recoverableUntil,
+    cause,
+  });
+  if (typeof imageLedger.markPlannerFailed !== "function") return markPlannerUnknown(imageLedger, claim, cause);
+  try {
+    const result = await imageLedger.markPlannerFailed({
+      runId: claim.runId,
+      appScopeId: claim.appScopeId,
+      ownerToken: claim.ownerToken,
+      fence: claim.fence,
+      errorCode: response.error.code,
+      response,
+    });
+    if (result?.status === "COMMITTED") return response;
+  } catch {
+    // Read back below before falling back to the conservative UNKNOWN state.
+  }
+  try {
+    const state = await readD36RunState(imageLedger, claim.runId, claim.appScopeId);
+    if (state.status === "PLANNER_FAILED" && state.cachedResponse) {
+      return parseImageGenerationResponse({ ...state.cachedResponse, cached: true, upstream_calls: 0 });
+    }
+  } catch {
+    // UNKNOWN remains the only safe result when the planner failure commit cannot be confirmed.
+  }
+  return markPlannerUnknown(imageLedger, claim, cause);
+}
+
 export async function generateImagesTransaction(input, settings, { imageLedger, nowMs = Date.now(), accessExpiresAtMs = 0, appScopeId = "" } = {}) {
   if (!input || !new Set(["START", "DISCOVER", "STEP"]).has(input.mode)) throw new TypeError("IMAGE_GENERATION_MODE_INVALID");
   if (settings.credentialMode !== "SERVER_MANAGED") throw new Error("IMAGE_TRANSACTION_SERVER_MANAGED_REQUIRED");
@@ -2352,6 +2447,18 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       return d36Response({ status: "ERROR", bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: {}, error: { code: "IMAGE_LEDGER_RUN_MISSING" } });
     }
     if (state.status === "CONFLICT") throw imageTransactionStateError("CONFLICT", { run_id: runId });
+    if (state.status === "PLANNER_FAILED") {
+      if (state.cachedResponse) return parseImageGenerationResponse({ ...state.cachedResponse, cached: true, upstream_calls: 0 });
+      return plannerFailureResponse({
+        bootstrapNonce: input.bootstrap_nonce,
+        inputSha256: input.input_sha256,
+        runId,
+        recoverableUntil: state.recoverableUntil,
+        cause: state.plannerFailureCode || "LEGACY_PLANNER_UNKNOWN",
+        cached: true,
+        upstreamCalls: 0,
+      });
+    }
     if (state.cachedResponse && new Set(["READY", "PARTIAL", "COMPLETE"]).has(state.status)) {
       return parseImageGenerationResponse({
         ...state.cachedResponse,
@@ -2408,6 +2515,19 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       if (recovered) return recovered;
       throw imageTransactionStateError("UNKNOWN", { run_id: runId, reason: "READY_WITHOUT_CACHE" });
     }
+    if (claim.status === "PLANNER_FAILED") {
+      const state = await readD36RunState(imageLedger, runId, appScopeId);
+      if (state.cachedResponse) return parseImageGenerationResponse({ ...state.cachedResponse, cached: true, upstream_calls: 0 });
+      return plannerFailureResponse({
+        bootstrapNonce: input.bootstrap_nonce,
+        inputSha256: input.input_sha256,
+        runId,
+        recoverableUntil: state.recoverableUntil,
+        cause: state.plannerFailureCode || "PLANNER_FAILED",
+        cached: true,
+        upstreamCalls: 0,
+      });
+    }
     if (new Set(["PLANNING", "IN_FLIGHT", "UNKNOWN"]).has(claim.status)) {
       return d36Response({ status: claim.status === "PLANNING" ? "PLANNING" : claim.status, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, runId, progress: { state: claim.status }, cached: true, recoverableUntil: claim.recoverableUntil });
     }
@@ -2446,7 +2566,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       compactRun = compactPublicImageRun(run);
       response = d36ResponseForCompactRun({ compactRun, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, apiKey: settings.apiKey, recoverableUntil: claim.recoverableUntil, upstreamCalls: 1, status: "READY" });
     } catch (error) {
-      await markPlannerUnknown(imageLedger, plannerOwner, error);
+      return commitPlannerFailure(imageLedger, plannerOwner, input, error, claim.recoverableUntil);
     }
     const checkpoint = response.checkpoint_preimage;
     try {

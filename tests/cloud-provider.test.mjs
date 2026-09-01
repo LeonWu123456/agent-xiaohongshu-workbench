@@ -268,6 +268,26 @@ class FakeD36ImageLedger {
     return { status: "PLANNING", runId, ownerToken: run.ownerToken, fence: run.fence };
   }
 
+  async markPlannerFailed(value = {}) {
+    this.events.push("ledger:markPlannerFailed");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const run = this.runs.get(runId);
+    if (!run || run.status !== "PLANNING") return { status: "CONFLICT" };
+    run.status = "PLANNER_FAILED";
+    run.plannerFailureCode = String(d36Field(value, "errorCode", "error_code") || "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS");
+    run.cachedResponse = structuredClone(d36Field(value, "response") || null);
+    return { status: "COMMITTED" };
+  }
+
+  async markPlannerUnknown(value = {}) {
+    this.events.push("ledger:markPlannerUnknown");
+    const runId = String(d36Field(value, "runId", "run_id") || "");
+    const run = this.runs.get(runId);
+    if (!run || run.status !== "PLANNING") return { status: "CONFLICT" };
+    run.status = "UNKNOWN";
+    return { status: "UNKNOWN" };
+  }
+
   async commitPlanner(value = {}) {
     this.events.push("ledger:commitPlanner");
     const runId = String(d36Field(value, "runId", "run_id") || "");
@@ -309,6 +329,7 @@ class FakeD36ImageLedger {
       snapshot: structuredClone(run.snapshot || null),
       referenceManifest: structuredClone(run.referenceManifest || []),
       compactRun: structuredClone(run.compactRun || null),
+      plannerFailureCode: run.plannerFailureCode || null,
     };
   }
 
@@ -1133,7 +1154,7 @@ test("D36 real adapter maps one app_scope+bootstrap_nonce to one physical run ro
   assert.equal(upstreamCalls, 0);
 });
 
-test("D36 claimStart and external DISCOVER atomically turn an expired PLANNING lease into UNKNOWN using Redis TIME", async () => {
+test("D36 claimStart stays conservative while external DISCOVER classifies an expired planner-only lease without weakening paid-step UNKNOWN", async () => {
   const transact = d36Transaction();
   const input = await d36StartInput({ nonce: "5".repeat(64) });
   const scripts = [];
@@ -1153,11 +1174,12 @@ test("D36 claimStart and external DISCOVER atomically turn an expired PLANNING l
             json: async () => ({
               result: [
                 "FOUND",
-                "status", "UNKNOWN",
+                "status", "PLANNER_FAILED",
                 "app_scope", D36_APP_SCOPE,
                 "bootstrap_nonce", input.bootstrap_nonce,
                 "input_sha", input.input_sha256,
                 "recoverable_until_ms", "1788796800000",
+                "planner_failure_code", "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS",
               ],
             }),
           };
@@ -1197,7 +1219,9 @@ test("D36 claimStart and external DISCOVER atomically turn an expired PLANNING l
       D36_SETTINGS,
       { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE },
     );
-    assert.equal(discoverResult.status, "UNKNOWN");
+    assert.equal(discoverResult.status, "ERROR");
+    assert.equal(discoverResult.error.code, "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS");
+    assert.equal(discoverResult.progress.image_upstream_calls, 0);
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -1209,6 +1233,9 @@ test("D36 claimStart and external DISCOVER atomically turn an expired PLANNING l
     assert.match(String(script), /planner_lease_until_ms/);
     assert.match(String(script), /HSET[\s\S]*UNKNOWN/);
   }
+  assert.match(String(discoverScript), /run_json/);
+  assert.match(String(discoverScript), /reservation_count/);
+  assert.match(String(discoverScript), /PLANNER_FAILED/);
   assert.equal(upstreamCalls, 0);
 });
 
@@ -1300,6 +1327,44 @@ test("D36 START durably claims, materializes and reads references, then claims p
     "provider:planner",
     "ledger:commitPlanner",
   ]);
+});
+
+test("D36 planner rejection is cached as a zero-image-call terminal state", async () => {
+  const transact = d36Transaction();
+  const imageLedger = new FakeD36ImageLedger();
+  const input = await d36StartInput({ nonce: "a".repeat(64) });
+  let plannerCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    plannerCalls += 1;
+    return { ok: true, json: async () => ({ output: [] }) };
+  };
+  try {
+    const failed = await transact(input, D36_SETTINGS, {
+      imageLedger,
+      nowMs: 1_788_192_000_000,
+      accessExpiresAtMs: 1_788_192_360_000,
+      appScopeId: D36_APP_SCOPE,
+    });
+    assert.equal(failed.status, "ERROR");
+    assert.equal(failed.error.code, "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS");
+    assert.equal(failed.progress.image_upstream_calls, 0);
+    assert.equal(failed.upstream_calls, 1);
+    assert.equal(imageLedger.runs.get(failed.run_id).status, "PLANNER_FAILED");
+
+    const discovered = await transact(
+      { mode: "DISCOVER", bootstrap_nonce: input.bootstrap_nonce, input_sha256: input.input_sha256 },
+      D36_SETTINGS,
+      { imageLedger, nowMs: 1_788_192_001_000, accessExpiresAtMs: 1_788_192_360_000, appScopeId: D36_APP_SCOPE },
+    );
+    assert.equal(discovered.status, "ERROR");
+    assert.equal(discovered.error.code, "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS");
+    assert.equal(discovered.cached, true);
+    assert.equal(discovered.upstream_calls, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(plannerCalls, 1);
 });
 
 test("D36 same nonce and input DISCOVER reads cached READY with one planner while a different input hash conflicts", async () => {
@@ -1699,7 +1764,7 @@ test("D36 real reserve uses Redis TIME and aligned run/inventory/step TTL gates 
   } finally {
     globalThis.fetch = previousFetch;
   }
-  const reserve = redisCommands.find((body) => body[0] === "EVAL" && String(body[1]).includes("reservation_count"));
+  const reserve = redisCommands.find((body) => body[0] === "EVAL" && String(body[1]).includes("required_remaining = tonumber(ARGV[5])"));
   const lua = String(reserve[1]);
   assert.match(lua, /redis\.call\(['"]TIME['"]\)/);
   assert.match(lua, /required_remaining = tonumber\(ARGV\[5\]\) \+ tonumber\(ARGV\[6\]\)/);

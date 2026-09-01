@@ -23,6 +23,21 @@ test("generation failures become persistent human-readable recovery states", () 
   assert.equal(generationFailureFeedback(new DOMException("aborted", "AbortError")).code, "GENERATION_TIMEOUT");
 });
 
+test("planner-only terminal failure says image calls are zero and requires an explicit adjusted restart", () => {
+  const feedback = generationFailureFeedback(Object.assign(new Error("IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS"), {
+    providerCode: "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS",
+    providerStage: "image",
+  }));
+  assert.equal(feedback.code, "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS");
+  assert.equal(feedback.recovery_action, "EDIT_VISUAL_INPUTS_THEN_RESTART");
+  assert.equal(feedback.expected_image_upstream_calls_so_far, 0);
+  assert.equal(feedback.direct_paid_retry_allowed, true);
+  assert.match(feedback.title, /图片还没开始/);
+  assert.match(feedback.detail, /页数与画面设置已经重新开放/);
+  assert.match(feedback.detail, /付费图片步骤/);
+  assert.equal(feedback.retry_label, "调整后重新规划并生成");
+});
+
 test("quality gate failures report the actual content problem instead of blaming Ark connectivity", () => {
   const hook = generationFailureFeedback(Object.assign(new Error("provider request failed: TEXT_QUALITY_GATE_FAILED:titles:cheap_or_unverifiable_hook:不用复杂工具"), { providerCode: "TEXT_QUALITY_GATE_FAILED:titles:cheap_or_unverifiable_hook:不用复杂工具", providerStage: "text" }));
   assert.equal(hook.code, "CHEAP_HOOK_REJECTED");

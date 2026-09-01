@@ -2865,6 +2865,50 @@ export async function commitDraftImageProgressV3({
   };
 }
 
+export async function commitDraftImagePlannerFailureV3({
+  coordinator: coordinatorValue,
+  draftId,
+  expectedDraftToken,
+  operationSnapshot,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const coordinator = imageTransactionCoordinator(coordinatorValue);
+  const targetId = requiredString(draftId, "draftId");
+  if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
+  const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
+  const timestamp = requiredString(updatedAt, "updatedAt");
+  const finalSession = {
+    ...snapshotRecord.generation_session,
+    image_resume: null,
+  };
+  const buildRecord = (target) => createDraftRecordV3({
+    draftId: target.draft_id,
+    contentPackage: target.content_package,
+    generationSession: finalSession,
+    pendingImageOperation: null,
+    createdAt: target.created_at,
+    updatedAt: timestamp,
+  });
+  const desiredTarget = buildRecord(snapshotRecord);
+  const receipt = await coordinator.mergeDraftCas({
+    draftId: targetId,
+    expectedDraftToken,
+    buildDraft: (target) => buildRecord(target),
+    isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
+    reason: `IMAGE_PLANNER_FAILED_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+  });
+  if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord });
+  const committed = receipt.target_draft;
+  if (!committed || committed.pending_image_operation != null || committed.generation_session?.image_resume != null) {
+    return imageTransactionStopped({ code: "IMAGE_PLANNER_FAILURE_READBACK_MISMATCH", receipt, operationSnapshot: snapshotRecord });
+  }
+  return {
+    ...receipt,
+    action: "RELEASED",
+    operation_snapshot: snapshotRecord,
+  };
+}
+
 function exactStringList(left, right) {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]);
 }

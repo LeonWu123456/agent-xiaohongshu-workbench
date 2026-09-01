@@ -31,6 +31,7 @@ import {
   beginNewDraftV3,
   buildWorkspaceBackupV3,
   commitDraftImageCompletionV3,
+  commitDraftImagePlannerFailureV3,
   commitDraftImageProgressV3,
   createRestartablePendingImageOperationV3,
   createWorkspaceV3Coordinator,
@@ -697,7 +698,7 @@ function FailureNotice({ feedback, onRetry }) {
   if (!feedback) return null;
   return <div className="generation-error" role="alert" data-error-code={feedback.code}>
     <div><strong>{feedback.title}</strong><span>{feedback.detail}</span></div>
-    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" onClick={onRetry}>重试{feedback.stage === "image" ? "图片" : "文字"}</button></footer>
+    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" onClick={onRetry}>{feedback.retry_label || `重试${feedback.stage === "image" ? "图片" : "文字"}`}</button></footer>
   </div>;
 }
 
@@ -2445,6 +2446,29 @@ function App() {
       if (providerResult.status === "ERROR" && providerResult.error?.code === "IMAGE_LEDGER_RUN_MISSING" && baseRecord.pending_image_operation?.protocol_state === "BOOTSTRAP") {
         const start = await rebuildPendingImageStartV3({ pendingImageOperation: baseRecord.pending_image_operation, mediaStore });
         providerResult = await provider.generateImages(start, consumeImageResponse);
+      }
+      if (providerResult.status === "ERROR" && providerResult.error?.code === "IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS") {
+        const plannerFailureReceipt = await commitDraftImagePlannerFailureV3({
+          coordinator: workspaceCoordinator,
+          draftId: imageOperation.draft_id,
+          expectedDraftToken: imageOperation.expected_draft_token,
+          operationSnapshot: imageOperation.operation_snapshot,
+        });
+        if (plannerFailureReceipt.action !== "RELEASED" || !plannerFailureReceipt.workspace) {
+          throw imageResponseFailure({ status: "ERROR", error: { code: plannerFailureReceipt.code || "IMAGE_PLANNER_FAILURE_READBACK_MISMATCH" }, progress: plannerFailureReceipt });
+        }
+        const workspaceView = await hydrateWorkspaceForView(plannerFailureReceipt.workspace);
+        const feedback = generationFailureFeedback(imageResponseFailure(providerResult));
+        const committed = mainAuthority.commit(mainOperation, () => {
+          adoptWorkspaceState(plannerFailureReceipt.workspace, { record: plannerFailureReceipt.target_draft, applyRecord: true, workspaceView });
+          failGeneration(feedback);
+        });
+        if (!committed.applied) {
+          workspaceView.release?.();
+          adoptWorkspaceState(plannerFailureReceipt.workspace);
+          failGeneration(feedback);
+        }
+        return;
       }
       if (providerResult.status !== "COMPLETE") throw imageResponseFailure(providerResult);
     } catch (error) {
