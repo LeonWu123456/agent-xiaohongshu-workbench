@@ -163,6 +163,39 @@ test("one auth transaction reducer rejects old health, business, catch and final
   assert.equal(staleAfterCommit, state);
 });
 
+test("authenticated background config cannot erase a verified business success", () => {
+  let state = createMainAuthState("UNVERIFIED");
+  state = reduceMainAuthState(state, { type: "BEGIN_LOGIN" });
+  const generation = state.generation;
+  state = reduceMainAuthState(state, { type: "BEGIN_RECONCILE", generation });
+  state = reduceMainAuthState(state, {
+    type: "CONFIG_COMMIT",
+    generation,
+    providerMeta: { authenticated: true, access_required: true, credential_mode: "SERVER_MANAGED" },
+    providerHealth: "UNVERIFIED",
+  });
+  state = reduceMainAuthState(state, { type: "BUSINESS_SUCCESS", generation });
+  assert.equal(state.providerHealth, "ONLINE");
+
+  state = reduceMainAuthState(state, {
+    type: "BACKGROUND_CONFIG",
+    generation,
+    providerMeta: { authenticated: true, access_required: true, credential_mode: "SERVER_MANAGED" },
+    providerHealth: "UNVERIFIED",
+  });
+  assert.equal(state.providerHealth, "ONLINE");
+  assert.equal(state.phase, "AUTHENTICATED");
+
+  state = reduceMainAuthState(state, {
+    type: "BACKGROUND_CONFIG",
+    generation,
+    providerMeta: { authenticated: false, access_required: true, credential_mode: "SERVER_MANAGED" },
+    providerHealth: "UNVERIFIED",
+  });
+  assert.equal(state.providerHealth, "UNVERIFIED");
+  assert.equal(state.phase, "ACCESS_SESSION_REQUIRED");
+});
+
 test("A to B rejects every late main side effect, including errors, toast and prepared ZIP", async (t) => {
   const scenarios = [
     ["text success", false, { textDraft: "A late text", generationState: "IDLE", toast: "A text done" }],

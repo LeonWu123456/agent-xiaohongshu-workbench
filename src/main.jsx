@@ -594,11 +594,18 @@ export function reduceMainAuthState(state, event) {
     const accessRequired = providerMeta.credential_mode === "SERVER_MANAGED"
       && providerMeta.authenticated !== true
       && providerMeta.access_required === true;
+    const observedProviderHealth = String(event.providerHealth || current.providerHealth);
+    const providerHealth = type === "BACKGROUND_CONFIG"
+      && current.providerHealth === "ONLINE"
+      && observedProviderHealth === "UNVERIFIED"
+      && providerMeta.authenticated === true
+      ? "ONLINE"
+      : observedProviderHealth;
     return Object.freeze({
       ...current,
       phase: providerMeta.authenticated === true ? "AUTHENTICATED" : accessRequired ? "ACCESS_SESSION_REQUIRED" : "IDLE",
       providerMeta,
-      providerHealth: String(event.providerHealth || current.providerHealth),
+      providerHealth,
       accessRequired,
       accessBusy: false,
       accessError: "",
