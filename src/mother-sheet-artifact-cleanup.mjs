@@ -81,7 +81,7 @@ function applyPaperStrength(data, channels, offset, strength) {
   return changed;
 }
 
-function normalizeEdgeConnectedPaper(data, width, height, channels) {
+function normalizeEdgeConnectedPaper(data, width, height, channels, { enforceWhitePaper = false } = {}) {
   const visited = new Uint8Array(width * height);
   const queue = new Int32Array(width * height);
   let head = 0; let tail = 0;
@@ -113,7 +113,12 @@ function normalizeEdgeConnectedPaper(data, width, height, channels) {
   let changed = 0;
   for (let offset = 0; offset < visited.length; offset += 1) {
     if (!visited[offset] || !softened[offset]) continue;
-    if (applyPaperStrength(data, channels, offset, softened[offset] / 255)) changed += 1;
+    // Illustration paper is a delivery surface, not ambient scenery. When the
+    // caller knows this tile must sit directly on a white page, make every
+    // edge-connected warm-paper pixel visually white. Connectivity remains
+    // the subject boundary, so enclosed clothes, skin and props are preserved.
+    const strength = enforceWhitePaper ? Math.max(.96, softened[offset] / 255) : softened[offset] / 255;
+    if (applyPaperStrength(data, channels, offset, strength)) changed += 1;
   }
   return changed;
 }
@@ -127,7 +132,7 @@ function findRule(data, width, height, channels, axis, start, end) {
   return best;
 }
 
-export function cleanupGeneratedGridArtifacts(image, { kv = false, paperOnly = false, previousActions = [] } = {}) {
+export function cleanupGeneratedGridArtifacts(image, { kv = false, paperOnly = false, enforceWhitePaper = false, previousActions = [] } = {}) {
   const source = image?.data;
   const width = finiteInteger(image?.width);
   const height = finiteInteger(image?.height);
@@ -187,7 +192,7 @@ export function cleanupGeneratedGridArtifacts(image, { kv = false, paperOnly = f
     }
     actions.push({ type: "VERTICAL_GRID_EDGE_BAND_REMOVED", edge, coordinate: rule.coordinate, ratio: rule.ratio, from, to });
   });
-  const normalizedPaperPixels = normalizeEdgeConnectedPaper(data, width, height, channels);
+  const normalizedPaperPixels = normalizeEdgeConnectedPaper(data, width, height, channels, { enforceWhitePaper: paperOnly || enforceWhitePaper });
   if (normalizedPaperPixels > 0) actions.push({ type: "EDGE_CONNECTED_PAPER_NORMALIZED", pixels: normalizedPaperPixels });
   return { data, width, height, channels, actions };
 }

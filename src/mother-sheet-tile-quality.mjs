@@ -96,8 +96,11 @@ export function inspectMotherSheetTilePixels(image, options = {}) {
     // mother-sheet grid/frame. Dark and coloured scene edges remain valid.
     const uniformLightNeutralLine = uniformOuterLine && outerLightness >= 160 && outerLightness <= 238 && outerChroma <= 48;
     const separator = uniformLightNeutralLine && outer.paleRatio < .9 && distance >= 20;
-    const uniformPaperSurface = uniformOuterLine && outerLightness > 238 && outerChroma <= 18;
-    const paperWhiteMismatch = uniformPaperSurface && outerLightness < 250;
+    const uniformPaperSurface = uniformOuterLine && outerLightness > 220 && outerChroma <= 45;
+    // 250-level ivory looked white to the old gate but remained visibly gray
+    // against the #FFFFFF page. Require a genuinely white delivery edge while
+    // keeping saturated scene edges outside the paper classification.
+    const paperWhiteMismatch = uniformPaperSurface && outerLightness < 252;
     const transparency = outer.transparentRatio > .01;
     if (separator || paperWhiteMismatch || transparency) contaminatedSides.push(side);
     sides[side] = { outer, inner, distance, uniformOuterLine, uniformLightNeutralLine, uniformPaperSurface, paperWhiteMismatch, separator, transparency };

@@ -544,7 +544,10 @@ export async function splitMotherSheetForUnits(bytes, jobOrUnits, options = {}) 
     const preferredAspect = regionRole.includes("kv-top") ? "9:8" : "3:4";
     let baseTile = await sharp(bytes).extract(cropRegion).png().toBuffer();
     const rawTile = await sharp(baseTile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-    const cleaned = cleanupGeneratedGridArtifacts({ data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels }, { kv: regionRole === "kv-2x2-3:4" });
+    const cleaned = cleanupGeneratedGridArtifacts(
+      { data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels },
+      { kv: regionRole === "kv-2x2-3:4", enforceWhitePaper: preferredAspect === "3:4" },
+    );
     let cleanedPipeline = sharp(Buffer.from(cleaned.data), { raw: { width: cleaned.width, height: cleaned.height, channels: cleaned.channels } });
     if (preferredAspect === "3:4") {
       const insets = detectUniformEdgeInsets(cleaned);
@@ -662,7 +665,10 @@ export async function sliceStandaloneRepairForUnit(bytes, unit, options = {}) {
     : { left: 0, top: 0, width, height };
   let baseTile = await sharp(bytes).flatten({ background: "#ffffff" }).extract(crop).png().toBuffer();
   const rawTile = await sharp(baseTile).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  const cleaned = cleanupGeneratedGridArtifacts({ data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels });
+  const cleaned = cleanupGeneratedGridArtifacts(
+    { data: new Uint8Array(rawTile.data), width: rawTile.info.width, height: rawTile.info.height, channels: rawTile.info.channels },
+    { enforceWhitePaper: preferredAspect === "3:4" },
+  );
   baseTile = await sharp(Buffer.from(cleaned.data), { raw: { width: cleaned.width, height: cleaned.height, channels: cleaned.channels } }).png().toBuffer();
   const quality = inspectMotherSheetTileStats(await sharp(baseTile).stats());
   const missing = (reason, pixelGate = null) => ({

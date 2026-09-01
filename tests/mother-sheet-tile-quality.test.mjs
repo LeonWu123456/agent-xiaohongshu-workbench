@@ -7,7 +7,7 @@ function tile(width, height, { separator = false, thickSeparator = false, whiteB
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const edge = y >= height - (thickSeparator ? 9 : 2);
-      const value = whiteBackground || (separator && edge) ? 250 : 96;
+      const value = whiteBackground || (separator && edge) ? 255 : 96;
       data.set([value, value, value, 255], (y * width + x) * 4);
     }
   }
@@ -17,6 +17,12 @@ function tile(width, height, { separator = false, thickSeparator = false, whiteB
 function nearWhitePaper(width, height, value = 248) {
   const data = new Uint8Array(width * height * 4);
   for (let offset = 0; offset < width * height; offset += 1) data.set([value, value, value - 2, 255], offset * 4);
+  return { data, width, height, channels: 4 };
+}
+
+function warmPaper(width, height) {
+  const data = new Uint8Array(width * height * 4);
+  for (let offset = 0; offset < width * height; offset += 1) data.set([244, 232, 214, 255], offset * 4);
   return { data, width, height, channels: 4 };
 }
 
@@ -51,6 +57,13 @@ test("pixel gate accepts an exact 3:4 white-background illustration", () => {
 
 test("pixel gate rejects a uniform near-white paper rectangle that remains visibly darker than the page", () => {
   const result = inspectMotherSheetTilePixels(nearWhitePaper(120, 160, 249));
+  assert.equal(result.hasCleanEdges, false);
+  assert.deepEqual(result.contaminatedSides, ["top", "right", "bottom", "left"]);
+  assert.equal(result.sides.top.paperWhiteMismatch, true);
+});
+
+test("pixel gate rejects warm ivory paper even when it is bright and uniform", () => {
+  const result = inspectMotherSheetTilePixels(warmPaper(120, 160));
   assert.equal(result.hasCleanEdges, false);
   assert.deepEqual(result.contaminatedSides, ["top", "right", "bottom", "left"]);
   assert.equal(result.sides.top.paperWhiteMismatch, true);
