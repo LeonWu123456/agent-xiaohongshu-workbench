@@ -282,7 +282,7 @@ test("App has one page-local auth writer and does not persist auth generations o
   assert.equal(persistedAuthTerms.test(appSource), false);
 });
 
-test("pending image authority freezes every image input while the same operation remains recoverable", () => {
+test("pending image authority freezes only the asset lane while text layout save and export stay available", () => {
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null }), null);
   assert.equal(authoringInputLockReason({ workspaceReady: false, workspaceReadOnly: false, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: true, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
@@ -290,19 +290,24 @@ test("pending image authority freezes every image input while the same operation
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-A", imageOperationDraftId: "draft-A" }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-B", imageOperationDraftId: "draft-A" }), null);
 
-  const state = { topic: "frozen", title: "frozen", pageCount: 3, productionMode: "smart", refs: ["ref-a"] };
-  const before = structuredClone(state);
+  const state = { topic: "editable", title: "editable", pageCount: 3, productionMode: "smart", refs: ["ref-a"] };
   const reason = authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } });
-  if (!reason) Object.assign(state, { topic: "mutated", title: "mutated", pageCount: 8, productionMode: "free", refs: [] });
-  assert.deepEqual(state, before, "a pending operation must make handler-level mutations zero-write");
+  Object.assign(state, { topic: "mutated", title: "mutated" });
+  if (!reason) Object.assign(state, { pageCount: 8, productionMode: "free", refs: [] });
+  assert.deepEqual(state, { topic: "mutated", title: "mutated", pageCount: 3, productionMode: "smart", refs: ["ref-a"] });
 
-  const guardedHandlers = [
+  const textHandlers = [
     "setPromptFieldValue",
     "generateTextNode",
     "editTextDraft",
     "chooseDraftTitle",
     "changeContentRoute",
     "confirmTextDraft",
+  ];
+  for (const name of textHandlers) {
+    assert.match(namedFunctionSource(mainSource, name), /authoringInputIsLocked\s*\(\s*\)/, `${name} must remain guarded only by workspace writability`);
+  }
+  const assetHandlers = [
     "changeProductionModeChoice",
     "changeImageCountModeChoice",
     "changeCustomImageCountValue",
@@ -310,16 +315,23 @@ test("pending image authority freezes every image input while the same operation
     "addActionReferences",
     "removeActionReference",
   ];
-  for (const name of guardedHandlers) {
-    assert.match(namedFunctionSource(mainSource, name), /authoringInputIsLocked\s*\(\s*\)/, `${name} must fail closed before changing image input`);
+  for (const name of assetHandlers) {
+    assert.match(namedFunctionSource(mainSource, name), /imageLaneIsLocked\s*\(\s*\)/, `${name} must fail closed before changing asset input`);
   }
-  assert.match(namedFunctionSource(mainSource, "authoringInputIsLocked"), /imageOperationDraftId:\s*draftMutationLockRef\.current\?\.draft_id/);
+  assert.doesNotMatch(namedFunctionSource(mainSource, "authoringInputIsLocked"), /imageOperationDraftId|pending_image_operation/);
+  assert.match(namedFunctionSource(mainSource, "imageLaneIsLocked"), /imageOperationDraftId:\s*draftMutationLockRef\.current\?\.draft_id/);
+  assert.match(mainSource, /const textLaneLocked = authoringInputLocked \|\| generationState === "TEXT_GENERATING";/);
+  assert.match(mainSource, /const draftEditingLocked = workspaceReadOnly \|\| workspaceTransitioning;/);
+  assert.match(namedFunctionSource(mainSource, "draftMutationIsLocked"), /return workspaceMutationIsLocked\(\)/);
+  assert.doesNotMatch(mainSource, /liveDraft\?\.pending_image_operation|latestDraft\?\.pending_image_operation/, "pending assets must not suppress semantic autosave");
+  assert.match(namedFunctionSource(mainSource, "saveDraft"), /^function saveDraft\(\) \{\s*if \(draftMutationIsLocked\(\)\) return;/);
 
   const creatorSource = namedFunctionSource(mainSource, "renderCreatorWorkflow");
   for (const handler of ["changeContentRoute", "confirmTextDraft", "changeProductionModeChoice", "changeImageCountModeChoice", "changeCustomImageCountValue", "changeActionReferenceNote"]) {
     assert.match(creatorSource, new RegExp(`(?:${handler}\\s*\\(|(?:onClick|onChange)=\\{${handler}\\})`), `${handler} must be the live JSX writer, not a parked guard`);
   }
-  assert.ok(count(creatorSource, /disabled=\{authoringInputLocked \|\| isGenerating\}/g) >= 10, "all text and image input controls must expose the pending lock");
+  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must expose only the workspace/text-generation lock");
+  assert.ok(count(creatorSource, /disabled=\{imageLaneLocked \|\| isGenerating/g) >= 7, "asset controls must expose the pending-image lane lock");
 
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
   assert.match(imageSource, /^function generateImageNode\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
@@ -438,8 +450,7 @@ test("workspace and draft mutations bind one pre-await base and converge after r
   assert.match(saveFeedbackSource, /reconcileStaleDraftWrite\s*\(/);
 
   const autosaveSource = between(mainSource, "const timer = window.setTimeout(async () => {", "}, 400);");
-  assert.ok(count(autosaveSource, /pending_image_operation/g) >= 2, "autosave must check pending both before and after materialization");
-  assert.ok(count(autosaveSource, /draftMutationLockRef\.current/g) >= 2, "autosave must check the in-memory pre-bootstrap lock twice");
+  assert.doesNotMatch(autosaveSource, /pending_image_operation|draftMutationLockRef\.current/, "semantic autosave must preserve rather than wait behind the asset lane");
   assert.ok(count(autosaveSource, /workspaceTransitionLock\.isLocked\(\)/g) >= 2, "autosave must not cross an envelope transition before or after materialization");
   assert.match(autosaveSource, /reconcileStaleDraftWrite\(receipt, \{ dirtyDraftId: draftId, issueLabel: "自动保存" \}\)/, "post-CAS stale autosave must use the shared final-snapshot reconciler");
   const staleWriteSource = namedFunctionSource(mainSource, "reconcileStaleDraftWrite");
@@ -636,5 +647,6 @@ test("durable draft navigation, action references and corrupt-v3 recovery are li
   assert.doesNotMatch(restoreSource, /previousId:\s*null/, "restoring a backup must preserve its durable previous-draft navigation");
 
   const creatorSource = namedFunctionSource(mainSource, "renderCreatorWorkflow");
-  assert.ok(count(creatorSource, /disabled=\{authoringInputLocked \|\| isGenerating/g) >= 12, "reference add/remove/note must expose the same frozen-input authority as text and image controls");
+  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must remain editable outside workspace and text-generation locks");
+  assert.ok(count(creatorSource, /disabled=\{imageLaneLocked \|\| isGenerating/g) >= 7, "reference and image-plan controls must share the asset-lane lock");
 });

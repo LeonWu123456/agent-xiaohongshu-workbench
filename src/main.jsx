@@ -889,14 +889,8 @@ function App() {
   const [layoutRefreshToken, setLayoutRefreshToken] = useState(0);
   const content = contentHistory.present;
   const setContent = useCallback((updater, options = {}) => {
-    const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id;
-    const activeRecord = workspaceReadyRef.current
-      ? workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId)
-      : null;
-    if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) {
-      setToast(activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId
-        ? "同一次配图尚未收束；当前稿编辑已冻结"
-        : "工作台当前为只读；修改没有发生");
+    if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked()) {
+      setToast("工作台当前为只读；修改没有发生");
       return;
     }
     if (options.semantic !== false) mainAuthority.markSemanticMutation();
@@ -909,8 +903,8 @@ function App() {
     if (semantic) mainAuthority.markSemanticMutation();
     setContentHistory(createEditorHistory(next));
   }, [mainAuthority]);
-  const undo = useCallback(() => { const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id; const activeRecord = workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId); if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
-  const redo = useCallback(() => { const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id; const activeRecord = workspaceEnvelopeRef.current?.drafts?.find((draft) => draft.draft_id === activeDraftId); if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeRecord?.pending_image_operation || draftMutationLockRef.current?.draft_id === activeDraftId) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
+  const undo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked()) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
+  const redo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked()) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
   const [topic, setTopic] = useState(initialGenerationSession?.topic || initialPromptMemory.defaults.source_topic || initial.source_input);
   const [pillar, setPillar] = useState(initialGenerationSession?.pillar || initial.pillar);
   const [goal, setGoal] = useState(initialGenerationSession?.goal || initial.goal);
@@ -1023,8 +1017,10 @@ function App() {
   const isGenerating = generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
   const pendingImageOperation = workspaceReady ? activeDraftRecordV3(workspaceEnvelopeRef.current)?.pending_image_operation : null;
   const workspaceReadOnly = !workspaceReady || workspaceWriteBlocked;
-  const authoringInputLocked = workspaceReadOnly || workspaceTransitioning || Boolean(pendingImageOperation);
-  const draftEditingLocked = workspaceReadOnly || workspaceTransitioning || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
+  const authoringInputLocked = workspaceReadOnly || workspaceTransitioning;
+  const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING";
+  const imageLaneLocked = authoringInputLocked || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
+  const draftEditingLocked = workspaceReadOnly || workspaceTransitioning;
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
     && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
   const providerStatusLabel = accessRequired ? "需要访问验证" : providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
@@ -1188,6 +1184,17 @@ function App() {
       setToast("工作台正在原子切换或保存；当前输入保持不变，请稍候");
       return true;
     }
+    const reason = authoringInputLockReason({
+      workspaceReady: workspaceReadyRef.current,
+      workspaceReadOnly: workspaceWriteBlockedRef.current,
+      pendingImageOperation: null,
+    });
+    if (!reason) return false;
+    setToast("工作台当前为只读；可查看、尝试备份或恢复备份，不能产生未落盘修改");
+    return true;
+  }
+
+  function imageLaneIsLocked() {
     const activeDraftId = workspaceEnvelopeRef.current?.active_draft_id;
     const durablePending = workspaceReadyRef.current
       ? activeDraftRecordV3(workspaceEnvelopeRef.current)?.pending_image_operation
@@ -1201,18 +1208,13 @@ function App() {
     });
     if (!reason) return false;
     setToast(reason === "PENDING_IMAGE_OPERATION_INPUT_FROZEN"
-      ? "同一次配图尚未恢复完成；原文、文字、页数和画面输入已冻结"
-      : "工作台当前为只读；可查看、尝试备份或恢复备份，不能产生未落盘修改");
+      ? "同一次配图仍在恢复；图片参数暂时锁定，文字、排版、保存与导出可继续"
+      : "工作台当前为只读；不能修改图片输入");
     return true;
   }
 
   function draftMutationIsLocked() {
-    if (workspaceMutationIsLocked()) return true;
-    const activeDraftId = workspaceEnvelopeRef.current.active_draft_id;
-    const activeRecord = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === activeDraftId);
-    if (!activeRecord?.pending_image_operation && draftMutationLockRef.current?.draft_id !== activeDraftId) return false;
-    setToast("同一次配图尚未收束；当前稿的编辑、保存和导入已冻结，可先切到另一稿继续工作");
-    return true;
+    return workspaceMutationIsLocked();
   }
 
   function mediaWorkspaceIsUsable() {
@@ -1318,9 +1320,6 @@ function App() {
     if (!workspaceReady || workspaceWriteBlocked || workspaceTransitioning) return undefined;
     const timer = window.setTimeout(async () => {
       if (workspaceTransitionLock.isLocked()) return;
-      const liveDraftId = workspaceEnvelopeRef.current.active_draft_id;
-      const liveDraft = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === liveDraftId);
-      if (liveDraft?.pending_image_operation || draftMutationLockRef.current?.draft_id === liveDraftId) return;
       const operation = mainAuthority.capture("autosave");
       try {
         const baseWorkspace = workspaceEnvelopeRef.current;
@@ -1330,8 +1329,7 @@ function App() {
           content_package: content,
           generation_session: currentAuthoringSession(),
         });
-        const latestDraft = workspaceEnvelopeRef.current.drafts.find((draft) => draft.draft_id === draftId);
-        if (!mainAuthority.isCurrent(operation) || workspaceTransitionLock.isLocked() || latestDraft?.pending_image_operation || draftMutationLockRef.current?.draft_id === draftId) return;
+        if (!mainAuthority.isCurrent(operation) || workspaceTransitionLock.isLocked()) return;
         const next = saveDraftRecordV3(baseWorkspace, {
           contentPackage: materialized.value.content_package,
           generationSession: materialized.value.generation_session,
@@ -1478,6 +1476,7 @@ function App() {
   }
 
   function setPromptFieldValue(fieldId, value) {
+    if (IMAGE_CONTEXT_FIELDS.some((field) => field.id === fieldId) && imageLaneIsLocked()) return;
     if (authoringInputIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setGenerationState("IDLE");
@@ -2253,7 +2252,7 @@ function App() {
   }
 
   function changeProductionModeChoice(modeId) {
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setProductionMode(modeId);
     setImageResume(null);
@@ -2261,7 +2260,7 @@ function App() {
   }
 
   function changeImageCountModeChoice(mode) {
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setImageCountMode(mode);
     setImageResume(null);
@@ -2269,7 +2268,7 @@ function App() {
   }
 
   function changeCustomImageCountValue(value) {
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setCustomImageCount(Number(value));
     setImageResume(null);
@@ -2277,7 +2276,7 @@ function App() {
   }
 
   function changeActionReferenceNote(value) {
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setActionReferenceNote(value);
     setImageResume(null);
@@ -2294,7 +2293,7 @@ function App() {
   async function addActionReferences(event) {
     const operation = mainAuthority.capture("action-reference-reader", { pageScoped: true });
     const files = [...event.target.files]; event.target.value = "";
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     const room = Math.max(0, 3 - actionReferences.length);
     const accepted = files.filter((file) => new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type)).slice(0, room);
     if (!accepted.length) { setToast(room ? "请选择 PNG、JPG 或 WebP 图片" : "动作参考图最多 3 张"); return; }
@@ -2318,7 +2317,7 @@ function App() {
   }
 
   function removeActionReference(mediaRef) {
-    if (authoringInputIsLocked()) return;
+    if (imageLaneIsLocked()) return;
     mainAuthority.markSemanticMutation();
     setActionReferences((current) => current.filter((item) => item.media_ref !== mediaRef));
     setImageResume(null);
@@ -3288,29 +3287,29 @@ function App() {
 
       <section id="creator-source" className="workbench-section workbench-source">
         <header><div><strong>原文</strong><small>写清素材，再用 AI 扩写</small></div><button className="creator-flow-close" type="button" onClick={() => setCreatorOpen(false)} disabled={isGenerating} title="收起原文" aria-label="收起原文"><X /></button></header>
-        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue("source_topic", value)} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
+        <PromptContextField field={{ id: "source_topic", label: "原文或选题", placeholder: "写清想讲什么，或直接粘贴原文" }} textareaId="creator-source-input" textareaRef={sourceInputRef} value={topic} history={promptMemory.histories.source_topic} rows={5} disabled={textLaneLocked} onChange={(value) => setPromptFieldValue("source_topic", value)} onRemember={(value) => rememberPromptField("source_topic", value)} onUse={(value) => setPromptFieldValue("source_topic", value)} onDelete={(entryId) => deletePromptEntry("source_topic", entryId)} />
         <details className="prompt-context-panel creator-requirements-panel">
           <summary><div><strong>补充要求</strong><small>{textRequirements.trim() ? "已填写" : "选填"}</small></div><ChevronDown /></summary>
-          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue("text_requirements", value)} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
+          <div><PromptContextField className="creator-requirements" field={{ id: "text_requirements", label: "补充要求", helper: "结构化字段没覆盖的本次特殊要求写在这里。", placeholder: "例如：保留原文步骤；不要引用古籍；正文约400字" }} value={textRequirements} history={promptMemory.histories.text_requirements} disabled={textLaneLocked} onChange={(value) => setPromptFieldValue("text_requirements", value)} onRemember={(value) => rememberPromptField("text_requirements", value)} onUse={(value) => setPromptFieldValue("text_requirements", value)} onDelete={(entryId) => deletePromptEntry("text_requirements", entryId)} /></div>
         </details>
         <details className="prompt-context-panel">
           <summary><div><strong>口吻与结构</strong><small>9 项</small></div><ChevronDown /></summary>
-          <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
+          <div className="prompt-context-grid">{TEXT_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={textLaneLocked} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => changeContentRoute("pillar", event.target.value)} disabled={authoringInputLocked || isGenerating}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => changeContentRoute("goal", event.target.value)} disabled={authoringInputLocked || isGenerating}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
+        <section className="creator-routing"><div className="creator-options"><label><span>内容来源</span><select value={pillar} onChange={(event) => changeContentRoute("pillar", event.target.value)} disabled={textLaneLocked}><option value="relationships">人性关系</option><option value="growth">成长观察</option><option value="culture">东方生活 / 文化</option><option value="wellness">古法养生</option><option value="academy">书院成长</option><option value="daoism">道家文化</option><option value="identity">账号成长</option></select></label><label><span>结尾目标</span><select value={goal} onChange={(event) => changeContentRoute("goal", event.target.value)} disabled={textLaneLocked}><option value="save">收藏</option><option value="consult">咨询</option><option value="visit">到访</option></select></label></div></section>
         {generationState === "TEXT_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>正在生成文字</strong></div></div>}
-        <button className="creator-submit" onClick={generateTextNode} disabled={authoringInputLocked || isGenerating || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
+        <button className="creator-submit" onClick={generateTextNode} disabled={textLaneLocked || (provider && !providerCanAttempt)}>{generationState === "TEXT_GENERATING" ? "正在生成文字…" : textDraft ? "重新生成文字" : "生成文字"}</button>
         {generationState === "FAILED" && generationError?.stage !== "image" && <FailureNotice feedback={generationError} onRetry={generateTextNode} />}
       </section>
 
       {textDraft && <section id="creator-text" className="workbench-section workbench-draft">
         <header><div><strong>文字草稿</strong><small>先改到满意，再确认进入配图；确认前图片调用数 = 0</small></div><span className={`text-gate ${textConfirmed ? "is-confirmed" : ""}`}>{textConfirmed ? "已确认" : "待确认"}</span></header>
         <div className="text-review">
-          <div className="title-candidates" aria-label="标题候选">{textDraft.titles.map((title, index) => <button key={`${index}-${title}`} className={title === textDraft.selected_title ? "is-selected" : ""} disabled={authoringInputLocked || isGenerating} onClick={() => chooseDraftTitle(title)}>{title}</button>)}</div>
-          <label><span>最终标题</span><input value={textDraft.selected_title} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("selected_title", event.target.value)} /></label>
-          <label><span>发布正文 <small>{textDraft.body.replace(/\s/g, "").length} 字</small></span><textarea rows="11" value={textDraft.body} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("body", event.target.value)} /></label>
-          <div className="draft-tags"><span>标签</span>{textDraft.tags.map((tag, index) => <input key={index} value={tag} disabled={authoringInputLocked || isGenerating} onChange={(event) => editTextDraft("tag", event.target.value, index)} />)}</div>
-          <button className="text-confirm-button" type="button" disabled={authoringInputLocked || isGenerating} onClick={confirmTextDraft}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
+          <div className="title-candidates" aria-label="标题候选">{textDraft.titles.map((title, index) => <button key={`${index}-${title}`} className={title === textDraft.selected_title ? "is-selected" : ""} disabled={textLaneLocked} onClick={() => chooseDraftTitle(title)}>{title}</button>)}</div>
+          <label><span>最终标题</span><input value={textDraft.selected_title} disabled={textLaneLocked} onChange={(event) => editTextDraft("selected_title", event.target.value)} /></label>
+          <label><span>发布正文 <small>{textDraft.body.replace(/\s/g, "").length} 字</small></span><textarea rows="11" value={textDraft.body} disabled={textLaneLocked} onChange={(event) => editTextDraft("body", event.target.value)} /></label>
+          <div className="draft-tags"><span>标签</span>{textDraft.tags.map((tag, index) => <input key={index} value={tag} disabled={textLaneLocked} onChange={(event) => editTextDraft("tag", event.target.value, index)} />)}</div>
+          <button className="text-confirm-button" type="button" disabled={textLaneLocked} onClick={confirmTextDraft}>{textConfirmed ? <><Check />文字已确认</> : <><Check />确认文字，进入配图</>}</button>
         </div>
       </section>}
 
@@ -3319,21 +3318,21 @@ function App() {
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
           <div className="production-mode-options">{PRODUCTION_MODES.map((mode) => <label key={mode.id} className={productionMode === mode.id ? "is-selected" : ""}>
-            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={authoringInputLocked || isGenerating} onChange={() => changeProductionModeChoice(mode.id)} />
+            <input type="radio" name="production-mode" value={mode.id} checked={productionMode === mode.id} disabled={imageLaneLocked || isGenerating} onChange={() => changeProductionModeChoice(mode.id)} />
             <span><strong>{mode.label}{mode.id === "smart" && <em>推荐</em>}</strong><small>{mode.fit}</small><b>{mode.result}</b></span>
           </label>)}</div>
         </fieldset>
-        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={authoringInputLocked || isGenerating} onChange={() => changeImageCountModeChoice("AUTO")} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={authoringInputLocked || isGenerating} onChange={() => changeImageCountModeChoice("CUSTOM")} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={authoringInputLocked || isGenerating} onChange={(event) => changeCustomImageCountValue(event.target.value)}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
+        <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("AUTO")} /><span><strong>智能判断</strong><small>建议 {textDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("CUSTOM")} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={imageLaneLocked || isGenerating} onChange={(event) => changeCustomImageCountValue(event.target.value)}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{imageResume?.completed_image_steps != null ? `已保存图片步骤 ${imageResume.completed_image_steps}/${imageResume.total_image_steps}${Number.isInteger(imageResume.max_image_calls) ? `；本轮已调用 ${imageResume.actual_image_calls}/${imageResume.max_image_calls} 次，剩余 ${imageResume.remaining_image_calls} 次${imageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : imageResume?.completed_mother_sheets != null ? `已保留 ${imageResume.completed_mother_sheets}/${imageResume.total_mother_sheets} 张母图，从第 ${imageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
         <section className="action-reference-panel">
-          <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={authoringInputLocked || isGenerating || actionReferences.length >= 3}><ImagePlus />加入</button></div>
+          <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={imageLaneLocked || isGenerating || actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
-          {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.media_ref}><img src={actionReferencePreviewUrls[item.media_ref] || ""} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" disabled={authoringInputLocked || isGenerating} onClick={() => removeActionReference(item.media_ref)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
-          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} disabled={authoringInputLocked || isGenerating} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => changeActionReferenceNote(event.target.value)} /></label>
+          {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.media_ref}><img src={actionReferencePreviewUrls[item.media_ref] || ""} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" disabled={imageLaneLocked || isGenerating} onClick={() => removeActionReference(item.media_ref)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
+          <label><span>参考图说明 · 选填</span><textarea rows="2" value={actionReferenceNote} disabled={imageLaneLocked || isGenerating} placeholder="例如：只参考弓步重心和出拳方向，不参考人物外貌与服装" onChange={(event) => changeActionReferenceNote(event.target.value)} /></label>
           <p>身份仍以小师妹固定图为准；参考图不进账号档案。</p>
         </section>
         <details className="prompt-context-panel prompt-context-panel--image">
           <summary><div><strong>画面设置</strong><small>人物、动作、场景、风格与构图 8 项</small></div><ChevronDown /></summary>
-          <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={authoringInputLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
+          <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={imageLaneLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{imageResume?.completed_image_steps != null ? `图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
         <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (pendingRecoveryDiscoveryOnly ? "正在查询已有结果（0 次图片调用）" : `${productionModeLabel(productionMode)}生成中`) : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : imageResume?.total_image_steps != null ? `继续图片步骤 ${imageResume.completed_image_steps + 1}/${imageResume.total_image_steps}` : imageResume?.total_mother_sheets != null ? `继续母图 ${imageResume.completed_mother_sheets + 1}/${imageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
