@@ -163,7 +163,7 @@ function verifyPriorEnvelope(value, publicKey) {
   return value.payload;
 }
 
-function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit }) {
+function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit }, { allowCandidateRotation = false } = {}) {
   if (payload?.schema !== ATTESTATION_SCHEMA) throw new Error("ATTESTATION_PRIOR_SCHEMA_INVALID");
   const expected = {
     database_id_sha256: sha256(Buffer.from(databaseId)),
@@ -174,6 +174,7 @@ function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId
     candidate_commit: candidateCommit,
   };
   for (const [field, value] of Object.entries(expected)) {
+    if (field === "candidate_commit" && allowCandidateRotation) continue;
     if (payload[field] !== value) throw new Error(`ATTESTATION_PRIOR_BINDING_MISMATCH:${field}`);
   }
   const signedAtMs = Number(payload.signed_at_ms);
@@ -280,6 +281,9 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const environment = required(env, "VERCEL_ENV");
   const candidateCommit = required(env, "XIAOSHIMEI_CANDIDATE_COMMIT").toLowerCase();
   const worstCaseRunBytes = integerEnv(env, "XIAOSHIMEI_WORST_CASE_RUN_BYTES");
+  const onlyIfDue = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE");
+  const allowCandidateRotation = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION");
+  if (onlyIfDue && allowCandidateRotation) throw new Error("ATTESTATION_CANDIDATE_ROTATION_MODE_INVALID");
   if (!/^[0-9a-f]{40}$/.test(candidateCommit)) throw new Error("ATTESTATION_CANDIDATE_INVALID");
   const privateKey = createPrivateKey(required(env, "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY"));
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("ATTESTATION_PRIVATE_KEY_INVALID");
@@ -297,9 +301,14 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     throw new Error("ATTESTATION_PRIOR_INVALID");
   }
   const prior = verifyPriorEnvelope(priorEnvelope, publicKey);
-  if (prior) assertPriorBinding(prior, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit });
+  if (allowCandidateRotation && !prior) throw new Error("ATTESTATION_CANDIDATE_ROTATION_PRIOR_REQUIRED");
+  if (prior) assertPriorBinding(
+    prior,
+    { databaseId, redisUrl, appScope, projectId, environment, candidateCommit },
+    { allowCandidateRotation },
+  );
 
-  if (enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE") && prior) {
+  if (onlyIfDue && prior) {
     const renewLeadMs = integerEnv(env, "XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS");
     if (renewLeadMs > RENEW_MAX_MS) throw new Error("ATTESTATION_RENEW_LEAD_INVALID");
     if (signedAtMs >= prior.hard_expiry_ms) throw new Error("ATTESTATION_PRIOR_EXPIRED");

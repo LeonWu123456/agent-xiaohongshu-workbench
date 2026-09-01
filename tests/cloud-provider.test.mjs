@@ -1076,6 +1076,43 @@ test("D36 scheduled attestor renews inside the lead window but rejects signature
   assert.deepEqual(badSignature.state.commands.map((body) => body[0]), ["TIME", "GET"]);
 });
 
+test("D39 explicit manual attestation rotates only the candidate binding while preserving the signed chain and capacity identity", async () => {
+  const fixture = attestorFixture();
+  const first = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  fixture.state.nowMs += 60_000;
+  fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT = "3".repeat(40);
+  fixture.env.XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION = "true";
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+
+  const rotated = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(rotated.envelope.payload.candidate_commit, "3".repeat(40));
+  assert.equal(rotated.envelope.payload.capacity_generation, first.envelope.payload.capacity_generation);
+  assert.notEqual(rotated.envelope.payload.attestation_generation, first.envelope.payload.attestation_generation);
+  assert.deepEqual(fixture.state.developerRequests.sort(), [
+    "/auditlogs",
+    "/v2/redis/database/db-xiaoshimei-native-test",
+    "/v2/redis/stats/db-xiaoshimei-native-test",
+  ]);
+  assert.equal(JSON.parse(fixture.state.readiness).payload.candidate_commit, "3".repeat(40));
+});
+
+test("D39 scheduled renewal can never combine due mode with candidate rotation authority", async () => {
+  const fixture = attestorFixture();
+  await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT = "3".repeat(40);
+  fixture.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  fixture.env.XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION = "true";
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl }),
+    /ATTESTATION_CANDIDATE_ROTATION_MODE_INVALID/,
+  );
+  assert.equal(fixture.state.commands.length, 0);
+  assert.equal(fixture.state.developerRequests.length, 0);
+});
+
 test("D36 attestor refuses missing audit continuity and changed capacity while reservations remain", async () => {
   const continuity = attestorFixture();
   await buildAndInstallAttestation({ env: continuity.env, fetchImpl: continuity.fetchImpl });

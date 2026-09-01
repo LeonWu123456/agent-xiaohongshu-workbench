@@ -13,7 +13,8 @@ test("D36 attestation workflow is a bounded default-branch schedule plus explici
   assert.match(source, /concurrency:\n  group: xiaoshimei-ledger-attestation\n  cancel-in-progress: false/);
   assert.match(source, /timeout-minutes: 10/);
   assert.match(source, /node-version: 24/);
-  assert.match(source, /vercel_environment:[\s\S]*candidate_commit:[\s\S]*app_scope:/);
+  assert.match(source, /vercel_environment:[\s\S]*candidate_commit:[\s\S]*app_scope:[\s\S]*allow_candidate_rotation:/);
+  assert.match(source, /allow_candidate_rotation:[\s\S]*default: false[\s\S]*type: boolean/);
 });
 
 test("D36 scheduled production uses explicit repository variables and never github.sha", async () => {
@@ -22,6 +23,8 @@ test("D36 scheduled production uses explicit repository variables and never gith
   assert.match(source, /vars\.XIAOSHIMEI_PRODUCTION_COMMIT \|\| inputs\.candidate_commit/);
   assert.match(source, /vars\.XIAOSHIMEI_PRODUCTION_APP_SCOPE \|\| inputs\.app_scope/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: \$\{\{ github\.event_name == 'schedule' && 'true' \|\| 'false' \}\}/);
+  assert.match(source, /XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.allow_candidate_rotation && 'true' \|\| 'false' \}\}/);
+  assert.match(source, /if test "\$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "\$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS: "86400000"/);
   assert.doesNotMatch(source, /github\.sha/i);
 });
