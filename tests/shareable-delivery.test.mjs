@@ -47,7 +47,7 @@ function receipt(role = "operator") {
       evidence_ref: "Evidence/KNOWN_GOOD_ROLLBACK.json",
       evidence_sha256: "c".repeat(64),
       verified_at: new Date(Date.now() - 60_000).toISOString(),
-      provider_readiness: { configured: true, access_required: true, credential_mode: "SERVER_MANAGED", image_ledger_configured: true },
+      provider_readiness: { configured: true, access_required: true, credential_mode: "SERVER_MANAGED", image_ledger_configured: true, image_ledger_attested: true, image_ledger_attestation_status: "READY" },
     },
     same_draft: { initial_draft_id: "draft-one", saved_draft_id: "draft-one", reopened_draft_id: "draft-one", export_source_draft_id: "draft-one" },
   };
@@ -67,6 +67,8 @@ const passingDependencies = {
     authenticated: false,
     authentication_mode: "STUDIO_ACCESS_SESSION",
     image_ledger_configured: true,
+    image_ledger_attested: true,
+    image_ledger_attestation_status: "READY",
     credential_mode: "SERVER_MANAGED",
     key_store: "Vercel Sensitive Environment Variable",
   }),
@@ -182,6 +184,7 @@ test("BYOK or an absent server-managed production key blocks handoff", async () 
     "PROVIDER_ACCESS_NOT_CONFIGURED",
     "PROVIDER_AUTHENTICATION_MODE_INVALID",
     "PROVIDER_PUBLIC_STATUS_INVALID",
+    "PROVIDER_IMAGE_LEDGER_NOT_ATTESTED",
   ]);
   const result = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readProviderReadiness: async () => health });
   assert.equal(result.verdict, "BLOCKED");
@@ -197,6 +200,22 @@ test("provider health must be same-origin JSON without redirects", async () => {
     () => readProviderReadiness(url, async () => new Response("not-json", { status: 200 })),
     (error) => error.code === "PROVIDER_HEALTH_JSON_INVALID",
   );
+});
+
+test("configured-but-unattested Production and rollback both block handoff", async () => {
+  const health = await passingDependencies.readProviderReadiness();
+  health.image_ledger_attested = false;
+  health.image_ledger_attestation_status = "IMAGE_LEDGER_ATTESTATION_MISSING";
+  const production = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readProviderReadiness: async () => health });
+  assert.equal(production.verdict, "BLOCKED");
+  assert.ok(production.errors.some((row) => row.code === "PROVIDER_IMAGE_LEDGER_NOT_ATTESTED"));
+
+  const rollback = receipt();
+  rollback.rollback_verification.provider_readiness.image_ledger_attested = false;
+  rollback.rollback_verification.provider_readiness.image_ledger_attestation_status = "IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH";
+  const rollbackResult = await evaluateDelivery(deliveryInput({ receipt: rollback }), passingDependencies);
+  assert.equal(rollbackResult.verdict, "BLOCKED");
+  assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED"));
 });
 
 test("an old-draft edit/export receipt cannot replace fresh-user creation and text generation", async () => {
@@ -234,6 +253,7 @@ test("a rollback to an unconfigured or unverified deployment blocks handoff", as
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_ACCESS_NOT_REQUIRED"));
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_CREDENTIAL_MODE_INVALID"));
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED"));
 });
 
 test("the rollback target must be distinct and its evidence must bind the same deployment", () => {

@@ -1002,6 +1002,86 @@ test("D36 default env factory verifies the signed Redis sentinel and performs ST
   assert.equal(fixture.commands.filter((body) => body[0] === "MEMORY" && body[1] === "USAGE").length, 2);
 });
 
+test("D55 health proves the exact signed attestation with read-only PING TIME GET and config remains Redis-independent", async () => {
+  const nowMs = 1_788_192_000_000;
+  const fixture = runtimeLedgerFixture({ nowMs, mode: "STEP" });
+  const ledger = createUpstashImageLedgerFromEnv(fixture.env, { fetchImpl: fixture.fetchImpl });
+  const healthHandler = createProviderHandler({
+    env: { ...fixture.env, ARK_API_KEY: "server-secret-test-key" },
+    imageLedger: ledger,
+    nowMs,
+  });
+  const health = responseProbe();
+  await healthHandler({ method: "GET", query: { route: "health" }, headers: {} }, health);
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.body.image_ledger_configured, true);
+  assert.equal(health.body.image_ledger_attested, true);
+  assert.equal(health.body.image_ledger_attestation_status, "READY");
+  assert.ok(health.body.image_ledger_attestation_remaining_seconds > 0);
+  assert.deepEqual(fixture.commands.map((body) => body[0]), ["PING", "TIME", "GET"]);
+
+  const beforeConfig = fixture.commands.length;
+  const config = responseProbe();
+  await healthHandler({ method: "GET", query: { route: "config" }, headers: {} }, config);
+  assert.equal(config.statusCode, 200);
+  assert.equal(config.body.image_ledger_attested, undefined);
+  assert.equal(fixture.commands.length, beforeConfig, "GET config must not touch Redis");
+});
+
+test("D55 health exposes missing expired and deployment-mismatched attestations before a paid click", async () => {
+  const nowMs = 1_788_192_000_000;
+  const missingFixture = runtimeLedgerFixture({ nowMs, mode: "STEP" });
+  const missingFetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body[0] !== "GET") return missingFixture.fetchImpl(url, options);
+    missingFixture.commands.push(body);
+    return { ok: true, json: async () => ({ result: null }) };
+  };
+  const cases = [
+    {
+      expected: "IMAGE_LEDGER_ATTESTATION_MISSING",
+      fixture: missingFixture,
+      env: { ...missingFixture.env, ARK_API_KEY: "server-secret-test-key" },
+      ledger: createUpstashImageLedgerFromEnv(missingFixture.env, { fetchImpl: missingFetch }),
+    },
+  ];
+
+  const seed = runtimeLedgerFixture({ nowMs, mode: "STEP" });
+  const expiredSigned = signedRuntimeAttestation({
+    nowMs,
+    appScope: seed.appScope,
+    overrides: { renew_at_ms: nowMs - 2, hard_expiry_ms: nowMs - 1 },
+  });
+  const expiredFixture = runtimeLedgerFixture({ nowMs, mode: "STEP", attestation: expiredSigned });
+  cases.push({
+    expected: "IMAGE_LEDGER_ATTESTATION_TIME_INVALID",
+    fixture: expiredFixture,
+    env: { ...expiredFixture.env, ARK_API_KEY: "server-secret-test-key" },
+    ledger: createUpstashImageLedgerFromEnv(expiredFixture.env, { fetchImpl: expiredFixture.fetchImpl }),
+  });
+
+  const mismatchFixture = runtimeLedgerFixture({ nowMs, mode: "STEP" });
+  const mismatchEnv = { ...mismatchFixture.env, ARK_API_KEY: "server-secret-test-key", XIAOSHIMEI_CANDIDATE_COMMIT: "9".repeat(40) };
+  cases.push({
+    expected: "IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH",
+    fixture: mismatchFixture,
+    env: mismatchEnv,
+    ledger: createUpstashImageLedgerFromEnv(mismatchEnv, { fetchImpl: mismatchFixture.fetchImpl }),
+  });
+
+  for (const item of cases) {
+    const healthHandler = createProviderHandler({ env: item.env, imageLedger: item.ledger, nowMs });
+    const health = responseProbe();
+    await healthHandler({ method: "GET", query: { route: "health" }, headers: {} }, health);
+    assert.equal(health.statusCode, 200);
+    assert.equal(health.body.configured, true);
+    assert.equal(health.body.image_ledger_configured, true);
+    assert.equal(health.body.image_ledger_attested, false);
+    assert.equal(health.body.image_ledger_attestation_status, item.expected);
+    assert.deepEqual(item.fixture.commands.map((body) => body[0]), ["PING", "TIME", "GET"]);
+  }
+});
+
 test("D37 START accepts sibling environment and inventoried legacy D36 roots while sharing one conservative capacity total", async () => {
   const legacyRoot = `xiaoshimei:image-d36:{${"a".repeat(32)}}`;
   const siblingReadiness = `xiaoshimei:image-d37:{xiaoshimei-studio-v2}:scope:${"b".repeat(32)}:readiness`;

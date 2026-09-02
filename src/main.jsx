@@ -2508,6 +2508,10 @@ function App() {
       requestedDiscoveryOnly: options?.discoveryOnly === true,
       requestedPaidContinuation: options?.paidContinuation === true && paidRecoveryContinuationReady,
     }) === "RECOVERY_CHECK";
+    if (!recoveryCheck && providerServerManaged && !imageLedgerAttested) {
+      setToast("文字生成可用；配图账本尚未就绪，本次没有发起图片调用");
+      return;
+    }
     const imageIntent = recoveryCheck ? "RECOVERY_CHECK" : "START_OR_STEP";
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
@@ -3632,8 +3636,9 @@ function App() {
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={imageLaneLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "RECOVERY_CHECK" ? "先读取已有账本；记录缺失时会调用文字模型重建配图计划" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
-        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "检查恢复状态（不生成图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
-        {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
+        {providerServerManaged && !imageLedgerAttested && <p className="generation-service-note" role="status">文字生成仍可使用；配图服务正在恢复，本次不会发起图片调用。</p>}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "检查恢复状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
       </section>}
     </>;

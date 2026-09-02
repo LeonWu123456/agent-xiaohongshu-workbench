@@ -200,6 +200,38 @@ test("authenticated background config cannot erase a verified business success",
   assert.equal(state.phase, "ACCESS_SESSION_REQUIRED");
 });
 
+test("server-managed config readback preserves the latest live image-ledger attestation truth", () => {
+  let state = createMainAuthState("UNVERIFIED");
+  state = reduceMainAuthState(state, {
+    type: "BACKGROUND_CONFIG",
+    generation: 0,
+    providerMeta: {
+      authenticated: true,
+      access_required: true,
+      credential_mode: "SERVER_MANAGED",
+      image_ledger_attested: false,
+      image_ledger_attestation_status: "IMAGE_LEDGER_ATTESTATION_MISSING",
+    },
+    providerHealth: "ONLINE",
+  });
+  state = reduceMainAuthState(state, {
+    type: "BACKGROUND_CONFIG",
+    generation: 0,
+    providerMeta: { authenticated: true, access_required: true, credential_mode: "SERVER_MANAGED" },
+    providerHealth: "UNVERIFIED",
+  });
+  assert.equal(state.providerMeta.image_ledger_attested, false);
+  assert.equal(state.providerMeta.image_ledger_attestation_status, "IMAGE_LEDGER_ATTESTATION_MISSING");
+
+  const byok = reduceMainAuthState(state, {
+    type: "BACKGROUND_CONFIG",
+    generation: 0,
+    providerMeta: { authenticated: false, access_required: false, credential_mode: "BROWSER_BYOK" },
+    providerHealth: "OFFLINE",
+  });
+  assert.equal(byok.providerMeta.image_ledger_attested, undefined, "a credential-mode change cannot inherit stale server attestation");
+});
+
 test("A to B rejects every late main side effect, including errors, toast and prepared ZIP", async (t) => {
   const scenarios = [
     ["text success", false, { textDraft: "A late text", generationState: "IDLE", toast: "A text done" }],
@@ -399,12 +431,15 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.match(staleBootstrapSource, /setAutosaveRetryRevision\(\(value\) => value \+ 1\)/, "the preserved dirty input must be rescheduled onto the saved pending snapshot");
   assert.match(imageSource, /setGenerationState\s*\(\s*\(current\)\s*=>\s*current === "IMAGE_GENERATING" \? "IDLE" : current\s*\)/, "operation-id finally must settle global busy even after A to B cutover");
   assert.match(imageSource, /const imageIntent = recoveryCheck \? "RECOVERY_CHECK" : "START_OR_STEP";/, "the current click must freeze its own cost intent before BOOTSTRAP changes persisted state");
+  assert.match(imageSource, /if \(!recoveryCheck && providerServerManaged && !imageLedgerAttested\)/, "fresh START and paid STEP must stop before mutation and Provider when live attestation is absent");
   assert.match(imageSource, /setActiveImageIntent\(imageIntent\)/);
   assert.match(imageSource, /finally\s*\{[\s\S]*setActiveImageIntent\(null\)/, "the operation intent must settle with the exact image operation");
   const textSource = namedFunctionSource(mainSource, "generateTextNode");
   assert.match(textSource, /generationState === "IMAGE_GENERATING" \|\| activeImageOperationRef\.current \|\| draftMutationLockRef\.current/, "programmatic and same-frame clicks must not start text while image authority is held");
   assert.match(creatorSource, /activeImageIntent === "RECOVERY_CHECK" \? "正在检查恢复状态（不会生成图片）"/);
   assert.match(creatorSource, /记录缺失时会调用文字模型重建配图计划/);
+  assert.match(creatorSource, /文字生成仍可使用；配图服务正在恢复，本次不会发起图片调用/);
+  assert.match(creatorSource, /pendingRecoveryDiscoveryOnly \? providerCanAttempt : imageProviderCanAttempt/, "zero-image recovery remains available while paid-capable image actions require attestation");
   assert.match(creatorSource, /"正在生成配图（可能产生图片调用）"/, "a fresh START or paid STEP must never be presented as zero-call discovery");
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
 });
