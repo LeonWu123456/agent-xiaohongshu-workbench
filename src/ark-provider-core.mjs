@@ -286,6 +286,34 @@ function strings(value, path, exactLength = null) {
   return value.map((item, index) => nonEmptyString(item, `${path}[${index}]`));
 }
 
+function parsePagePlanWithMissingRootBrace(value) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("]")) return null;
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (const character of trimmed) {
+    if (escaped) { escaped = false; continue; }
+    if (character === "\\" && inString) { escaped = true; continue; }
+    if (character === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (character === "{" || character === "[") { stack.push(character); continue; }
+    if (character === "}" || character === "]") {
+      const expected = character === "}" ? "{" : "[";
+      if (stack.pop() !== expected) return null;
+    }
+  }
+  if (inString || escaped || stack.length !== 1 || stack[0] !== "{") return null;
+  try {
+    const parsed = JSON.parse(`${trimmed}}`);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.pages)
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseFunctionArguments(response, toolName, expectedPromptMarkers = 0) {
   const call = response?.output?.find((item) => item?.type === "function_call" && item?.name === toolName);
   if (!call || typeof call.arguments !== "string") throw new TypeError(`Ark text model did not return ${toolName}`);
@@ -310,6 +338,8 @@ function parseFunctionArguments(response, toolName, expectedPromptMarkers = 0) {
         trailingBraceRepaired = trailingBraceRepaired.slice(0, -1).trimEnd();
         try { return JSON.parse(trailingBraceRepaired); } catch { /* try at most one more surplus brace */ }
       }
+      const missingRootBraceRepaired = parsePagePlanWithMissingRootBrace(repaired);
+      if (missingRootBraceRepaired) return missingRootBraceRepaired;
     }
     const trailingToolMarker = /\s*<\/function>\s*<\/seed:tool_call>\s*$/;
     if (trailingToolMarker.test(repaired)) {

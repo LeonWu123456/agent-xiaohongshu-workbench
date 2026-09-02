@@ -57,6 +57,13 @@ test("page-plan parser removes only the observed Ark trailing tool marker", () =
   assert.throws(() => extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: `${JSON.stringify({ pages: planValue().pages })} unexpected` }] }, 2, input()), /valid JSON/);
 });
 
+test("page-plan parser repairs only one missing root brace after a complete pages array", () => {
+  const raw = JSON.stringify({ pages: planValue().pages }).slice(0, -1);
+  assert.equal(extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: raw }] }, 2, input()).length, 2);
+  assert.throws(() => extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: `${raw.slice(0, -1)} garbage]` }] }, 2, input()), /valid JSON/);
+  assert.throws(() => extractArkPagePlan({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: raw.slice(0, -8) }] }, 2, input()), /valid JSON/);
+});
+
 test("page-plan parser narrowly repairs Ark extra page-array closures and bounded role aliases", () => {
   const pages = structuredClone(planValue().pages);
   pages[0].panels = [
