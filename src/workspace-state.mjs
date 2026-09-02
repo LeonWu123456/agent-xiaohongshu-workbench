@@ -293,18 +293,37 @@ export function activeDraftRecord(value) {
 
 function libraryContentsFromNormalized(workspace) {
   return workspace.drafts
-    .filter((draft) => Boolean(draft.content_package.saved_at) || (
-      /^image-recovery-[0-9a-f]{32}$/.test(draft.draft_id)
-      && draft.pending_image_operation == null
-      && draft.generation_session?.text_confirmed === true
-      && draft.content_package.generation?.source_draft_id === draft.generation_session?.assembled_draft_id
-    ))
-    .map((draft) => ({
-      ...draft.content_package,
-      draft_record_id: draft.draft_id,
-      id: draft.content_package.id || draft.draft_id,
-      saved_at: draft.content_package.saved_at || draft.updated_at,
-    }));
+    .filter((draft) => {
+      const recoveryDraft = /^image-recovery-[0-9a-f]{32}$/.test(draft.draft_id);
+      return Boolean(draft.content_package.saved_at) || (recoveryDraft && (
+        draft.pending_image_operation != null
+        || (
+          draft.generation_session?.text_confirmed === true
+          && draft.content_package.generation?.source_draft_id === draft.generation_session?.assembled_draft_id
+        )
+      ));
+    })
+    .map((draft) => {
+      const pending = draft.pending_image_operation;
+      const confirmedDraft = pending?.operation_snapshot?.confirmed_draft || draft.generation_session?.text_draft || null;
+      const completedPages = Math.max(0, Number(
+        draft.generation_session?.image_resume?.completed_pages
+        ?? pending?.completed_pages
+        ?? 0,
+      ) || 0);
+      return {
+        ...draft.content_package,
+        ...(pending ? {
+          selectedTitle: confirmedDraft?.selected_title || draft.content_package.selectedTitle,
+          visible_pages: completedPages,
+          pending_image_recovery: true,
+          pending_image_recovery_status: pending.protocol_state,
+        } : {}),
+        draft_record_id: draft.draft_id,
+        id: draft.content_package.id || draft.draft_id,
+        saved_at: draft.content_package.saved_at || draft.updated_at,
+      };
+    });
 }
 
 export function libraryContents(value) {
@@ -2009,8 +2028,12 @@ export async function hydrateWorkspaceV3View({ workspace, mediaStore } = {}) {
   // Content refs are projected to blob URLs for the canvas. Authoring-session
   // action references remain stable content-addressed refs so the caller can
   // hydrate previews independently without ever persisting blob URLs. Both
-  // surfaces must nevertheless be present and verified before the view opens.
-  const refs = collectMediaRefs(checked);
+  // Only the active draft is a DOM consumer during this transition. An
+  // inactive historical draft with a missing blob must not freeze a healthy
+  // active draft; selecting that historical draft performs its own hydration
+  // and fails locally before the active authority changes.
+  const activeDraft = checked.drafts.find((draft) => draft.draft_id === checked.active_draft_id);
+  const refs = collectMediaRefs(activeDraft);
   const hydrations = [];
   let released = false;
   const release = () => {
@@ -2084,10 +2107,10 @@ export async function hydrateWorkspaceV3View({ workspace, mediaStore } = {}) {
     };
   }
   const viewWorkspace = structuredClone(checked);
-  viewWorkspace.drafts = viewWorkspace.drafts.map((draft) => ({
+  viewWorkspace.drafts = viewWorkspace.drafts.map((draft) => draft.draft_id === checked.active_draft_id ? ({
     ...draft,
     content_package: replaceWorkspaceMediaRefsForView(draft.content_package, urls),
-  }));
+  }) : draft);
   return {
     ok: true,
     code: "WORKSPACE_V3_VIEW_READY",

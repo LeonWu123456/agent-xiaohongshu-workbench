@@ -1008,6 +1008,7 @@ function App() {
   const [exportState, setExportState] = useState("IDLE");
   const [preparedExport, setPreparedExport] = useState(null);
   const [generationState, setGenerationState] = useState("IDLE");
+  const [activeImageIntent, setActiveImageIntent] = useState(null);
   const [generationError, setGenerationError] = useState(loadGenerationFailure);
   const [textDraft, setTextDraft] = useState(initialGenerationSession?.text_draft || null);
   const [textConfirmed, setTextConfirmed] = useState(Boolean(initialGenerationSession?.text_confirmed));
@@ -1087,7 +1088,7 @@ function App() {
   const imageAuthorityTextDraft = pendingImageOperation?.operation_snapshot?.confirmed_draft || textDraft;
   const workspaceReadOnly = !workspaceReady || workspaceWriteBlocked;
   const authoringInputLocked = workspaceReadOnly || workspaceTransitioning;
-  const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING";
+  const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
   const imageLaneLocked = authoringInputLocked || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
   const draftEditingLocked = workspaceReadOnly || workspaceTransitioning;
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
@@ -2291,6 +2292,10 @@ function App() {
 
   async function generateTextNode() {
     if (authoringInputIsLocked()) return;
+    if (generationState === "IMAGE_GENERATING" || activeImageOperationRef.current || draftMutationLockRef.current) {
+      setToast("配图正在使用当前稿；图片步骤保存完成后才能重新生成文字");
+      return;
+    }
     if (!provider?.generateTextDraft) {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "请打开模型设置，填入自己的火山方舟 API Key 后从当前节点重试。" : "工作台地址没有填错。请确认本机生成服务正在运行，然后从当前节点重试。" });
       return;
@@ -2472,6 +2477,7 @@ function App() {
       requestedDiscoveryOnly: options?.discoveryOnly === true,
       requestedPaidContinuation: options?.paidContinuation === true && paidRecoveryContinuationReady,
     }) === "DISCOVER_ONLY";
+    const imageIntent = discoveryOnly ? "DISCOVER_ONLY" : "START_OR_STEP";
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
     const frozenTextDraft = baseRecord.pending_image_operation?.operation_snapshot?.confirmed_draft || textDraft;
@@ -2479,6 +2485,7 @@ function App() {
     const frozenActionReferences = [...actionReferences];
     const frozenActionReferenceNote = actionReferenceNote;
     draftMutationLockRef.current = { draft_id: sourceDraftId, operation_id: mainOperation.id };
+    setActiveImageIntent(imageIntent);
     setGenerationState("IMAGE_GENERATING");
     clearGenerationFailure();
     setToast("正在固定同稿恢复快照；尚未发起图片调用");
@@ -2896,6 +2903,7 @@ function App() {
         activeImageOperationRef.current = null;
       }
       if (draftMutationLockRef.current?.operation_id === mainOperation.id) draftMutationLockRef.current = null;
+      setActiveImageIntent(null);
       setGenerationState((current) => current === "IMAGE_GENERATING" ? "IDLE" : current);
     }
   }
@@ -3589,8 +3597,8 @@ function App() {
           <summary><div><strong>画面设置</strong><small>人物、动作、场景、风格与构图 8 项</small></div><ChevronDown /></summary>
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={imageLaneLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>每完成一步都会先保存；网络中断时不重做已保存步骤</small></div></div>}
-        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (pendingRecoveryDiscoveryOnly ? "正在查询已有结果（0 次图片调用）" : `${productionModeLabel(productionMode)}生成中`) : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "DISCOVER_ONLY" ? "正在查询已有结果（0 次图片调用）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "DISCOVER_ONLY" ? "只读取已有账本与缓存，不会生成新图片" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "DISCOVER_ONLY" ? "正在查询已有结果（0 次图片调用）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
         {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
       </section>}
@@ -3765,8 +3773,8 @@ function App() {
             <div className="library-grid">{library.map((item) => {
               const status = realityFeedbackStatus(item.reality_feedback);
               return <article className="library-item" key={item.draft_record_id}>
-                <button className="library-card" onClick={() => openDraft(item)}><span>{item.visible_pages} 页</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{REALITY_STATUS_LABELS[status]}</em></button>
-                <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.draft_record_id)}>现实反馈</button>
+                <button className="library-card" onClick={() => openDraft(item)}><span>{item.pending_image_recovery ? `待恢复配图 · 已保存 ${item.visible_pages} 页` : `${item.visible_pages} 页`}</span><strong>{item.selectedTitle}</strong><small>{new Date(item.saved_at).toLocaleString("zh-CN", { hour12: false })}</small><em>{item.pending_image_recovery ? "点击继续原恢复任务" : REALITY_STATUS_LABELS[status]}</em></button>
+                {!item.pending_image_recovery && <button className="library-feedback-action" type="button" onClick={() => setRealityFeedbackId(item.draft_record_id)}>现实反馈</button>}
               </article>;
             })}</div>
           </>}

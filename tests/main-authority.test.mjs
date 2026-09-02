@@ -359,7 +359,7 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.doesNotMatch(namedFunctionSource(mainSource, "authoringInputIsLocked"), /imageOperationDraftId|pending_image_operation/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "workspaceMutationIsLocked"), /imageOperationDraftId|pending_image_operation/);
   assert.match(namedFunctionSource(mainSource, "imageLaneIsLocked"), /imageOperationDraftId:\s*draftMutationLockRef\.current\?\.draft_id/);
-  assert.match(mainSource, /const textLaneLocked = authoringInputLocked \|\| generationState === "TEXT_GENERATING";/);
+  assert.match(mainSource, /const textLaneLocked = authoringInputLocked \|\| generationState === "TEXT_GENERATING" \|\| generationState === "IMAGE_GENERATING";/);
   assert.match(mainSource, /const draftEditingLocked = workspaceReadOnly \|\| workspaceTransitioning;/);
   assert.match(namedFunctionSource(mainSource, "draftMutationIsLocked"), /return workspaceMutationIsLocked\(\)/);
   assert.doesNotMatch(mainSource, /liveDraft\?\.pending_image_operation|latestDraft\?\.pending_image_operation/, "pending assets must not suppress semantic autosave");
@@ -377,7 +377,7 @@ test("pending image authority freezes only the asset lane while text layout save
   for (const handler of ["changeContentRoute", "confirmTextDraft", "changeProductionModeChoice", "changeImageCountModeChoice", "changeCustomImageCountValue", "changeActionReferenceNote"]) {
     assert.match(creatorSource, new RegExp(`(?:${handler}\\s*\\(|(?:onClick|onChange)=\\{${handler}\\})`), `${handler} must be the live JSX writer, not a parked guard`);
   }
-  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must expose only the workspace/text-generation lock");
+  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must expose the workspace and active-generation lock");
   assert.ok(count(creatorSource, /disabled=\{imageLaneLocked \|\| isGenerating/g) >= 7, "asset controls must expose the pending-image lane lock");
 
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
@@ -393,6 +393,13 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.doesNotMatch(staleBootstrapSource, /applyRecord:\s*true/, "a late bootstrap receipt cannot overwrite same-draft input typed while it was awaiting persistence");
   assert.match(staleBootstrapSource, /setAutosaveRetryRevision\(\(value\) => value \+ 1\)/, "the preserved dirty input must be rescheduled onto the saved pending snapshot");
   assert.match(imageSource, /setGenerationState\s*\(\s*\(current\)\s*=>\s*current === "IMAGE_GENERATING" \? "IDLE" : current\s*\)/, "operation-id finally must settle global busy even after A to B cutover");
+  assert.match(imageSource, /const imageIntent = discoveryOnly \? "DISCOVER_ONLY" : "START_OR_STEP";/, "the current click must freeze its own cost intent before BOOTSTRAP changes persisted state");
+  assert.match(imageSource, /setActiveImageIntent\(imageIntent\)/);
+  assert.match(imageSource, /finally\s*\{[\s\S]*setActiveImageIntent\(null\)/, "the operation intent must settle with the exact image operation");
+  const textSource = namedFunctionSource(mainSource, "generateTextNode");
+  assert.match(textSource, /generationState === "IMAGE_GENERATING" \|\| activeImageOperationRef\.current \|\| draftMutationLockRef\.current/, "programmatic and same-frame clicks must not start text while image authority is held");
+  assert.match(creatorSource, /activeImageIntent === "DISCOVER_ONLY" \? "正在查询已有结果（0 次图片调用）"/);
+  assert.match(creatorSource, /"正在生成配图（可能产生图片调用）"/, "a fresh START or paid STEP must never be presented as zero-call discovery");
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
 });
 
@@ -838,6 +845,6 @@ test("durable draft navigation, action references and corrupt-v3 recovery are li
   assert.doesNotMatch(restoreSource, /previousId:\s*null/, "restoring a backup must preserve its durable previous-draft navigation");
 
   const creatorSource = namedFunctionSource(mainSource, "renderCreatorWorkflow");
-  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must remain editable outside workspace and text-generation locks");
+  assert.ok(count(creatorSource, /disabled=\{textLaneLocked\}/g) >= 10, "text controls must remain editable outside workspace and active generation locks");
   assert.ok(count(creatorSource, /disabled=\{imageLaneLocked \|\| isGenerating/g) >= 7, "reference and image-plan controls must share the asset-lane lock");
 });

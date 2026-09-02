@@ -2093,6 +2093,45 @@ test("UI data/blob media materialize before persistence and v3 hydration never e
   assert.deepEqual(failedView.missing_refs.map((item) => item.media_ref), [refs[0]]);
 });
 
+test("boot hydrates only the active draft so one corrupt inactive asset cannot freeze the workbench", async () => {
+  const missingRef = `xiaoshimei-media://sha256/${"d".repeat(64)}`;
+  const healthyContent = content("健康当前稿", "healthy-a");
+  healthyContent.pages = healthyContent.pages.map((page) => ({ ...page, image_style: { ...page.image_style, src: "" } }));
+  const brokenContent = content("缺图旧稿", "broken-b");
+  brokenContent.pages[0].image_style.src = missingRef;
+  const healthy = createDraftRecordV3({ draftId: "healthy-a", contentPackage: healthyContent, createdAt: T0 });
+  const broken = createDraftRecordV3({ draftId: "broken-b", contentPackage: brokenContent, createdAt: T0 });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: healthy.draft_id,
+    drafts: [healthy, broken],
+    legacy_v2_source: null,
+  });
+  let hydrationCalls = 0;
+  const mediaStore = {
+    async hydrateMedia(mediaRef) {
+      hydrationCalls += 1;
+      if (mediaRef === missingRef) throw new TypeError("MEDIA_READBACK_MISSING");
+      return { media_ref: mediaRef, url: `blob:https://studio.example/${hydrationCalls}` };
+    },
+    releaseHydratedMedia() { return true; },
+  };
+  const healthyView = await hydrateWorkspaceV3View({ workspace, mediaStore });
+  assert.equal(healthyView.ok, true);
+  assert.equal(hydrationCalls, 0, "inactive media must not be hydrated during healthy boot");
+  assert.equal(healthyView.workspace.active_draft_id, healthy.draft_id);
+  assert.equal(healthyView.workspace.drafts.find((draft) => draft.draft_id === broken.draft_id).content_package.pages[0].image_style.src, missingRef);
+
+  const switched = activateDraftRecordV3(workspace, broken.draft_id).workspace;
+  const brokenView = await hydrateWorkspaceV3View({ workspace: switched, mediaStore });
+  assert.equal(brokenView.ok, false, "selecting the corrupt draft must fail locally before adoption");
+  assert.equal(brokenView.workspace, null);
+  assert.deepEqual(brokenView.missing_refs, [{ media_ref: missingRef, code: "MEDIA_READBACK_MISSING" }]);
+});
+
 test("v3 image transactions persist media before refs, keep active B unchanged, and atomically finish A or a recovered sibling", async () => {
   const bytes = Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -2427,6 +2466,24 @@ test("an edited source moves PARTIAL into one recovery authority that refresh ca
   assert.equal(moved.target_draft.content_package.body, editedA.content_package.body);
   assert.equal(moved.target_draft.generation_session.text_draft.draft_id, editedText.draft_id);
   assert.equal(moved.recovered_draft.pending_image_operation.completed_image_steps, 1);
+
+  const pendingRecovery = libraryContentsV3(moved.workspace).find((item) => item.draft_record_id === recoveryId);
+  assert.equal(pendingRecovery?.pending_image_recovery, true, "a pending recovery must remain a first-class library entry");
+  assert.equal(pendingRecovery?.pending_image_recovery_status, "PARTIAL");
+  assert.equal(pendingRecovery?.selectedTitle, originalSession.text_draft.selected_title);
+  const foregroundB = createDraftRecordV3({ draftId: "move-active-b", contentPackage: content("B 前台稿", "move-active-b"), createdAt: T0 });
+  const switchedToB = parseWorkspaceEnvelopeV3({
+    ...moved.workspace,
+    active_draft_id: foregroundB.draft_id,
+    previous_draft_id: sourceA.draft_id,
+    drafts: [...moved.workspace.drafts, foregroundB],
+  });
+  assert.equal(libraryContentsV3(switchedToB).some((item) => item.draft_record_id === recoveryId), true, "switching to B must not erase R's only reentry point");
+  const reactivatedRecovery = activateDraftRecordV3(switchedToB, recoveryId).workspace;
+  const reactivatedAuthority = imageOperationAuthorityV3(reactivatedRecovery);
+  assert.equal(reactivatedAuthority.holder_draft_id, recoveryId);
+  assert.equal(reactivatedAuthority.location, "ACTIVE");
+  assert.equal(reactivatedAuthority.record.pending_image_operation.operation_nonce, operationNonce);
 
   const duplicateSource = createDraftRecordV3({
     draftId: moved.target_draft.draft_id,
