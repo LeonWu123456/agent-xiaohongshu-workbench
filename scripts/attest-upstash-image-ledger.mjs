@@ -44,6 +44,7 @@ redis.call('HSET', KEYS[1],
   'live_reservations', live,
   'unfinalized_inventory', inventory)
 redis.call('SET', KEYS[2], ARGV[7])
+if #KEYS == 3 then redis.call('SET', KEYS[3], ARGV[7]) end
 return {'INSTALLED', reserved, live, inventory}
 `;
 
@@ -409,7 +410,9 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const worstCaseRunBytes = integerEnv(env, "XIAOSHIMEI_WORST_CASE_RUN_BYTES");
   const onlyIfDue = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE");
   const allowCandidateRotation = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION");
+  const legacyRuntimeCompat = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT");
   if (onlyIfDue && allowCandidateRotation) throw new Error("ATTESTATION_CANDIDATE_ROTATION_MODE_INVALID");
+  if (legacyRuntimeCompat && environment !== "production") throw new Error("ATTESTATION_LEGACY_RUNTIME_COMPAT_ENV_INVALID");
   if (!/^[0-9a-f]{40}$/.test(candidateCommit)) throw new Error("ATTESTATION_CANDIDATE_INVALID");
   const privateKey = createPrivateKey(required(env, "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY"));
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("ATTESTATION_PRIVATE_KEY_INVALID");
@@ -418,6 +421,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const signedAtMs = await redisTimeMs(redis);
   const root = appRoot(appScope);
   const candidateReadinessKey = readinessKey(appScope, candidateCommit);
+  const legacyReadinessKey = legacyRuntimeCompat ? `${root}:readiness` : "";
   const capacityKey = productCapacityKey();
   const priorRaw = await redis.command(["GET", candidateReadinessKey]);
   let priorEnvelope = null;
@@ -438,10 +442,19 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     if (signedAtMs >= prior.hard_expiry_ms) throw new Error("ATTESTATION_PRIOR_EXPIRED");
     const dueAtMs = prior.renew_at_ms - renewLeadMs;
     if (signedAtMs < dueAtMs) {
+      if (legacyReadinessKey) {
+        if (await redis.command(["GET", legacyReadinessKey]) !== priorRaw) {
+          if (await redis.command(["SET", legacyReadinessKey, priorRaw]) !== "OK"
+            || await redis.command(["GET", legacyReadinessKey]) !== priorRaw) {
+            throw new Error("ATTESTATION_LEGACY_SENTINEL_READBACK_FAILED");
+          }
+        }
+      }
       return {
         status: "ATTESTATION_NOT_DUE",
         public_key_spki_base64: publicKeyDerBase64(privateKey),
         readiness_key: candidateReadinessKey,
+        legacy_readiness_key: legacyReadinessKey || null,
         capacity_key: capacityKey,
         attestation_generation: prior.attestation_generation,
         capacity_generation: prior.capacity_generation,
@@ -541,7 +554,8 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     signature: sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64"),
   };
   const serialized = canonicalJson(envelope);
-  const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, "2", capacityKey, candidateReadinessKey,
+  const readinessKeys = legacyReadinessKey ? [capacityKey, candidateReadinessKey, legacyReadinessKey] : [capacityKey, candidateReadinessKey];
+  const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, String(readinessKeys.length), ...readinessKeys,
     CAPACITY_SCHEMA,
     capacityGeneration,
     attestationGeneration,
@@ -555,6 +569,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     throw new Error("ATTESTATION_SENTINEL_WRITE_FAILED");
   }
   if (await redis.command(["GET", candidateReadinessKey]) !== serialized) throw new Error("ATTESTATION_SENTINEL_READBACK_FAILED");
+  if (legacyReadinessKey && await redis.command(["GET", legacyReadinessKey]) !== serialized) throw new Error("ATTESTATION_LEGACY_SENTINEL_READBACK_FAILED");
   const installedCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
   if (installedCapacity.attestation_generation !== attestationGeneration || installedCapacity.capacity_generation !== capacityGeneration) {
     throw new Error("ATTESTATION_CAPACITY_READBACK_FAILED");
@@ -563,6 +578,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     envelope,
     public_key_spki_base64: publicKeyDerBase64(privateKey),
     readiness_key: candidateReadinessKey,
+    legacy_readiness_key: legacyReadinessKey || null,
     capacity_key: capacityKey,
     control_config_hash: controlConfigHash,
     relevant_audit_set_hash: relevantAuditSetHash,

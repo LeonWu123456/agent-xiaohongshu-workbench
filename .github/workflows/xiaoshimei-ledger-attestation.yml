@@ -26,6 +26,11 @@ on:
         required: true
         default: false
         type: boolean
+      legacy_runtime_compat:
+        description: Mirror this exact Production rollback receipt to the legacy key read by the already-built rollback binary
+        required: true
+        default: false
+        type: boolean
       zero_provider_recovery:
         description: Recover the one D43 false UNKNOWN after exact Redis preimage verification
         required: true
@@ -79,6 +84,7 @@ jobs:
       XIAOSHIMEI_APP_SCOPE: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_APP_SCOPE || inputs.app_scope }}
       XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_candidate_rotation && 'true' || 'false' }}
+      XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT: ${{ github.event_name == 'workflow_dispatch' && inputs.legacy_runtime_compat && 'true' || 'false' }}
       XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS: "86400000"
       XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.zero_provider_recovery && 'true' || 'false' }}
       XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
@@ -110,12 +116,15 @@ jobs:
           fi
           test -n "$XIAOSHIMEI_APP_SCOPE"
           test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true" || test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
+          test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "true" || test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "false"
           test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true" || test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "false"
           if test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi
+          if test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "true"; then test "$GITHUB_EVENT_NAME" = "workflow_dispatch" && test "$VERCEL_ENV" = "production"; fi
           if test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true"; then
             test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
             test "$VERCEL_ENV" = "production"
             test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
+            test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "false"
             test -n "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_RUN_ID"
             test "${#XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_CHECKPOINT_SHA256}" -eq 64
             test -n "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_LOGICAL_STEP_ID"
@@ -130,7 +139,7 @@ jobs:
           set -euo pipefail
           node scripts/attest-upstash-image-ledger.mjs
           if test "$GITHUB_EVENT_NAME" = "schedule"; then
-            XIAOSHIMEI_CANDIDATE_COMMIT="$XIAOSHIMEI_ROLLBACK_COMMIT" node scripts/attest-upstash-image-ledger.mjs
+            XIAOSHIMEI_CANDIDATE_COMMIT="$XIAOSHIMEI_ROLLBACK_COMMIT" XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT=true node scripts/attest-upstash-image-ledger.mjs
           fi
 
       - name: Recover the exact D43 zero-Provider false UNKNOWN

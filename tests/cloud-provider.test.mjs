@@ -955,7 +955,8 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
       if (body[1].endsWith(":readiness")) result = state.readinessByKey.get(body[1]) ?? null;
       else result = state.calibration.get(body[1]) ?? null;
     } else if (body[0] === "SET") {
-      state.calibration.set(body[1], body[2]);
+      if (body[1].endsWith(":readiness")) state.readinessByKey.set(body[1], body[2]);
+      else state.calibration.set(body[1], body[2]);
       result = "OK";
     } else if (body[0] === "MEMORY" && body[1] === "USAGE") result = state.calibrationUsage;
     else if (body[0] === "DEL") {
@@ -964,7 +965,9 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
     } else if (body[0] === "EXISTS") result = state.calibration.has(body[1]) ? 1 : 0;
     else if (body[0] === "HGETALL") result = hashEntries(state.capacity);
     else if (body[0] === "EVAL" && String(body[1]).includes("CAPACITY_ROTATION_BLOCKED")) {
-      const nextGeneration = body[6];
+      const keyCount = Number(body[2]);
+      const argsOffset = 3 + keyCount;
+      const nextGeneration = body[argsOffset + 1];
       const previousGeneration = String(state.capacity.capacity_generation || "");
       if (previousGeneration && previousGeneration !== nextGeneration
         && ["reserved_bytes", "live_reservations", "unfinalized_inventory"].some((key) => Number(state.capacity[key] || 0) !== 0)) {
@@ -972,17 +975,19 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
       } else {
         const preserve = previousGeneration === nextGeneration;
         state.capacity = {
-          schema: body[5],
+          schema: body[argsOffset],
           capacity_generation: nextGeneration,
-          attestation_generation: body[7],
-          capacity_limit_bytes: body[8],
-          headroom_bytes: body[9],
-          worst_case_run_bytes: body[10],
+          attestation_generation: body[argsOffset + 2],
+          capacity_limit_bytes: body[argsOffset + 3],
+          headroom_bytes: body[argsOffset + 4],
+          worst_case_run_bytes: body[argsOffset + 5],
           reserved_bytes: preserve ? state.capacity.reserved_bytes || 0 : 0,
           live_reservations: preserve ? state.capacity.live_reservations || 0 : 0,
           unfinalized_inventory: preserve ? state.capacity.unfinalized_inventory || 0 : 0,
         };
-        state.readinessByKey.set(body[4], body[11]);
+        const serialized = body[argsOffset + 6];
+        state.readinessByKey.set(body[4], serialized);
+        if (keyCount === 3) state.readinessByKey.set(body[5], serialized);
         result = ["INSTALLED", String(state.capacity.reserved_bytes), String(state.capacity.live_reservations), String(state.capacity.unfinalized_inventory)];
       }
     } else throw new Error(`UNEXPECTED_ATTESTOR_COMMAND:${body.join(":")}`);
@@ -1367,6 +1372,26 @@ test("D56 different candidate attestations coexist while preserving one shared c
   assert.equal(JSON.parse(fixture.state.readinessByKey.get(first.readiness_key)).payload.candidate_commit, "2".repeat(40));
   assert.equal(JSON.parse(fixture.state.readinessByKey.get(rotated.readiness_key)).payload.candidate_commit, "3".repeat(40));
   assert.equal(fixture.state.readinessByKey.size, 2);
+});
+
+test("D56 Production rollback mirrors the exact signed envelope for the already-built legacy runtime", async () => {
+  const fixture = attestorFixture();
+  fixture.env.VERCEL_ENV = "production";
+  fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "true";
+  const installed = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(installed.legacy_readiness_key.endsWith(":readiness"), true);
+  assert.notEqual(installed.legacy_readiness_key, installed.readiness_key);
+  assert.equal(fixture.state.readinessByKey.get(installed.legacy_readiness_key), fixture.state.readinessByKey.get(installed.readiness_key));
+
+  fixture.state.readinessByKey.delete(installed.legacy_readiness_key);
+  fixture.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  fixture.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+  const repaired = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(repaired.status, "ATTESTATION_NOT_DUE");
+  assert.equal(fixture.state.readinessByKey.get(installed.legacy_readiness_key), fixture.state.readinessByKey.get(installed.readiness_key));
+  assert.equal(fixture.state.developerRequests.length, 0, "legacy mirror repair must not call the Developer API");
 });
 
 test("D39 scheduled renewal can never combine due mode with candidate rotation authority", async () => {

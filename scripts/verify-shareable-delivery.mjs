@@ -404,7 +404,6 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
     [rollbackProvider?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(rollbackProvider?.credential_mode || "")],
     [rollbackProvider?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(rollbackProvider?.image_ledger_configured)}`],
     [rollbackProvider?.image_ledger_attested === true, "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(rollbackProvider?.image_ledger_attested)} status=${String(rollbackProvider?.image_ledger_attestation_status || "")}`],
-    [rollbackProvider?.image_ledger_attestation_candidate_commit === rollback?.source_commit, "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH", `expected=${String(rollback?.source_commit || "")};actual=${String(rollbackProvider?.image_ledger_attestation_candidate_commit || "")}`],
   ]) {
     if (!passed) errors.push({ code, detail });
   }

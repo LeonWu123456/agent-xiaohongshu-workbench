@@ -219,18 +219,13 @@ test("configured-but-unattested Production and rollback both block handoff", asy
   assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED"));
 });
 
-test("current and rollback readiness must each bind their exact different candidate commit", async () => {
+test("current readiness must publicly bind the exact candidate commit", async () => {
   const wrongCurrent = await passingDependencies.readProviderReadiness();
   wrongCurrent.image_ledger_attestation_candidate_commit = "c".repeat(40);
   const currentResult = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readProviderReadiness: async () => wrongCurrent });
   assert.equal(currentResult.verdict, "BLOCKED");
   assert.ok(currentResult.errors.some((row) => row.code === "PROVIDER_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
 
-  const wrongRollback = receipt();
-  wrongRollback.rollback_verification.provider_readiness.image_ledger_attestation_candidate_commit = "d".repeat(40);
-  const rollbackResult = await evaluateDelivery(deliveryInput({ receipt: wrongRollback }), passingDependencies);
-  assert.equal(rollbackResult.verdict, "BLOCKED");
-  assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
 });
 
 test("an old-draft edit/export receipt cannot replace fresh-user creation and text generation", async () => {

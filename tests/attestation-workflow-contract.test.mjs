@@ -13,8 +13,9 @@ test("D36 attestation workflow is a bounded default-branch schedule plus explici
   assert.match(source, /concurrency:\n  group: xiaoshimei-ledger-attestation\n  cancel-in-progress: false/);
   assert.match(source, /timeout-minutes: 10/);
   assert.match(source, /node-version: 24/);
-  assert.match(source, /vercel_environment:[\s\S]*candidate_commit:[\s\S]*app_scope:[\s\S]*allow_candidate_rotation:/);
+  assert.match(source, /vercel_environment:[\s\S]*candidate_commit:[\s\S]*app_scope:[\s\S]*allow_candidate_rotation:[\s\S]*legacy_runtime_compat:/);
   assert.match(source, /allow_candidate_rotation:[\s\S]*default: false[\s\S]*type: boolean/);
+  assert.match(source, /legacy_runtime_compat:[\s\S]*default: false[\s\S]*type: boolean/);
   assert.match(source, /zero_provider_recovery:[\s\S]*default: false[\s\S]*type: boolean/);
 });
 
@@ -26,9 +27,10 @@ test("D36 scheduled production uses explicit repository variables and never gith
   assert.match(source, /vars\.XIAOSHIMEI_PRODUCTION_APP_SCOPE \|\| inputs\.app_scope/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: \$\{\{ github\.event_name == 'schedule' && 'true' \|\| 'false' \}\}/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.allow_candidate_rotation && 'true' \|\| 'false' \}\}/);
+  assert.match(source, /XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.legacy_runtime_compat && 'true' \|\| 'false' \}\}/);
   assert.match(source, /if test "\$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "\$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi/);
   assert.match(source, /if test "\$GITHUB_EVENT_NAME" = "schedule"; then[\s\S]*test "\$\{#XIAOSHIMEI_ROLLBACK_COMMIT\}" -eq 40[\s\S]*test "\$XIAOSHIMEI_ROLLBACK_COMMIT" != "\$XIAOSHIMEI_CANDIDATE_COMMIT"/);
-  assert.match(source, /node scripts\/attest-upstash-image-ledger\.mjs[\s\S]*if test "\$GITHUB_EVENT_NAME" = "schedule"; then[\s\S]*XIAOSHIMEI_CANDIDATE_COMMIT="\$XIAOSHIMEI_ROLLBACK_COMMIT" node scripts\/attest-upstash-image-ledger\.mjs/);
+  assert.match(source, /node scripts\/attest-upstash-image-ledger\.mjs[\s\S]*if test "\$GITHUB_EVENT_NAME" = "schedule"; then[\s\S]*XIAOSHIMEI_CANDIDATE_COMMIT="\$XIAOSHIMEI_ROLLBACK_COMMIT" XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT=true node scripts\/attest-upstash-image-ledger\.mjs/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS: "86400000"/);
   assert.doesNotMatch(source, /github\.sha/i);
 });
