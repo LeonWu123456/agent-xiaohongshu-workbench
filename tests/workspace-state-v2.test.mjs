@@ -2353,8 +2353,9 @@ test("an edited source moves PARTIAL into one recovery authority that refresh ca
     updatedAt: "2026-09-02T12:02:00.000Z",
   });
   assert.equal(advanced.action, "CONTINUE");
-  assert.equal(advanced.target_draft.draft_id, recoveryId);
-  assert.equal(advanced.target_draft.pending_image_operation.completed_image_steps, 2);
+  assert.equal(advanced.target_draft.draft_id, sourceA.draft_id);
+  assert.equal(advanced.recovered_draft.draft_id, recoveryId);
+  assert.equal(advanced.recovered_draft.pending_image_operation.completed_image_steps, 2);
   assert.equal(advanced.workspace.drafts.filter((draft) => draft.draft_id === recoveryId).length, 1);
   assert.equal(advanced.workspace.drafts.find((draft) => draft.draft_id === sourceA.draft_id).content_package.body, editedA.content_package.body);
   assert.equal(advanced.workspace.drafts.find((draft) => draft.draft_id === sourceA.draft_id).pending_image_operation, null, "advancing the recovery lane must atomically retire a legacy duplicate source owner");
@@ -2373,8 +2374,8 @@ test("an edited source moves PARTIAL into one recovery authority that refresh ca
     coordinator,
     mediaStore: null,
     draftId: recoveryId,
-    expectedDraftToken: draftRecordToken(advanced.target_draft),
-    operationSnapshot: advanced.target_draft,
+    expectedDraftToken: draftRecordToken(advanced.recovered_draft),
+    operationSnapshot: advanced.recovered_draft,
     recoveredDraftId: recoveryId,
     contentPackage: finalContent,
     mediaDelta: [],
@@ -2394,8 +2395,8 @@ test("an edited source moves PARTIAL into one recovery authority that refresh ca
     coordinator,
     mediaStore: null,
     draftId: recoveryId,
-    expectedDraftToken: draftRecordToken(advanced.target_draft),
-    operationSnapshot: advanced.target_draft,
+    expectedDraftToken: draftRecordToken(advanced.recovered_draft),
+    operationSnapshot: advanced.recovered_draft,
     recoveredDraftId: recoveryId,
     contentPackage: finalContent,
     mediaDelta: [],
