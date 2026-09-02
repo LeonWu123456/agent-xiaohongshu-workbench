@@ -17,6 +17,7 @@
     "test": "node --test test/direct-ai.test.mjs test/account-workspace.test.mjs test/agent-runner.test.mjs test/output-archive.test.mjs test/render-cards.test.mjs test/viral-filter.test.mjs test/workspace-editor.test.mjs test/xhs-draft-verifier.test.mjs test/canonical-generated-assets.test.mjs tests/*.test.mjs",
     "setup": "node scripts/verify-runtime.mjs",
     "verify:runtime": "node scripts/verify-runtime.mjs",
+    "verify:shareable-delivery": "node scripts/verify-shareable-delivery.mjs",
     "provider:key:rotate": "node scripts/rotate-provider-key.mjs",
     "make:desktop-icon": "node scripts/make-desktop-icon.mjs",
     "make:mac-icon": "node scripts/make-mac-icon.mjs",

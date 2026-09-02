@@ -1,5 +1,24 @@
 # 小师妹 Studio｜GitHub → Vercel 生产手册
 
+## 给小师妹入口前的硬门
+
+“公网能打开”和“可以交给小师妹”是两件事。生产构建、稳定别名和同稿旅程完成后，必须从 exact clean candidate 运行：
+
+```bash
+npm run verify:shareable-delivery -- \
+  --url https://xiaoshimei-full-workbench.vercel.app/ \
+  --expected-commit <exact-40-char-commit> \
+  --candidate-root <clean-worktree> \
+  --receipt <operator-journey.json>
+```
+
+- `LOCAL_ONLY`：只在当前机器可用，绝不能把地址发给另一台设备。
+- `BLOCKED`：HTTPS/DNS、候选身份、静态制品或同稿旅程至少一项不成立。
+- `HANDOFF_READY`：公共稳定入口、exact committed build 和 operator 同稿旅程已经一致；此时只能说“可以发给她试用”。
+- `CONSUMER_VALIDATED`：只能由小师妹本人在独立设备上的直接反馈证明；本判定器永远不能签发这个结论，自填 `actor=xiaoshimei` 反而会被拒绝。
+
+判定器不生成旅程证据，也不授予推送、Preview、Production、回滚或外部发布 Authority。完整回执 schema 由 `tests/shareable-delivery.test.mjs` 锁定。
+
 更新时间：2026-08-31
 
 ## 单一权威链
