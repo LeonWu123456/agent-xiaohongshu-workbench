@@ -714,13 +714,14 @@ export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscove
 }
 
 export function currentWorkbenchProjection({ contentTitle, confirmedTitle, textConfirmed, hasConfirmedContent, visiblePageCount, generatedImageCount, currentInLibrary, topic } = {}) {
-  const confirmed = Boolean(textConfirmed && String(confirmedTitle || "").trim());
-  if (confirmed && !hasConfirmedContent) {
+  const textDraftTitle = String(confirmedTitle || "").trim();
+  if (textDraftTitle && !hasConfirmedContent) {
+    const status = textConfirmed ? "文字已确认 · 等待配图" : "文字已生成 · 等待确认";
     return Object.freeze({
-      title: String(confirmedTitle).trim(),
+      title: textDraftTitle,
       pageCount: 0,
-      headerStatus: "文字已确认 · 等待配图",
-      libraryStatus: "文字已确认 · 等待配图",
+      headerStatus: status,
+      libraryStatus: status,
       saved: false,
     });
   }

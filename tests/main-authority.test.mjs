@@ -445,6 +445,19 @@ test("one current-workbench projection keeps the compose header and asset librar
   });
   assert.deepEqual(input, before, "the library projection must not mutate DraftRecord or authoring state");
 
+  assert.deepEqual(currentWorkbenchProjection({
+    confirmedTitle: "雨天只整理书桌一角",
+    textConfirmed: false,
+    hasConfirmedContent: false,
+    topic: "雨天只整理书桌这一小块",
+  }), {
+    title: "雨天只整理书桌一角",
+    pageCount: 0,
+    headerStatus: "文字已生成 · 等待确认",
+    libraryStatus: "文字已生成 · 等待确认",
+    saved: false,
+  }, "an edited text draft must not be misreported as an unnamed draft waiting for generation");
+
   assert.deepEqual(currentWorkbenchProjection({ topic: "一段新原文" }), {
     title: "未命名新稿",
     pageCount: 0,
