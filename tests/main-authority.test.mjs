@@ -464,10 +464,13 @@ test("every persisted pending recovery needs a truthful recovery check before a 
   assert.match(imageSource, /error\?\.intentionalStop === true && error\?\.checkpointPersisted === true/);
   assert.match(imageSource, /imageRecoveryResultMessage\s*\(/);
   assert.match(imageRecoveryResultMessage({ requestModes: ["DISCOVER"], upstreamCalls: 0 }), /只读取了已有账本与缓存，没有调用模型/);
+  assert.match(imageRecoveryResultMessage({ requestModes: ["DISCOVER", "START"], upstreamCalls: 0 }), /只读取了已有账本与缓存，没有调用模型/, "a cached START must not be reported as a text-model call");
   const rebuiltMessage = imageRecoveryResultMessage({ requestModes: ["DISCOVER", "START"], upstreamCalls: 1 });
   assert.match(rebuiltMessage, /已调用文字模型重建配图计划/);
   assert.match(rebuiltMessage, /没有调用图片模型/);
   assert.doesNotMatch(rebuiltMessage, /只读取/);
+  assert.match(imageSource, /let observedUpstreamCalls = 0/);
+  assert.match(imageSource, /imageRecoveryResultMessage\(\{ upstreamCalls: observedUpstreamCalls \}\)/, "intentional stop must use the observed runtime call count");
   assert.match(imageSource, /const observedRequestModes = \[initialRequest\.mode\]/);
   assert.match(imageSource, /upstream_calls: Number\(response\.upstream_calls \?\? response\.progress\?\.upstream_calls \?\? 0\)/);
   assert.match(imageSource, /upstream_calls: Number\(providerResult\.upstream_calls \?\? providerResult\.progress\?\.upstream_calls \?\? 0\)/, "direct UNKNOWN and ERROR returns must still expose the runtime readback");

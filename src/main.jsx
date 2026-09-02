@@ -725,8 +725,8 @@ export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscove
     : "RECOVERY_CHECK";
 }
 
-export function imageRecoveryResultMessage({ requestModes = [], upstreamCalls = 0 } = {}) {
-  const rebuiltPlan = requestModes.includes("START") || Number(upstreamCalls) > 0;
+export function imageRecoveryResultMessage({ upstreamCalls = 0 } = {}) {
+  const rebuiltPlan = Number(upstreamCalls) > 0;
   return rebuiltPlan
     ? "恢复检查已完成；已调用文字模型重建配图计划，但没有调用图片模型"
     : "恢复查询已完成；只读取了已有账本与缓存，没有调用模型";
@@ -2700,8 +2700,10 @@ function App() {
       });
       activeImageOperationRef.current = imageOperation;
       const observedRequestModes = [initialRequest.mode];
+      let observedUpstreamCalls = 0;
 
       const consumeImageResponse = async (response) => {
+        observedUpstreamCalls = Math.max(observedUpstreamCalls, Number(response.upstream_calls ?? response.progress?.upstream_calls ?? 0));
         const currentOperation = activeImageOperationRef.current;
         if (!currentOperation || currentOperation.operation_id !== imageOperation.operation_id) {
           return { action: "STOP", checkpointPersisted: false, code: "IMAGE_OPERATION_CONTEXT_MISSING" };
@@ -2840,8 +2842,7 @@ function App() {
             });
             setGenerationState("IDLE");
             setToast(imageRecoveryResultMessage({
-              requestModes: observedRequestModes,
-              upstreamCalls: Number(response.upstream_calls ?? response.progress?.upstream_calls ?? 0),
+              upstreamCalls: observedUpstreamCalls,
             }));
           });
           return { action: "STOP", checkpointPersisted: true, code: "IMAGE_DISCOVERY_CHECKPOINT_PERSISTED" };
@@ -2852,6 +2853,7 @@ function App() {
       };
 
       let providerResult = await provider.generateImages(initialRequest, consumeImageResponse);
+      observedUpstreamCalls = Math.max(observedUpstreamCalls, Number(providerResult.upstream_calls ?? providerResult.progress?.upstream_calls ?? 0));
       mainAuthority.commit(mainOperation, () => setImageOperationReadback({
         active_draft_id: imageOperation.source_draft_id,
         operation_nonce: imageOperation.operation_id,
@@ -2864,6 +2866,7 @@ function App() {
         const start = await rebuildPendingImageStartV3({ pendingImageOperation: baseRecord.pending_image_operation, mediaStore });
         observedRequestModes.push(start.mode);
         providerResult = await provider.generateImages(start, consumeImageResponse);
+        observedUpstreamCalls = Math.max(observedUpstreamCalls, Number(providerResult.upstream_calls ?? providerResult.progress?.upstream_calls ?? 0));
         mainAuthority.commit(mainOperation, () => setImageOperationReadback({
           active_draft_id: imageOperation.source_draft_id,
           operation_nonce: imageOperation.operation_id,
@@ -2907,7 +2910,7 @@ function App() {
       if (error?.requiresAccess) dispatchAuth({ type: "BUSINESS_AUTH_REQUIRED", generation: authGeneration, message: "访问会话已失效，请重新输入访问码" });
       if (error?.intentionalStop === true && error?.checkpointPersisted === true && error?.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT") {
         const stopMessage = recoveryCheck
-          ? imageRecoveryResultMessage({ requestModes: observedRequestModes })
+          ? imageRecoveryResultMessage({ upstreamCalls: observedUpstreamCalls })
           : "图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费";
         const settled = mainAuthority.commit(mainOperation, () => {
           setGenerationState("IDLE");
