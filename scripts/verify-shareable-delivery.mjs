@@ -9,6 +9,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SHA40 = /^[0-9a-f]{40}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+const VERCEL_DEPLOYMENT_ID = /^dpl_[A-Za-z0-9]+$/;
 export const DELIVERY_TARGET = "https://xiaoshimei-full-workbench.vercel.app/";
 export const DEFAULT_ALTERNATE_ENTRY_URL = "https://xiaoshimei-full-workbench-892350620-5733s-projects.vercel.app/";
 const ALTERNATE_ENTRY_HOST_SUFFIX = "-892350620-5733s-projects.vercel.app";
@@ -357,6 +359,50 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
   }
   if (receipt.fresh_user?.image_calls !== 0) {
     errors.push({ code: "FRESH_USER_IMAGE_CALLS_NOT_ZERO", detail: String(receipt.fresh_user?.image_calls) });
+  }
+  const productionDeploymentId = receipt.deployment?.production_deployment_id;
+  const rollbackDeploymentId = receipt.deployment?.rollback_deployment_id;
+  if (!VERCEL_DEPLOYMENT_ID.test(String(productionDeploymentId || ""))) {
+    errors.push({ code: "PRODUCTION_DEPLOYMENT_ID_INVALID", detail: String(productionDeploymentId || "") });
+  }
+  if (!VERCEL_DEPLOYMENT_ID.test(String(rollbackDeploymentId || ""))) {
+    errors.push({ code: "ROLLBACK_DEPLOYMENT_ID_INVALID", detail: String(rollbackDeploymentId || "") });
+  } else if (rollbackDeploymentId === productionDeploymentId) {
+    errors.push({ code: "ROLLBACK_DEPLOYMENT_NOT_DISTINCT", detail: String(rollbackDeploymentId) });
+  }
+  const rollback = receipt.rollback_verification;
+  if (rollback?.deployment_id !== rollbackDeploymentId) {
+    errors.push({ code: "ROLLBACK_VERIFICATION_ID_MISMATCH", detail: String(rollback?.deployment_id || "") });
+  }
+  if (!SHA40.test(String(rollback?.source_commit || ""))) {
+    errors.push({ code: "ROLLBACK_SOURCE_COMMIT_INVALID", detail: String(rollback?.source_commit || "") });
+  }
+  if (rollback?.ready_state !== "READY") {
+    errors.push({ code: "ROLLBACK_NOT_READY", detail: String(rollback?.ready_state || "") });
+  }
+  if (rollback?.action !== "promote_existing_deployment") {
+    errors.push({ code: "ROLLBACK_ACTION_NOT_EXECUTABLE", detail: String(rollback?.action || "") });
+  }
+  if (typeof rollback?.evidence_ref !== "string" || !/^Evidence\/[A-Za-z0-9._-]+\.json$/.test(rollback.evidence_ref)) {
+    errors.push({ code: "ROLLBACK_EVIDENCE_REF_INVALID", detail: String(rollback?.evidence_ref || "") });
+  }
+  if (!SHA256.test(String(rollback?.evidence_sha256 || ""))) {
+    errors.push({ code: "ROLLBACK_EVIDENCE_HASH_INVALID", detail: String(rollback?.evidence_sha256 || "") });
+  }
+  const rollbackObservedAt = Date.parse(rollback?.verified_at);
+  if (!Number.isFinite(rollbackObservedAt)) {
+    errors.push({ code: "ROLLBACK_VERIFICATION_TIME_INVALID", detail: String(rollback?.verified_at || "") });
+  } else if (rollbackObservedAt > observedAt + MAX_CLOCK_SKEW_MS) {
+    errors.push({ code: "ROLLBACK_VERIFICATION_AFTER_JOURNEY", detail: String(rollback.verified_at) });
+  }
+  const rollbackProvider = rollback?.provider_readiness;
+  for (const [passed, code, detail] of [
+    [rollbackProvider?.configured === true, "ROLLBACK_PROVIDER_KEY_MISSING", `configured=${String(rollbackProvider?.configured)}`],
+    [rollbackProvider?.access_required === true, "ROLLBACK_ACCESS_NOT_REQUIRED", `access_required=${String(rollbackProvider?.access_required)}`],
+    [rollbackProvider?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(rollbackProvider?.credential_mode || "")],
+    [rollbackProvider?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(rollbackProvider?.image_ledger_configured)}`],
+  ]) {
+    if (!passed) errors.push({ code, detail });
   }
   const ids = [receipt.same_draft?.initial_draft_id, receipt.same_draft?.saved_draft_id, receipt.same_draft?.reopened_draft_id, receipt.same_draft?.export_source_draft_id];
   if (ids.some((value) => typeof value !== "string" || !value.trim()) || new Set(ids).size !== 1) {

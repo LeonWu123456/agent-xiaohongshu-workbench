@@ -18,6 +18,7 @@ npm run verify:shareable-delivery -- \
 - `BLOCKED`：HTTPS/DNS、候选身份、静态制品、Provider server-managed readiness、fresh-user 新建/文字生成或同稿旅程至少一项不成立。
 - `HANDOFF_READY`：公共稳定入口、exact committed build、public health 的 server-managed/access/ledger 状态、fresh-user 新建与文字生成、operator 同稿旅程全部一致；此时只能说“可以发给她试用”。
 - 生成服务硬门：稳定域 `/api/provider/health` 必须返回 `configured=true`、`credential_mode=SERVER_MANAGED`、`key_store=Vercel Sensitive Environment Variable`、`access_required=true`、`access_configured=true`、`authentication_mode=STUDIO_ACCESS_SESSION`、`authenticated=false`、`status=ACCESS_SESSION_REQUIRED`、`image_ledger_configured=true`。`AWAITING_BYOK`、`BROWSER_BYOK`、当前标签页 `sessionStorage`、缺访问合同或缺图片账本一律拒绝交付。
+- 回滚硬门：operator 回执必须绑定一个不同于当前 Production 的已知可用 deployment；它须能通过 `promote_existing_deployment` 直接恢复，且已有生产回执证明 `READY + SERVER_MANAGED + access_required + image_ledger_configured`。回执同时记录 rollback deployment、来源 commit、验证时间、证据路径与 SHA-256。仅写“上一版”或指向已知 Provider 未配置的部署一律 `BLOCKED`。
 - 唯一公网真相：判定器固定检查 Vercel 自动项目别名，并要求传入 exact promoted deployment URL；可继续追加最近 Preview。备用入口只能被 Vercel SSO/401/403/404/410 阻断，或重定向回稳定域。任一备用地址直接返回 2xx 或跳向第三处，均以 `ALTERNATE_PUBLIC_ENTRY_ACTIVE` / `ALTERNATE_ENTRY_REDIRECT_UNSAFE` 拒绝交付。
 - `CONSUMER_VALIDATED`：只能由小师妹本人在独立设备上的直接反馈证明；本判定器永远不能签发这个结论，自填 `actor=xiaoshimei` 反而会被拒绝。
 

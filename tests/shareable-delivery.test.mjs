@@ -36,8 +36,19 @@ function receipt(role = "operator") {
     source_commit: commit,
     observed_at: new Date().toISOString(),
     actor: { role, identity: role === "xiaoshimei" ? "xiaoshimei" : "release-operator" },
+    deployment: { production_deployment_id: "dpl_current123", rollback_deployment_id: "dpl_rollback456" },
     steps: { open: true, access: true, edit: true, save: true, reopen: true, copy: true, download: true },
     fresh_user: { new_draft: true, generate_text: true, text_draft_id: "text-draft-new", body_length: 294, tag_count: 5, image_calls: 0 },
+    rollback_verification: {
+      deployment_id: "dpl_rollback456",
+      source_commit: "b".repeat(40),
+      ready_state: "READY",
+      action: "promote_existing_deployment",
+      evidence_ref: "Evidence/KNOWN_GOOD_ROLLBACK.json",
+      evidence_sha256: "c".repeat(64),
+      verified_at: new Date(Date.now() - 60_000).toISOString(),
+      provider_readiness: { configured: true, access_required: true, credential_mode: "SERVER_MANAGED", image_ledger_configured: true },
+    },
     same_draft: { initial_draft_id: "draft-one", saved_draft_id: "draft-one", reopened_draft_id: "draft-one", export_source_draft_id: "draft-one" },
   };
 }
@@ -199,6 +210,39 @@ test("an old-draft edit/export receipt cannot replace fresh-user creation and te
   assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TEXT_BODY_EMPTY"));
   assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TAGS_EMPTY"));
   assert.ok(result.errors.some((row) => row.code === "FRESH_USER_IMAGE_CALLS_NOT_ZERO"));
+});
+
+test("a rollback to an unconfigured or unverified deployment blocks handoff", async () => {
+  const broken = receipt();
+  broken.deployment.rollback_deployment_id = "dpl_previousBroken";
+  broken.rollback_verification = {
+    deployment_id: "dpl_previousBroken",
+    source_commit: "not-a-commit",
+    ready_state: "READY",
+    action: "promote_existing_deployment",
+    evidence_ref: "notes.txt",
+    evidence_sha256: "not-a-hash",
+    verified_at: broken.observed_at,
+    provider_readiness: { configured: false, access_required: false, credential_mode: "BROWSER_BYOK", image_ledger_configured: false },
+  };
+  const result = await evaluateDelivery(deliveryInput({ receipt: broken }), passingDependencies);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_SOURCE_COMMIT_INVALID"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_EVIDENCE_REF_INVALID"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_EVIDENCE_HASH_INVALID"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_PROVIDER_KEY_MISSING"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_ACCESS_NOT_REQUIRED"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_CREDENTIAL_MODE_INVALID"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED"));
+});
+
+test("the rollback target must be distinct and its evidence must bind the same deployment", () => {
+  const same = receipt();
+  same.deployment.rollback_deployment_id = same.deployment.production_deployment_id;
+  same.rollback_verification.deployment_id = "dpl_anotherTarget";
+  const result = validateJourneyReceipt(same, { targetUrl: url, expectedCommit: commit });
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_DEPLOYMENT_NOT_DISTINCT"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_VERIFICATION_ID_MISMATCH"));
 });
 
 test("operator same-draft journey grants HANDOFF_READY only", async () => {
