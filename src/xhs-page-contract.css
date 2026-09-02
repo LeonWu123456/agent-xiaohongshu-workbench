@@ -112,6 +112,13 @@
 .html-page[data-panel-count="2"] .html-page__panels { grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .html-page[data-panel-count="3"] .html-page__panels { grid-template-rows: repeat(3, minmax(0, 1fr)); }
 .html-page[data-panel-count="4"] .html-page__panels { grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 2cqw; }
+/* editorial-notes must visibly privilege its lead instead of masquerading as
+   the equal-row spatial list. Keep the hierarchy in CSS so preview and export
+   share the same geometry authority. */
+.html-page[data-layout="editorial-notes"][data-panel-count="2"] .html-page__panels {
+  grid-template-rows: minmax(0, 1.18fr) minmax(0, .82fr);
+  gap: 1.8cqw;
+}
 
 .html-page__panel,
 .html-page__panel:nth-child(n),
@@ -229,6 +236,11 @@
 .html-page[data-panel-count="2"] .html-page__panel .html-page__image { width: 29.25cqw; }
 .html-page[data-panel-count="3"] .html-page__panel .html-page__image { width: 21.75cqw; }
 .html-page[data-panel-count="4"] .html-page__panel .html-page__image { width: 15.75cqw; }
+.html-page[data-layout="editorial-notes"][data-panel-count="2"] .html-page__panel:first-child .html-page__image { width: 34.5cqw; }
+.html-page[data-layout="editorial-notes"][data-panel-count="2"] .html-page__panel:last-child .html-page__image { width: 23.5cqw; }
+.html-page[data-layout="editorial-notes"][data-panel-count="2"] .html-page__panel:first-child .html-page__panel-copy h2 {
+  font-size: calc(var(--xsm-section-size) * 1.12);
+}
 
 .html-page__essay {
   position: relative;

@@ -174,6 +174,9 @@ test("published pages use 3:4 white art, opposite-edge copy alignment, orange de
   assert.match(cssSource, /html-page__title-phrase\.is-phrase-breakable[\s\S]*white-space: normal/);
   assert.match(cssSource, /data-panel-count="3"[\s\S]*width: 21\.75cqw/);
   assert.doesNotMatch(cssSource, /data-panel-count="3"[^\n]*height:/);
+  assert.match(cssSource, /data-layout="editorial-notes"\]\[data-panel-count="2"[\s\S]*grid-template-rows: minmax\(0, 1\.18fr\) minmax\(0, \.82fr\)/);
+  assert.match(cssSource, /data-layout="editorial-notes"\]\[data-panel-count="2"[\s\S]*first-child \.html-page__image \{ width: 34\.5cqw/);
+  assert.match(cssSource, /data-layout="editorial-notes"\]\[data-panel-count="2"[\s\S]*last-child \.html-page__image \{ width: 23\.5cqw/);
   assert.match(cssSource, /data-image-edge="left-first"[\s\S]*grid-template-columns: auto minmax\(0, 1fr\)/);
   assert.match(htmlSource, /html-page__title-phrase/);
   assert.match(htmlSource, /html-page__title-phrase--plain/);
