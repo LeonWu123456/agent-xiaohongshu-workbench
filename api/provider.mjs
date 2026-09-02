@@ -159,6 +159,10 @@ function configuredPreviewOrigin(env = process.env) {
   return configuredOrigin(`https://${hostname}`);
 }
 
+export function previewUsesVercelAuthentication(env = process.env) {
+  return configuredServerManaged(env) && Boolean(configuredPreviewOrigin(env));
+}
+
 export function inspectServerAccessConfig(env = process.env) {
   const accessCodeSha256 = String(env?.XIAOSHIMEI_ACCESS_CODE_SHA256 || "").trim().toLowerCase();
   const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
@@ -406,17 +410,25 @@ function requestConfig(request, env = process.env) {
 function publicProviderConfig(request, { env = process.env, nowMs = Date.now() } = {}) {
   const configured = configuredServerManaged(env);
   const access = inspectServerAccessConfig(env);
+  const vercelAuthenticatedPreview = previewUsesVercelAuthentication(env);
   const ledger = imageLedgerEnv(env);
-  const candidates = configured && access.ready
+  const candidates = configured && access.ready && !vercelAuthenticatedPreview
     ? inspectAccessSessionCandidates(requestHeader(request, "cookie"), access, { nowMs })
     : { authenticated: false };
-  const authenticated = Boolean(candidates.authenticated);
+  const authenticated = vercelAuthenticatedPreview || Boolean(candidates.authenticated);
   return {
-    status: configured ? access.ready ? authenticated ? "CONFIGURED_UNVERIFIED" : "ACCESS_SESSION_REQUIRED" : "ACCESS_CONFIGURATION_REQUIRED" : "AWAITING_BYOK",
+    status: configured
+      ? vercelAuthenticatedPreview
+        ? "READY_FOR_USE"
+        : access.ready
+          ? authenticated ? "CONFIGURED_UNVERIFIED" : "ACCESS_SESSION_REQUIRED"
+          : "ACCESS_CONFIGURATION_REQUIRED"
+      : "AWAITING_BYOK",
     configured,
-    access_required: configured,
-    access_configured: configured && access.ready,
+    access_required: configured && !vercelAuthenticatedPreview,
+    access_configured: configured && (vercelAuthenticatedPreview || access.ready),
     authenticated,
+    authentication_mode: vercelAuthenticatedPreview ? "VERCEL_AUTHENTICATION" : configured ? "STUDIO_ACCESS_SESSION" : "BROWSER_BYOK",
     image_ledger_configured: ledger.ready,
     provider: "volcengine-ark",
     provider_label: "火山方舟",
@@ -2892,11 +2904,14 @@ export function createProviderHandler(options = {}) {
     if (rawAssetMatch) {
       const serverManaged = configuredServerManaged(env);
       const accessConfig = inspectServerAccessConfig(env);
-      if (!serverManaged || !accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+      const vercelAuthenticatedPreview = previewUsesVercelAuthentication(env);
+      if (!serverManaged || !accessConfig.appOrigin || (!vercelAuthenticatedPreview && !accessConfig.ready)) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       if (!requestHasExactSameOriginReadGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
-      const candidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
-      if (candidates.headerTooLarge || candidates.familyOverflow) return send(response, 431, { error: candidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED" });
-      if (!candidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      if (!vercelAuthenticatedPreview) {
+        const candidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
+        if (candidates.headerTooLarge || candidates.familyOverflow) return send(response, 431, { error: candidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED" });
+        if (!candidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      }
       const imageLedger = await resolveImageLedger().catch(() => null);
       if (!imageLedger || typeof imageLedger.readAsset !== "function") return send(response, 503, { error: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" });
       let asset;
@@ -2926,9 +2941,11 @@ export function createProviderHandler(options = {}) {
 
     const serverManaged = configuredServerManaged(env);
     const accessConfig = inspectServerAccessConfig(env);
+    const vercelAuthenticatedPreview = previewUsesVercelAuthentication(env);
     if (route === "access-session") {
       if (!serverManaged || !accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       if (!requestHasExactSameOriginWriteGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
+      if (vercelAuthenticatedPreview) return send(response, 404, { error: "ROUTE_NOT_FOUND" });
       if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       const visibleCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs, allowFamilyOverflow: true });
       if (visibleCandidates.headerTooLarge) return send(response, 431, { error: "COOKIE_HEADER_TOO_LARGE" });
@@ -2953,12 +2970,14 @@ export function createProviderHandler(options = {}) {
     if (serverManaged) {
       if (!accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       if (!requestHasExactSameOriginWriteGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
-      if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
-      accessCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
-      if (accessCandidates.headerTooLarge || accessCandidates.familyOverflow) return send(response, 431, {
-        error: accessCandidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED",
-      });
-      if (!accessCandidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      if (!vercelAuthenticatedPreview) {
+        if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
+        accessCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs });
+        if (accessCandidates.headerTooLarge || accessCandidates.familyOverflow) return send(response, 431, {
+          error: accessCandidates.headerTooLarge ? "COOKIE_HEADER_TOO_LARGE" : "ACCESS_SESSION_CANDIDATE_LIMIT_EXCEEDED",
+        });
+        if (!accessCandidates.authenticated) return send(response, 401, { error: "ACCESS_SESSION_REQUIRED" });
+      }
       if (!SERVER_MANAGED_PROVIDER_ROUTES.has(route)) return send(response, 404, { error: "ROUTE_NOT_FOUND" });
       if (route === "page-candidates") return send(response, 403, { error: "SERVER_MANAGED_PAGE_CANDIDATES_DISABLED" });
     }
@@ -2979,7 +2998,9 @@ export function createProviderHandler(options = {}) {
         return send(response, 200, await generateImages(parsedInput, settings, {
           imageLedger,
           nowMs,
-          accessExpiresAtMs: accessCandidates?.capabilityExpiresAtMs || 0,
+          accessExpiresAtMs: vercelAuthenticatedPreview
+            ? nowMs + ACCESS_SESSION_TTL_SECONDS * 1_000
+            : accessCandidates?.capabilityExpiresAtMs || 0,
           appScopeId: accessConfig.appScope || "",
         }));
       }

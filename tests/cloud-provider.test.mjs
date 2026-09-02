@@ -19,6 +19,7 @@ import {
   inspectAccessSessionCandidates,
   inspectServerAccessConfig,
   mintAccessSession,
+  previewUsesVercelAuthentication,
   publicTileBudgetForResponse,
   signPublicImageCheckpoint,
   sliceStandaloneRepairForUnit,
@@ -2362,6 +2363,61 @@ test("Preview access binds to the exact generated deployment URL while Productio
   }).appOrigin, env.XIAOSHIMEI_APP_ORIGIN);
 });
 
+test("Vercel-authenticated Preview removes the Studio session gate while retaining exact same-origin admission", async () => {
+  const deploymentOrigin = "https://xiaoshimei-full-workbench-preview-123.vercel.app";
+  const env = {
+    ARK_API_KEY: "server-secret-test-key",
+    VERCEL_ENV: "preview",
+    VERCEL_URL: new URL(deploymentOrigin).host,
+  };
+  assert.equal(previewUsesVercelAuthentication(env), true);
+  const previewHandler = createProviderHandler({ env, nowMs: 1_788_192_000_000 });
+
+  const config = responseProbe();
+  await previewHandler({ method: "GET", query: { route: "config" }, headers: {} }, config);
+  assert.equal(config.statusCode, 200);
+  assert.equal(config.body.status, "READY_FOR_USE");
+  assert.equal(config.body.access_required, false);
+  assert.equal(config.body.access_configured, true);
+  assert.equal(config.body.authenticated, true);
+  assert.equal(config.body.authentication_mode, "VERCEL_AUTHENTICATION");
+  assert.equal(JSON.stringify(config.body).includes(env.ARK_API_KEY), false);
+
+  const headers = sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin });
+  const retiredLogin = responseProbe();
+  await previewHandler({ method: "POST", query: { route: "access-session" }, headers, get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); } }, retiredLogin);
+  assert.equal(retiredLogin.statusCode, 404);
+  assert.equal(retiredLogin.body.error, "ROUTE_NOT_FOUND");
+
+  const admittedWithoutStudioCookie = responseProbe();
+  await previewHandler({ method: "POST", query: { route: "text-draft" }, headers, body: {} }, admittedWithoutStudioCookie);
+  assert.equal(admittedWithoutStudioCookie.statusCode, 400);
+  assert.notEqual(admittedWithoutStudioCookie.body.error, "ACCESS_SESSION_REQUIRED");
+
+  const rejectedCrossOrigin = responseProbe();
+  await previewHandler({
+    method: "POST",
+    query: { route: "text-draft" },
+    headers: sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin }, { origin: "https://attacker.example" }),
+    get body() { throw new Error("BODY_MUST_NOT_BE_PARSED"); },
+  }, rejectedCrossOrigin);
+  assert.equal(rejectedCrossOrigin.statusCode, 403);
+  assert.equal(rejectedCrossOrigin.body.error, "ORIGIN_FORBIDDEN");
+});
+
+test("Preview without a server key stays unavailable and cannot inherit the Vercel-authenticated mode", async () => {
+  const env = {
+    VERCEL_ENV: "preview",
+    VERCEL_URL: "xiaoshimei-full-workbench-preview-123.vercel.app",
+  };
+  assert.equal(previewUsesVercelAuthentication(env), false);
+  const response = responseProbe();
+  await createProviderHandler({ env })({ method: "GET", query: { route: "config" }, headers: {} }, response);
+  assert.equal(response.body.status, "AWAITING_BYOK");
+  assert.equal(response.body.configured, false);
+  assert.equal(response.body.authenticated, false);
+});
+
 function sameOriginHeaders(env, extra = {}) {
   const origin = new URL(env.XIAOSHIMEI_APP_ORIGIN);
   return {
@@ -2474,7 +2530,7 @@ test("server-managed access login mints a canonical token-bound __Host slot afte
   assert.equal(authenticated.body.authenticated, true);
 });
 
-test("Preview login admits only the deployment-specific VERCEL_URL origin", async () => {
+test("retired Preview Studio login still rejects a stale origin before returning ROUTE_NOT_FOUND", async () => {
   const deploymentOrigin = "https://xiaoshimei-full-workbench-preview-123.vercel.app";
   const env = {
     ...accessEnv(),
@@ -2493,25 +2549,15 @@ test("Preview login admits only the deployment-specific VERCEL_URL origin", asyn
   assert.equal(staleConfiguredOrigin.statusCode, 403);
   assert.equal(staleConfiguredOrigin.body.error, "ORIGIN_FORBIDDEN");
 
-  const wrongCode = responseProbe();
+  const exactOrigin = responseProbe();
   await accessHandler({
     method: "POST",
     query: { route: "access-session" },
     headers: sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin }),
     body: { code: "wrong" },
-  }, wrongCode);
-  assert.equal(wrongCode.statusCode, 401);
-  assert.equal(wrongCode.body.error, "ACCESS_DENIED");
-
-  const accepted = responseProbe();
-  await accessHandler({
-    method: "POST",
-    query: { route: "access-session" },
-    headers: sameOriginHeaders({ XIAOSHIMEI_APP_ORIGIN: deploymentOrigin }),
-    body: { code: "open-sesame" },
-  }, accepted);
-  assert.equal(accepted.statusCode, 200);
-  assert.equal(accepted.body.authenticated, true);
+  }, exactOrigin);
+  assert.equal(exactOrigin.statusCode, 404);
+  assert.equal(exactOrigin.body.error, "ROUTE_NOT_FOUND");
 });
 
 test("access tokens are canonical, app/origin bound, name bound, and header order independent", async () => {

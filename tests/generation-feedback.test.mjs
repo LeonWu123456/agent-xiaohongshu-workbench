@@ -55,6 +55,7 @@ test("provider health distinguishes content rejection from connectivity failure"
   assert.equal(providerHealthState({ configured: true, status: "TEXT_READY", last_error: null }), "UNVERIFIED");
   assert.equal(providerHealthState({ configured: true, status: "TEXT_READY", last_error: null, last_success_at: "2026-08-23T00:00:00Z" }), "ONLINE");
   assert.equal(providerHealthState({ configured: true, status: "CONFIGURED_UNVERIFIED", last_success_at: null }), "UNVERIFIED");
+  assert.equal(providerHealthState({ configured: true, status: "READY_FOR_USE", last_success_at: null }), "ONLINE");
   assert.equal(providerHealthState({ configured: false, status: "NOT_CONFIGURED" }), "OFFLINE");
 });
 

@@ -99,6 +99,7 @@ const STORAGE_KEYS = {
 const DEFAULT_TOPIC = "工作太久眼睛发紧，如何用3分钟离屏恢复状态？";
 const IS_PUBLIC_RUNTIME = !new Set(["localhost", "127.0.0.1", "[::1]", "::1"]).has(window.location.hostname);
 const PROVIDER_URL = String(import.meta.env.VITE_XIAOSHIMEI_PROVIDER_URL || (IS_PUBLIC_RUNTIME ? `${window.location.origin}/api/provider/generate` : "http://127.0.0.1:4175/generate")).trim();
+const PROVIDER_ENV_SETTINGS_URL = "https://vercel.com/892350620-5733s-projects/xiaoshimei-full-workbench/settings/environment-variables";
 const TEXT_FONT_OPTIONS = Object.freeze([
   { id: "songti", label: "华文宋体", stack: '"STSong", "华文宋体", "Songti SC", serif' },
   { id: "heiti", label: "华文黑体", stack: '"STHeiti", "华文黑体", "Heiti SC", "PingFang SC", sans-serif' },
@@ -1037,7 +1038,17 @@ function App() {
   const draftEditingLocked = workspaceReadOnly || workspaceTransitioning;
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
     && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
-  const providerStatusLabel = accessRequired ? "需要访问验证" : providerHealth === "ONLINE" ? "连接已验证" : providerHealth === "UNVERIFIED" ? "已配置 · 未验证" : providerHealth === "DEGRADED" ? "连接异常" : providerHealth === "OFFLINE" ? "离线" : "检查中";
+  const providerStatusLabel = isGenerating
+    ? "生成中"
+    : generationState === "FAILED" || providerHealth === "DEGRADED"
+      ? "调用失败"
+      : providerMeta?.configured === false
+        ? "生成服务未配置"
+        : accessRequired
+          ? "需要访问验证"
+          : new Set(["ONLINE", "UNVERIFIED"]).has(providerHealth)
+            ? "生成服务可用"
+            : providerHealth === "OFFLINE" ? "调用失败" : "检查中";
   const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
   const actionReferenceMediaKey = actionReferences.map((item) => item.media_ref).join("|");
   const reusableImageAssets = useMemo(() => collectReusableImageAssets(content, library), [content, library]);
@@ -3392,8 +3403,8 @@ function App() {
 
         {providerSettingsOpen && <div className="provider-settings-layer" role="presentation" onClick={() => setProviderSettingsOpen(false)}>
           <section className="provider-settings-card" role="dialog" aria-modal="true" aria-label="生成服务设置" onClick={(event) => event.stopPropagation()}>
-            <header><div><strong>生成服务</strong><span>{providerServerManaged ? "生产服务已接好；密钥由服务端保管，不进入浏览器、草稿或发布包。" : IS_PUBLIC_RUNTIME ? "个人体验密钥只保存在当前标签页；关闭标签页即清除。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
-            {providerServerManaged ? <><div className="provider-managed-card"><strong>生产连接已托管</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>这里不再要求你或小师妹每开一个标签页重填 Key；访问码只用于建立当前浏览器的短期生产会话。</p></div>{accessRequired && <form id="provider-access-form" onSubmit={loginProviderAccess}><label><span>小师妹 Studio 访问码</span><input type="password" autoComplete="current-password" autoFocus value={accessCode} onChange={(event) => { setAccessCode(event.target.value); dispatchAuth({ type: "CLEAR_ERROR", generation: authStateRef.current.generation }); }} placeholder="输入访问码后继续生成" /></label>{accessError && <p role="alert">{accessError}</p>}</form>}</> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
+            <header><div><strong>生成服务</strong><span>{providerServerManaged ? "生成服务由项目所有者管理；密钥只保存在服务端，不进入浏览器、草稿或发布包。" : IS_PUBLIC_RUNTIME ? "个人体验密钥只保存在当前标签页；关闭标签页即清除。" : "可换服务与模型；密钥只写入本机钥匙串，不进入草稿。"}</span></div><button type="button" aria-label="关闭生成服务设置" onClick={() => setProviderSettingsOpen(false)}><X /></button></header>
+            {providerServerManaged ? <><div className="provider-managed-card"><strong>由项目所有者管理</strong><span>{providerMeta?.provider_label || "火山方舟"}</span><small>文字模型：{providerMeta?.text_model || "已配置"}</small><small>图片模型：{providerMeta?.image_model || "已配置"}</small><p>{accessRequired ? "当前正式环境仍使用独立访问会话；Preview 由 Vercel Authentication 统一保护，不再重复输入 Studio 访问码。" : "当前 Preview 已由 Vercel Authentication 保护，打开即可使用；正式上线前统一轮换当前预生产 Key。"}</p><a href={PROVIDER_ENV_SETTINGS_URL} target="_blank" rel="noreferrer">管理服务端 Key</a></div>{accessRequired && <form id="provider-access-form" onSubmit={loginProviderAccess}><label><span>小师妹 Studio 访问码</span><input type="password" autoComplete="current-password" autoFocus value={accessCode} onChange={(event) => { setAccessCode(event.target.value); dispatchAuth({ type: "CLEAR_ERROR", generation: authStateRef.current.generation }); }} placeholder="输入访问码后继续生成" /></label>{accessError && <p role="alert">{accessError}</p>}</form>}</> : <><label><span>服务类型</span><select value={providerSettingsForm.provider} onChange={(event) => {
               const nextProvider = event.target.value;
               setProviderSettingsForm((current) => ({
                 ...current,

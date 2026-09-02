@@ -180,6 +180,7 @@ main { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
 .provider-managed-card span { color: var(--ink); font-size: 12px; font-weight: 800; }
 .provider-managed-card small { color: var(--muted); font-size: 10px; }
 .provider-managed-card p { margin: 5px 0 0; color: #53655a; font-size: 10px; line-height: 1.55; }
+.provider-managed-card a { width: max-content; color: var(--moss); font-size: 10px; font-weight: 750; text-underline-offset: 3px; }
 .provider-settings-card > footer { display: grid; grid-template-columns: .8fr 1.2fr; gap: 8px; padding-top: 2px; }
 .provider-managed-card + footer { grid-template-columns: 1fr; }
 .provider-settings-card > footer button { min-height: 40px; border-radius: 9px; font-size: 10px; font-weight: 750; }

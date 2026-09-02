@@ -3,6 +3,7 @@ export function providerHealthState(health) {
   const status = String(health.status || "");
   const lastError = String(health.last_error || "");
   const hasVerifiedSuccess = Boolean(health.last_success_at);
+  if (status === "READY_FOR_USE") return "ONLINE";
   if (status === "CONFIGURED_UNVERIFIED" || status === "READY_FOR_PROBE") return "UNVERIFIED";
   if (status !== "FAIL_CLOSED") return hasVerifiedSuccess || status === "LIVE_VERIFIED" ? "ONLINE" : "UNVERIFIED";
   if (/NETWORK_FETCH_FAILED|UND_ERR|SSL.*timeout|fetch failed|ARK_HTTP_(401|403|408|429|5\d\d)|ModelNotOpen|quota|billing/i.test(lastError)) return "DEGRADED";
