@@ -61,9 +61,10 @@ const identitySource = namedFunctionSource(mainSource, "pageSemanticIdentity");
 const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockReason").replace(/^export\s+/, "");
 const imageLaneLockSource = namedFunctionSource(mainSource, "imageLaneLockReason").replace(/^export\s+/, "");
 const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
+const imageRecoveryResultMessageSource = namedFunctionSource(mainSource, "imageRecoveryResultMessage").replace(/^export\s+/, "");
 const workbenchProjectionSource = namedFunctionSource(mainSource, "currentWorkbenchProjection").replace(/^export\s+/, "");
 const boundedClipboardSource = namedFunctionSource(mainSource, "boundedClipboardAttempt").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${workbenchProjectionSource}\n${boundedClipboardSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentWorkbenchProjection, boundedClipboardAttempt };`).toString("base64")}`);
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${imageRecoveryResultMessageSource}\n${workbenchProjectionSource}\n${boundedClipboardSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, imageRecoveryResultMessage, currentWorkbenchProjection, boundedClipboardAttempt };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -76,6 +77,7 @@ const {
   authoringInputLockReason,
   imageLaneLockReason,
   imageRecoveryClickMode,
+  imageRecoveryResultMessage,
   currentWorkbenchProjection,
   boundedClipboardAttempt,
 } = runtimeModule;
@@ -360,8 +362,11 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.doesNotMatch(namedFunctionSource(mainSource, "workspaceMutationIsLocked"), /imageOperationDraftId|pending_image_operation/);
   assert.match(namedFunctionSource(mainSource, "imageLaneIsLocked"), /imageOperationDraftId:\s*draftMutationLockRef\.current\?\.draft_id/);
   assert.match(mainSource, /const textLaneLocked = authoringInputLocked \|\| generationState === "TEXT_GENERATING" \|\| generationState === "IMAGE_GENERATING";/);
-  assert.match(mainSource, /const draftEditingLocked = workspaceReadOnly \|\| workspaceTransitioning;/);
-  assert.match(namedFunctionSource(mainSource, "draftMutationIsLocked"), /return workspaceMutationIsLocked\(\)/);
+  assert.match(mainSource, /const draftEditingLocked = workspaceReadOnly \|\| workspaceTransitioning \|\| generationState === "IMAGE_GENERATING";/);
+  assert.match(namedFunctionSource(mainSource, "draftMutationIsLocked"), /activeImageOperationRef\.current \|\| draftMutationLockRef\.current/);
+  assert.match(mainSource, /const setContent = useCallback\(\(updater, options = \{\}\) => \{[\s\S]*activeImageOperationRef\.current \|\| draftMutationLockRef\.current/);
+  assert.match(mainSource, /const undo = useCallback\(\(\) => \{ if \([^;]*activeImageOperationRef\.current \|\| draftMutationLockRef\.current\) return;/);
+  assert.match(mainSource, /const redo = useCallback\(\(\) => \{ if \([^;]*activeImageOperationRef\.current \|\| draftMutationLockRef\.current\) return;/);
   assert.doesNotMatch(mainSource, /liveDraft\?\.pending_image_operation|latestDraft\?\.pending_image_operation/, "pending assets must not suppress semantic autosave");
   assert.match(namedFunctionSource(mainSource, "saveDraft"), /^function saveDraft\(\) \{\s*if \(draftMutationIsLocked\(\)\) return;/);
   assert.match(namedFunctionSource(mainSource, "copyPublicationCopy"), /^function copyPublicationCopy\(\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
@@ -393,40 +398,46 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.doesNotMatch(staleBootstrapSource, /applyRecord:\s*true/, "a late bootstrap receipt cannot overwrite same-draft input typed while it was awaiting persistence");
   assert.match(staleBootstrapSource, /setAutosaveRetryRevision\(\(value\) => value \+ 1\)/, "the preserved dirty input must be rescheduled onto the saved pending snapshot");
   assert.match(imageSource, /setGenerationState\s*\(\s*\(current\)\s*=>\s*current === "IMAGE_GENERATING" \? "IDLE" : current\s*\)/, "operation-id finally must settle global busy even after A to B cutover");
-  assert.match(imageSource, /const imageIntent = discoveryOnly \? "DISCOVER_ONLY" : "START_OR_STEP";/, "the current click must freeze its own cost intent before BOOTSTRAP changes persisted state");
+  assert.match(imageSource, /const imageIntent = recoveryCheck \? "RECOVERY_CHECK" : "START_OR_STEP";/, "the current click must freeze its own cost intent before BOOTSTRAP changes persisted state");
   assert.match(imageSource, /setActiveImageIntent\(imageIntent\)/);
   assert.match(imageSource, /finally\s*\{[\s\S]*setActiveImageIntent\(null\)/, "the operation intent must settle with the exact image operation");
   const textSource = namedFunctionSource(mainSource, "generateTextNode");
   assert.match(textSource, /generationState === "IMAGE_GENERATING" \|\| activeImageOperationRef\.current \|\| draftMutationLockRef\.current/, "programmatic and same-frame clicks must not start text while image authority is held");
-  assert.match(creatorSource, /activeImageIntent === "DISCOVER_ONLY" \? "正在查询已有结果（0 次图片调用）"/);
+  assert.match(creatorSource, /activeImageIntent === "RECOVERY_CHECK" \? "正在检查恢复状态（不会生成图片）"/);
+  assert.match(creatorSource, /记录缺失时会调用文字模型重建配图计划/);
   assert.match(creatorSource, /"正在生成配图（可能产生图片调用）"/, "a fresh START or paid STEP must never be presented as zero-call discovery");
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
 });
 
-test("every persisted pending recovery needs a fresh DISCOVER before a separate paid continuation", () => {
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" } }), "DISCOVER_ONLY");
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "PARTIAL" } }), "DISCOVER_ONLY");
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" } }), "DISCOVER_ONLY");
+test("every persisted pending recovery needs a truthful recovery check before a separate paid continuation", () => {
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" } }), "RECOVERY_CHECK");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "PARTIAL" } }), "RECOVERY_CHECK");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" } }), "RECOVERY_CHECK");
   assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "PARTIAL" }, requestedPaidContinuation: true }), "CONTINUE_ALLOWED");
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" }, requestedPaidContinuation: true }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "UNKNOWN" }, requestedPaidContinuation: true }), "RECOVERY_CHECK");
   assert.equal(imageRecoveryClickMode({ pendingImageOperation: null }), "CONTINUE_ALLOWED");
-  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" }, requestedDiscoveryOnly: true }), "DISCOVER_ONLY");
+  assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" }, requestedDiscoveryOnly: true }), "RECOVERY_CHECK");
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
-  assert.match(imageSource, /const discoveryOnly = imageRecoveryClickMode\s*\(/);
+  assert.match(imageSource, /const recoveryCheck = imageRecoveryClickMode\s*\(/);
   assert.doesNotMatch(imageSource, /operationWasStaleBeforePersistence/, "staleness sampled before media fetch cannot authorize a later write");
   assert.match(imageSource, /forceRecovery:\s*!mainAuthority\.isCurrent\(mainOperation\)/, "completion must recheck semantic authority immediately at commit");
   assert.match(imageSource, /const operationWasStaleAtCommit = !mainAuthority\.isCurrent\(mainOperation\);[\s\S]*?forceRecovery:\s*operationWasStaleAtCommit/, "progress must bind forceRecovery after deferred media fetch");
   assert.equal((imageSource.match(/forceRecoveryNow:\s*\(\) => !mainAuthority\.isCurrent\(mainOperation\)/g) || []).length, 2, "progress and completion must both recheck authority inside the coordinator's exclusive commit lock");
-  assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP", checkpointPersisted: true,[\s\S]*nextImageStepRequest/);
+  assert.match(imageSource, /if \(recoveryCheck\)[\s\S]*return \{ action: "STOP", checkpointPersisted: true,[\s\S]*nextImageStepRequest/);
   assert.match(imageSource, /checkpointPersisted: progressReceipt\.checkpointPersisted === true/);
   assert.match(imageSource, /checkpointPersisted: false, code: "IMAGE_OPERATION_CONTEXT_MISSING"/);
   assert.match(imageSource, /error\?\.intentionalStop === true && error\?\.checkpointPersisted === true/);
-  assert.match(imageSource, /零调用查询已完成/);
+  assert.match(imageSource, /imageRecoveryResultMessage\s*\(/);
+  assert.match(imageRecoveryResultMessage({ requestModes: ["DISCOVER"], upstreamCalls: 0 }), /只读取了已有账本与缓存，没有调用模型/);
+  const rebuiltMessage = imageRecoveryResultMessage({ requestModes: ["DISCOVER", "START"], upstreamCalls: 1 });
+  assert.match(rebuiltMessage, /已调用文字模型重建配图计划/);
+  assert.match(rebuiltMessage, /没有调用图片模型/);
+  assert.doesNotMatch(rebuiltMessage, /只读取/);
   assert.match(imageSource, /const observedRequestModes = \[initialRequest\.mode\]/);
   assert.match(imageSource, /upstream_calls: Number\(response\.upstream_calls \?\? response\.progress\?\.upstream_calls \?\? 0\)/);
   assert.match(imageSource, /upstream_calls: Number\(providerResult\.upstream_calls \?\? providerResult\.progress\?\.upstream_calls \?\? 0\)/, "direct UNKNOWN and ERROR returns must still expose the runtime readback");
   assert.ok(imageSource.indexOf("let providerResult = await provider.generateImages") < imageSource.indexOf("response_status: providerResult.status"), "the final provider return must be recorded before error handling");
-  assert.ok(imageSource.indexOf("if (discoveryOnly)") < imageSource.indexOf("observedRequestModes.push(nextRequest.mode)"), "a discovery-only response must stop before STEP enters the observed request sequence");
+  assert.ok(imageSource.indexOf("if (recoveryCheck)") < imageSource.indexOf("observedRequestModes.push(nextRequest.mode)"), "a recovery-check response must stop before STEP enters the observed request sequence");
   assert.match(mainSource, /确认付费：继续图片步骤/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadZip"), /draftMutationIsLocked\s*\(/);
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);

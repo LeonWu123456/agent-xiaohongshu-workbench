@@ -440,6 +440,43 @@ function publicProviderConfig(request, { env = process.env, nowMs = Date.now() }
   };
 }
 
+function publicImageLedgerAttestationError(error) {
+  const code = String(error?.message || error || "IMAGE_LEDGER_ATTESTATION_UNAVAILABLE").split(":", 1)[0];
+  return /^IMAGE_LEDGER_[A-Z0-9_]+$/.test(code) ? code : "IMAGE_LEDGER_ATTESTATION_UNAVAILABLE";
+}
+
+async function publicProviderHealth(request, { env = process.env, nowMs = Date.now(), resolveImageLedger } = {}) {
+  const config = publicProviderConfig(request, { env, nowMs });
+  const access = inspectServerAccessConfig(env);
+  if (config.credential_mode !== "SERVER_MANAGED") {
+    return { ...config, image_ledger_attested: false, image_ledger_attestation_status: "IMAGE_LEDGER_SERVER_MANAGED_REQUIRED" };
+  }
+  if (!config.image_ledger_configured || !access.appScope || typeof resolveImageLedger !== "function") {
+    return { ...config, image_ledger_attested: false, image_ledger_attestation_status: "IMAGE_LEDGER_CONFIGURATION_REQUIRED" };
+  }
+  try {
+    const imageLedger = await resolveImageLedger();
+    if (!imageLedger || typeof imageLedger.assertAttestationReady !== "function") throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
+    const attestation = await imageLedger.assertAttestationReady({ appScopeId: access.appScope });
+    const hardExpiryMs = Number(attestation?.hard_expiry_ms || 0);
+    return {
+      ...config,
+      image_ledger_attested: true,
+      image_ledger_attestation_status: "READY",
+      ...(Number.isFinite(hardExpiryMs) && hardExpiryMs > 0 ? {
+        image_ledger_attestation_expires_at: new Date(hardExpiryMs).toISOString(),
+        image_ledger_attestation_remaining_seconds: Math.max(0, Math.floor((hardExpiryMs - nowMs) / 1000)),
+      } : {}),
+    };
+  } catch (error) {
+    return {
+      ...config,
+      image_ledger_attested: false,
+      image_ledger_attestation_status: publicImageLedgerAttestationError(error),
+    };
+  }
+}
+
 function routeName(request) {
   const value = Array.isArray(request.query?.route) ? request.query.route[0] : request.query?.route;
   return String(value || "").replace(/^\/+|\/+$/g, "");
@@ -1749,6 +1786,11 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       if (!response.ok || payload?.error || payload?.result !== "PONG") throw new Error("IMAGE_LEDGER_UNAVAILABLE");
       return true;
     },
+    async assertAttestationReady({ appScopeId } = {}) {
+      await this.assertReady();
+      const attestation = await verifyRuntimeSentinel({ appScopeId });
+      return { ...attestation, mode: "HEALTH", runtime_attested: true };
+    },
     async assertProductionReady(context = {}) {
       await this.assertReady();
       if (typeof readinessProbe === "function" || productionReadiness != null) {
@@ -2986,7 +3028,7 @@ export function createProviderHandler(options = {}) {
   return async function providerHandler(request, response) {
     const route = routeName(request);
     const nowMs = currentTime();
-    if (request.method === "GET" && route === "health") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
+    if (request.method === "GET" && route === "health") return send(response, 200, await publicProviderHealth(request, { env, nowMs, resolveImageLedger }));
     if (request.method === "GET" && route === "config") return send(response, 200, publicProviderConfig(request, { env, nowMs }));
     const rawAssetMatch = request.method === "GET" ? /^assets\/([^/]+)\/([0-9a-f]{64})$/.exec(route) : null;
     if (rawAssetMatch) {

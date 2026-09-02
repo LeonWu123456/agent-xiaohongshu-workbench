@@ -633,7 +633,19 @@ export function reduceMainAuthState(state, event) {
   }
   if (type === "CONFIG_COMMIT" || type === "BACKGROUND_CONFIG") {
     if (type === "BACKGROUND_CONFIG" && new Set(["LOGIN_PENDING", "CONFIG_RECONCILING"]).has(current.phase)) return current;
-    const providerMeta = event.providerMeta && typeof event.providerMeta === "object" ? event.providerMeta : {};
+    const incomingProviderMeta = event.providerMeta && typeof event.providerMeta === "object" ? event.providerMeta : {};
+    const preserveAttestation = incomingProviderMeta.credential_mode === "SERVER_MANAGED"
+      && current.providerMeta?.credential_mode === "SERVER_MANAGED"
+      && incomingProviderMeta.image_ledger_attested == null;
+    const providerMeta = preserveAttestation ? {
+      ...incomingProviderMeta,
+      ...Object.fromEntries([
+        "image_ledger_attested",
+        "image_ledger_attestation_status",
+        "image_ledger_attestation_expires_at",
+        "image_ledger_attestation_remaining_seconds",
+      ].filter((key) => current.providerMeta?.[key] != null).map((key) => [key, current.providerMeta[key]])),
+    } : incomingProviderMeta;
     const accessRequired = providerMeta.credential_mode === "SERVER_MANAGED"
       && providerMeta.authenticated !== true
       && providerMeta.access_required === true;
@@ -706,11 +718,18 @@ export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pending
 }
 
 export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscoveryOnly = false, requestedPaidContinuation = false } = {}) {
-  if (requestedDiscoveryOnly) return "DISCOVER_ONLY";
+  if (requestedDiscoveryOnly) return "RECOVERY_CHECK";
   if (!pendingImageOperation) return "CONTINUE_ALLOWED";
   return requestedPaidContinuation && ["READY", "PARTIAL"].includes(pendingImageOperation.protocol_state)
     ? "CONTINUE_ALLOWED"
-    : "DISCOVER_ONLY";
+    : "RECOVERY_CHECK";
+}
+
+export function imageRecoveryResultMessage({ requestModes = [], upstreamCalls = 0 } = {}) {
+  const rebuiltPlan = requestModes.includes("START") || Number(upstreamCalls) > 0;
+  return rebuiltPlan
+    ? "恢复检查已完成；已调用文字模型重建配图计划，但没有调用图片模型"
+    : "恢复查询已完成；只读取了已有账本与缓存，没有调用模型";
 }
 
 export function currentWorkbenchProjection({ contentTitle, confirmedTitle, textConfirmed, hasConfirmedContent, visiblePageCount, generatedImageCount, currentInLibrary, topic } = {}) {
@@ -956,6 +975,10 @@ function App() {
       setToast("工作台当前为只读；修改没有发生");
       return;
     }
+    if (activeImageOperationRef.current || draftMutationLockRef.current) {
+      setToast("配图正在使用当前稿；图片步骤保存完成前不能修改画布");
+      return;
+    }
     if (options.semantic !== false) mainAuthority.markSemanticMutation();
     setContentHistory((history) => {
       const next = typeof updater === "function" ? updater(history.present) : updater;
@@ -966,8 +989,8 @@ function App() {
     if (semantic) mainAuthority.markSemanticMutation();
     setContentHistory(createEditorHistory(next));
   }, [mainAuthority]);
-  const undo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked()) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
-  const redo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked()) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
+  const undo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeImageOperationRef.current || draftMutationLockRef.current) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => undoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
+  const redo = useCallback(() => { if (!workspaceReadyRef.current || workspaceWriteBlockedRef.current || workspaceTransitionLock.isLocked() || activeImageOperationRef.current || draftMutationLockRef.current) return; mainAuthority.markSemanticMutation(); setContentHistory((history) => redoEditorHistory(history)); setLayoutRefreshToken((value) => value + 1); }, [mainAuthority, workspaceTransitionLock]);
   const [topic, setTopic] = useState(initialGenerationSession?.topic || initialPromptMemory.defaults.source_topic || initial.source_input);
   const [pillar, setPillar] = useState(initialGenerationSession?.pillar || initial.pillar);
   const [goal, setGoal] = useState(initialGenerationSession?.goal || initial.goal);
@@ -1090,9 +1113,12 @@ function App() {
   const authoringInputLocked = workspaceReadOnly || workspaceTransitioning;
   const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
   const imageLaneLocked = authoringInputLocked || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
-  const draftEditingLocked = workspaceReadOnly || workspaceTransitioning;
+  const draftEditingLocked = workspaceReadOnly || workspaceTransitioning || generationState === "IMAGE_GENERATING";
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
     && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
+  const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
+  const imageLedgerAttested = !providerServerManaged || providerMeta?.image_ledger_attested === true;
+  const imageProviderCanAttempt = providerCanAttempt && imageLedgerAttested;
   const providerStatusLabel = isGenerating
     ? "生成中"
     : generationState === "FAILED" || providerHealth === "DEGRADED"
@@ -1101,10 +1127,11 @@ function App() {
         ? "生成服务未配置"
         : accessRequired
           ? "需要访问验证"
+          : providerServerManaged && !imageLedgerAttested
+            ? "文字可用 · 配图暂不可用"
           : new Set(["ONLINE", "UNVERIFIED"]).has(providerHealth)
             ? "生成服务可用"
             : providerHealth === "OFFLINE" ? "调用失败" : "检查中";
-  const providerServerManaged = providerMeta?.credential_mode === "SERVER_MANAGED";
   const actionReferenceMediaKey = actionReferences.map((item) => item.media_ref).join("|");
   const reusableImageAssets = useMemo(() => collectReusableImageAssets(content, library), [content, library]);
   const resolvedPageCount = imageAuthorityTextDraft ? (imageCountMode === "AUTO" ? imageAuthorityTextDraft.recommended_image_count : Number(customImageCount)) : 0;
@@ -1160,8 +1187,8 @@ function App() {
     ? {
       ...generationError,
       title: "另一条配图还在恢复窗内",
-      detail: `当前 ${visiblePages.length} 页成品仍可复制和下载。这里只查询已有账本与缓存，不会重新生成图片，也不会进入付费步骤。`,
-      retry_label: "只查询恢复结果（0 次图片调用）",
+      detail: `当前 ${visiblePages.length} 页成品仍可复制和下载。恢复检查会先读账本；若记录缺失，可能调用文字模型重建配图计划，但不会调用图片模型。`,
+      retry_label: "检查恢复状态（不生成图片）",
     }
     : generationError;
   authorityTargetRef.current = {
@@ -1320,6 +1347,10 @@ function App() {
   }
 
   function draftMutationIsLocked() {
+    if (activeImageOperationRef.current || draftMutationLockRef.current) {
+      setToast("配图正在使用当前稿；图片步骤保存完成前不能修改画布或保存");
+      return true;
+    }
     return workspaceMutationIsLocked();
   }
 
@@ -2472,12 +2503,12 @@ function App() {
     const targetDraftId = operationAuthority?.holder_draft_id || sourceDraftId;
     const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
     if (!baseRecord) { setToast("当前稿件身份缺失，配图没有开始"); return; }
-    const discoveryOnly = imageRecoveryClickMode({
+    const recoveryCheck = imageRecoveryClickMode({
       pendingImageOperation: baseRecord.pending_image_operation,
       requestedDiscoveryOnly: options?.discoveryOnly === true,
       requestedPaidContinuation: options?.paidContinuation === true && paidRecoveryContinuationReady,
-    }) === "DISCOVER_ONLY";
-    const imageIntent = discoveryOnly ? "DISCOVER_ONLY" : "START_OR_STEP";
+    }) === "RECOVERY_CHECK";
+    const imageIntent = recoveryCheck ? "RECOVERY_CHECK" : "START_OR_STEP";
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
     const frozenTextDraft = baseRecord.pending_image_operation?.operation_snapshot?.confirmed_draft || textDraft;
@@ -2661,7 +2692,7 @@ function App() {
       mainAuthority.commit(mainOperation, () => {
         setGenerationState("IMAGE_GENERATING");
         clearGenerationFailure();
-        setToast(baseRecord.pending_image_operation ? "正在发现并恢复同一次配图操作；查询不会产生新图片调用" : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
+        setToast(baseRecord.pending_image_operation ? "正在检查同一次配图操作；记录缺失时会调用文字模型重建计划，但不会调用图片模型" : `文字已确认：正在规划 ${resolvedCount} 个画板，预计生成 ${estimatedSheets} 张母图`);
       });
       activeImageOperationRef.current = imageOperation;
       const observedRequestModes = [initialRequest.mode];
@@ -2794,7 +2825,7 @@ function App() {
             code: progressReceipt.code || "IMAGE_OPERATION_STALE_AFTER_PERSISTENCE",
           };
         }
-        if (discoveryOnly) {
+        if (recoveryCheck) {
           mainAuthority.commit(mainOperation, () => {
             const discoveredPending = progressReceipt.operation_snapshot?.pending_image_operation;
             setRecoveryDiscoveryReceipt({
@@ -2804,7 +2835,10 @@ function App() {
               status: response.status,
             });
             setGenerationState("IDLE");
-            setToast("零调用查询已完成；恢复点已更新，本次没有进入付费图片步骤");
+            setToast(imageRecoveryResultMessage({
+              requestModes: observedRequestModes,
+              upstreamCalls: Number(response.upstream_calls ?? response.progress?.upstream_calls ?? 0),
+            }));
           });
           return { action: "STOP", checkpointPersisted: true, code: "IMAGE_DISCOVERY_CHECKPOINT_PERSISTED" };
         }
@@ -2868,8 +2902,8 @@ function App() {
       console.warn(error);
       if (error?.requiresAccess) dispatchAuth({ type: "BUSINESS_AUTH_REQUIRED", generation: authGeneration, message: "访问会话已失效，请重新输入访问码" });
       if (error?.intentionalStop === true && error?.checkpointPersisted === true && error?.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT") {
-        const stopMessage = discoveryOnly
-          ? "零调用查询已完成；恢复点已更新，本次没有进入付费图片步骤"
+        const stopMessage = recoveryCheck
+          ? imageRecoveryResultMessage({ requestModes: observedRequestModes })
           : "图片生成已按安全断点停止；已完成资产不会重做，也不会继续扣费";
         const settled = mainAuthority.commit(mainOperation, () => {
           setGenerationState("IDLE");
@@ -2877,7 +2911,7 @@ function App() {
         });
         if (!settled.applied) {
           setGenerationState("IDLE");
-          setToast(discoveryOnly ? "原稿的零调用查询已停在恢复点；当前稿件没有被替换" : "原稿配图已停在安全断点；当前稿件没有被替换");
+          setToast(recoveryCheck ? "原稿的恢复检查已停在安全断点；当前稿件没有被替换" : "原稿配图已停在安全断点；当前稿件没有被替换");
         }
         return;
       }
@@ -3597,8 +3631,8 @@ function App() {
           <summary><div><strong>画面设置</strong><small>人物、动作、场景、风格与构图 8 项</small></div><ChevronDown /></summary>
           <div className="prompt-context-grid">{IMAGE_CONTEXT_FIELDS.map((field) => <PromptContextField key={field.id} field={field} value={promptValues[field.id]} history={promptMemory.histories[field.id]} disabled={imageLaneLocked || isGenerating} onChange={(value) => setPromptFieldValue(field.id, value)} onRemember={(value) => rememberPromptField(field.id, value)} onUse={(value) => setPromptFieldValue(field.id, value)} onDelete={(entryId) => deletePromptEntry(field.id, entryId)} />)}</div>
         </details>
-        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "DISCOVER_ONLY" ? "正在查询已有结果（0 次图片调用）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "DISCOVER_ONLY" ? "只读取已有账本与缓存，不会生成新图片" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
-        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "DISCOVER_ONLY" ? "正在查询已有结果（0 次图片调用）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "只查询恢复结果（0 次图片调用）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "RECOVERY_CHECK" ? "先读取已有账本；记录缺失时会调用文字模型重建配图计划" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !providerCanAttempt)}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "检查恢复状态（不生成图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
         {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
         {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
       </section>}

@@ -217,6 +217,7 @@ export function validateProviderReadiness(health) {
     [health.authenticated === false, "PROVIDER_PUBLIC_PROBE_ALREADY_AUTHENTICATED", `authenticated=${String(health.authenticated)}`],
     [health.status === "ACCESS_SESSION_REQUIRED", "PROVIDER_PUBLIC_STATUS_INVALID", String(health.status || "")],
     [health.image_ledger_configured === true, "PROVIDER_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(health.image_ledger_configured)}`],
+    [health.image_ledger_attested === true, "PROVIDER_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(health.image_ledger_attested)} status=${String(health.image_ledger_attestation_status || "")}`],
   ];
   return checks.filter(([passed]) => !passed).map(([, code, detail]) => ({ code, detail }));
 }
@@ -401,6 +402,7 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
     [rollbackProvider?.access_required === true, "ROLLBACK_ACCESS_NOT_REQUIRED", `access_required=${String(rollbackProvider?.access_required)}`],
     [rollbackProvider?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(rollbackProvider?.credential_mode || "")],
     [rollbackProvider?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(rollbackProvider?.image_ledger_configured)}`],
+    [rollbackProvider?.image_ledger_attested === true, "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(rollbackProvider?.image_ledger_attested)} status=${String(rollbackProvider?.image_ledger_attestation_status || "")}`],
   ]) {
     if (!passed) errors.push({ code, detail });
   }
