@@ -3122,11 +3122,57 @@ test("provider client honors a persisted STOP decision before issuing the next i
     },
   });
   await assert.rejects(
-    () => provider.generateImages(stepInput, async () => ({ action: "STOP" })),
+    () => provider.generateImages(stepInput, async () => ({ action: "STOP", checkpointPersisted: true })),
     (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT"
       && error.checkpointPersisted === true
       && error.intentionalStop === true
       && error.providerDetails?.run_id === stepInput.run_id,
+  );
+  assert.equal(fetches, 1);
+});
+
+test("cloud image client reports a rejected local checkpoint honestly and makes no follow-up call", async () => {
+  const stepInput = {
+    mode: "STEP",
+    run_id: "image-run-contract-0001",
+    checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: 1 },
+    checkpoint_preimage_sha256: "d".repeat(64),
+    logical_step_id: "render-page-2",
+    attempt_nonce: "e".repeat(64),
+  };
+  let fetches = 0;
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => {
+      fetches += 1;
+      return { ok: true, status: 200, json: async () => ({
+        schema: "xiaoshimei.image-generation-response.v1",
+        status: "PARTIAL",
+        bootstrap_nonce: "a".repeat(64),
+        input_sha256: "b".repeat(64),
+        run_id: stepInput.run_id,
+        checkpoint_preimage: { schema: "xiaoshimei.image-checkpoint.v1", cursor: 2 },
+        checkpoint_preimage_sha256: "f".repeat(64),
+        logical_step_id: "render-page-3",
+        progress: { completed_steps: 2, total_steps: 3 },
+        assets: [],
+        media_delta: [],
+        error: null,
+        cached: false,
+        recoverable_until: "2026-09-08T00:00:00.000Z",
+        upstream_calls: 1,
+      }) };
+    },
+  });
+  await assert.rejects(
+    () => provider.generateImages(stepInput, async () => ({
+      action: "STOP",
+      checkpointPersisted: false,
+      code: "LOCAL_MEDIA_WRITE_FAILED",
+    })),
+    (error) => error.providerCode === "LOCAL_MEDIA_WRITE_FAILED"
+      && error.checkpointPersisted === false
+      && error.intentionalStop === false,
   );
   assert.equal(fetches, 1);
 });

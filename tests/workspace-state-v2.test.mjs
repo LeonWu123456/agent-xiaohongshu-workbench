@@ -22,6 +22,7 @@ import {
   activateDraftRecordV3,
   activeDraftRecord,
   activeDraftRecordV3,
+  authoringSessionForDraftSnapshotV3,
   beginNewDraft,
   beginNewDraftV3,
   buildWorkspaceBackup,
@@ -37,6 +38,8 @@ import {
   commitDraftImageCompletionV3,
   commitDraftImagePlannerFailureV3,
   commitDraftImageProgressV3,
+  draftAutosaveRequiredV3,
+  draftContentWithPreservedBookkeepingV3,
   draftRecordToken,
   legacyStateFromWorkspaceEnvelope,
   libraryContents,
@@ -49,6 +52,8 @@ import {
   parseWorkspaceBackupV3,
   parseWorkspaceEnvelopeV3,
   hydrateWorkspaceV3View,
+  imageBootstrapRebaseAllowedV3,
+  imageOperationAuthorityV3,
   materializePersistentMediaRefsV3,
   persistWorkspaceEnvelope,
   persistDraftRecordWithReadback,
@@ -1392,6 +1397,24 @@ test("v3 explicit save persists id and saved_at even when the semantic draft tok
   assert.deepEqual(libraryContentsV3(receipt.workspace).map((item) => item.draft_record_id), [record.draft_id]);
 });
 
+test("background draft writes preserve the newest asset-library bookkeeping", () => {
+  const record = createDraftRecordV3({
+    draftId: "bookkeeping-race",
+    contentPackage: {
+      ...generateContentPackage({ topic: "保存与配图同时发生", pillar: "culture", goal: "save" }),
+      id: "stable-library-id",
+      saved_at: T1,
+    },
+    createdAt: T0,
+  });
+  const merged = draftContentWithPreservedBookkeepingV3({
+    contentPackage: { ...record.content_package, id: undefined, saved_at: T0 },
+    draftRecord: record,
+  });
+  assert.equal(merged.id, "stable-library-id");
+  assert.equal(merged.saved_at, T1, "an older bootstrap/autosave snapshot cannot erase or rewind a newer save");
+});
+
 test("authoring action references persist as an ordered ref-only manifest through save, backup, restore and hydration", async () => {
   const bytes = Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -1539,6 +1562,229 @@ test("v3 main mutation helpers preserve pending image authority across autosave,
   assert.equal(profiled.profile.account_owner, "小师妹本人");
   assert.deepEqual(activeDraftRecordV3(profiled).pending_image_operation, pending);
   assert.match(workspaceEnvelopeV3Token(profiled), /workspace-envelope\.v3/);
+});
+
+test("autosave derives image resume from the same DraftRecord snapshot", () => {
+  const cleanSession = { ...fullSession("snapshot-text"), image_resume: null };
+  const cleanRecord = createDraftRecordV3({
+    draftId: "snapshot-draft",
+    contentPackage: assembledContent(cleanSession, "snapshot-draft"),
+    generationSession: cleanSession,
+    createdAt: T0,
+  });
+  const staleLiveSession = {
+    ...cleanSession,
+    image_resume: { resume_run_id: "stale-react-run", completed_mother_sheets: 2 },
+  };
+  const withoutPending = authoringSessionForDraftSnapshotV3({
+    generationSession: staleLiveSession,
+    draftRecord: cleanRecord,
+  });
+  assert.equal(withoutPending.image_resume, null, "a stale React closure cannot create resume without pending authority");
+  assert.doesNotThrow(() => createDraftRecordV3({
+    draftId: cleanRecord.draft_id,
+    contentPackage: cleanRecord.content_package,
+    generationSession: withoutPending,
+    createdAt: T0,
+  }));
+
+  const durableResume = { resume_run_id: "durable-run", completed_mother_sheets: 1 };
+  const pending = createPendingImageOperation({
+    operationNonce: "7".repeat(64),
+    operationSnapshot: imageOperationSnapshot(cleanRecord.draft_id, cleanSession.text_draft),
+    operationSnapshotHash: "8".repeat(64),
+    inputHash: "9".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "PARTIAL",
+  });
+  const pendingRecord = createDraftRecordV3({
+    draftId: cleanRecord.draft_id,
+    contentPackage: cleanRecord.content_package,
+    generationSession: { ...cleanSession, image_resume: durableResume },
+    pendingImageOperation: pending,
+    createdAt: T0,
+  });
+  const withPending = authoringSessionForDraftSnapshotV3({
+    generationSession: staleLiveSession,
+    draftRecord: pendingRecord,
+  });
+  assert.deepEqual(withPending.image_resume, durableResume, "a pending operation keeps only its own durable resume cursor");
+});
+
+test("autosave winning the real bootstrap race rebases once on the same semantic draft", async () => {
+  const baseSession = sourceOnlySession("一句话选题");
+  const baseRecord = createDraftRecordV3({
+    draftId: "race-draft",
+    contentPackage: generateContentPackage({ topic: "一句话选题", pillar: "culture", goal: "save" }),
+    generationSession: baseSession,
+    createdAt: T0,
+  });
+  const baseWorkspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: baseRecord.draft_id,
+    drafts: [baseRecord],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({
+    storage: memoryStorage(),
+    keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+    lockManager: exclusiveLocks(),
+  });
+  assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace: baseWorkspace })).ok, true);
+
+  const confirmedSession = { ...fullSession("race-text"), image_resume: null };
+  const confirmedContent = assembledContent(confirmedSession, "race-draft");
+  const autosavedWorkspace = saveDraftRecordV3(baseWorkspace, {
+    contentPackage: confirmedContent,
+    generationSession: confirmedSession,
+    updatedAt: T1,
+  });
+  const autosavedDraft = activeDraftRecordV3(autosavedWorkspace);
+  const autosaveReceipt = await coordinator.mergeDraftCas({
+    draftId: baseRecord.draft_id,
+    expectedDraftToken: draftRecordToken(baseRecord),
+    replacementDraft: autosavedDraft,
+    requireActiveDraftId: baseRecord.draft_id,
+    reason: "TEST_AUTOSAVE_WINS",
+  });
+  assert.equal(autosaveReceipt.ok, true);
+
+  const operationNonce = "a".repeat(64);
+  const pending = createPendingImageOperation({
+    operationNonce,
+    operationSnapshot: imageOperationSnapshot(baseRecord.draft_id, confirmedSession.text_draft),
+    operationSnapshotHash: "b".repeat(64),
+    inputHash: "c".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "BOOTSTRAP",
+  });
+  const desiredWorkspace = saveDraftRecordV3(baseWorkspace, {
+    contentPackage: confirmedContent,
+    generationSession: confirmedSession,
+    pendingImageOperation: pending,
+  });
+  const desiredDraft = activeDraftRecordV3(desiredWorkspace);
+  const firstBootstrap = await coordinator.mergeDraftCas({
+    draftId: baseRecord.draft_id,
+    expectedDraftToken: draftRecordToken(baseRecord),
+    replacementDraft: desiredDraft,
+    requireActiveDraftId: baseRecord.draft_id,
+    reason: "TEST_BOOTSTRAP_STALE_BASE",
+  });
+  assert.equal(firstBootstrap.code, "WORKSPACE_DRAFT_CAS_CONFLICT");
+  assert.equal(imageBootstrapRebaseAllowedV3({
+    latestDraft: firstBootstrap.target_draft,
+    desiredDraft,
+    targetDraftId: baseRecord.draft_id,
+    operationNonce,
+  }), true);
+  const rebasedWorkspace = saveDraftRecordV3(firstBootstrap.workspace, {
+    contentPackage: confirmedContent,
+    generationSession: authoringSessionForDraftSnapshotV3({ generationSession: confirmedSession, draftRecord: firstBootstrap.target_draft }),
+    pendingImageOperation: pending,
+  });
+  const rebasedDraft = activeDraftRecordV3(rebasedWorkspace);
+  const secondBootstrap = await coordinator.mergeDraftCas({
+    draftId: baseRecord.draft_id,
+    expectedDraftToken: draftRecordToken(firstBootstrap.target_draft),
+    replacementDraft: rebasedDraft,
+    requireActiveDraftId: baseRecord.draft_id,
+    reason: "TEST_BOOTSTRAP_REBASE_ONCE",
+  });
+  assert.equal(secondBootstrap.ok, true);
+  assert.equal(secondBootstrap.target_draft.pending_image_operation.operation_nonce, operationNonce);
+  assert.equal(secondBootstrap.target_draft.generation_session.image_resume, null);
+
+  const changedDraft = createDraftRecordV3({
+    draftId: autosavedDraft.draft_id,
+    contentPackage: { ...autosavedDraft.content_package, body: `${autosavedDraft.content_package.body}\n另一标签页的新修改` },
+    generationSession: confirmedSession,
+    createdAt: autosavedDraft.created_at,
+  });
+  assert.equal(imageBootstrapRebaseAllowedV3({ latestDraft: changedDraft, desiredDraft, targetDraftId: baseRecord.draft_id, operationNonce }), false, "semantic divergence must never be rebased into a paid request");
+  assert.equal(imageBootstrapRebaseAllowedV3({ latestDraft: secondBootstrap.target_draft, desiredDraft, targetDraftId: baseRecord.draft_id, operationNonce }), false, "an existing pending operation must never be overwritten");
+});
+
+test("bootstrap winning the reverse race makes unchanged autosave a zero-write before the first checkpoint", async () => {
+  const session = { ...fullSession("reverse-race-text"), image_resume: null };
+  const record = createDraftRecordV3({
+    draftId: "reverse-race-draft",
+    contentPackage: assembledContent(session, "reverse-race-draft"),
+    generationSession: session,
+    createdAt: T0,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: record.draft_id,
+    drafts: [record],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({
+    storage: memoryStorage(),
+    keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+    lockManager: exclusiveLocks(),
+  });
+  assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace })).ok, true);
+  const operationNonce = "d".repeat(64);
+  const pending = createPendingImageOperation({
+    operationNonce,
+    operationSnapshot: imageOperationSnapshot(record.draft_id, session.text_draft),
+    operationSnapshotHash: "e".repeat(64),
+    inputHash: "f".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "BOOTSTRAP",
+  });
+  const bootstrapWorkspace = saveDraftRecordV3(workspace, { pendingImageOperation: pending, updatedAt: T1 });
+  const bootstrapDraft = activeDraftRecordV3(bootstrapWorkspace);
+  const bootstrapReceipt = await coordinator.mergeDraftCas({
+    draftId: record.draft_id,
+    expectedDraftToken: draftRecordToken(record),
+    replacementDraft: bootstrapDraft,
+    requireActiveDraftId: record.draft_id,
+    reason: "TEST_BOOTSTRAP_WINS",
+  });
+  assert.equal(bootstrapReceipt.ok, true);
+
+  const unchangedAutosaveWorkspace = saveDraftRecordV3(bootstrapReceipt.workspace, {
+    contentPackage: bootstrapReceipt.target_draft.content_package,
+    generationSession: authoringSessionForDraftSnapshotV3({ generationSession: session, draftRecord: bootstrapReceipt.target_draft }),
+    updatedAt: "2026-08-31T06:06:00.000Z",
+  });
+  const unchangedAutosaveDraft = activeDraftRecordV3(unchangedAutosaveWorkspace);
+  assert.equal(draftAutosaveRequiredV3({ baseDraft: bootstrapReceipt.target_draft, candidateDraft: unchangedAutosaveDraft }), false);
+  assert.equal(draftRecordToken(unchangedAutosaveDraft), draftRecordToken(bootstrapReceipt.target_draft));
+
+  const checkpoint = await commitDraftImageProgressV3({
+    coordinator,
+    mediaStore: null,
+    draftId: record.draft_id,
+    expectedDraftToken: draftRecordToken(bootstrapReceipt.target_draft),
+    operationSnapshot: bootstrapReceipt.target_draft,
+    recoveredDraftId: `image-recovery-${operationNonce.slice(0, 32)}`,
+    imageResume: { resume_run_id: "reverse-race-run", completed_image_steps: 0, total_image_steps: 2 },
+    responseStatus: "READY_DISCOVERY",
+    mediaDelta: [],
+    updatedAt: "2026-08-31T06:07:00.000Z",
+  });
+  assert.equal(checkpoint.action, "CONTINUE");
+  assert.equal(checkpoint.checkpointPersisted, true);
+  assert.equal(checkpoint.recovered_draft_id, null);
+  assert.equal(checkpoint.target_draft.draft_id, record.draft_id);
+
+  const changedAutosaveDraft = createDraftRecordV3({
+    draftId: bootstrapReceipt.target_draft.draft_id,
+    contentPackage: { ...bootstrapReceipt.target_draft.content_package, body: `${bootstrapReceipt.target_draft.content_package.body}\n用户确实改了正文` },
+    generationSession: authoringSessionForDraftSnapshotV3({ generationSession: session, draftRecord: bootstrapReceipt.target_draft }),
+    pendingImageOperation: bootstrapReceipt.target_draft.pending_image_operation,
+    createdAt: bootstrapReceipt.target_draft.created_at,
+  });
+  assert.equal(draftAutosaveRequiredV3({ baseDraft: bootstrapReceipt.target_draft, candidateDraft: changedAutosaveDraft }), true, "real text changes must still autosave and force later image results into safe recovery");
 });
 
 test("READY and READY_DISCOVERY persist as planning-ready while only PARTIAL records produced image progress", async () => {
@@ -1804,6 +2050,7 @@ test("v3 image transactions persist media before refs, keep active B unchanged, 
     updatedAt: T1,
   });
   assert.equal(progress.action, "CONTINUE");
+  assert.equal(progress.checkpointPersisted, true);
   assert.deepEqual(events, ["put", "read", "read", "workspace"]);
   assert.deepEqual(progress.workspace.drafts.find((item) => item.draft_id === "record-b"), bBefore);
   assert.equal(progress.workspace.active_draft_id, "record-b");
@@ -1860,6 +2107,8 @@ test("v3 image transactions persist media before refs, keep active B unchanged, 
   assert.equal(completed.target_draft.pending_image_operation, null);
   assert.equal(completed.target_draft.generation_session.image_resume, null);
   assert.equal(completed.target_draft.generation_session.assembled_draft_id, session.text_draft.draft_id);
+  assert.equal(completed.target_draft.content_package.id, recordA.content_package.id, "completion must retain the asset-library identity");
+  assert.equal(completed.target_draft.content_package.saved_at, recordA.content_package.saved_at, "completion must retain the latest saved marker");
   assert.deepEqual(completed.workspace.drafts.find((item) => item.draft_id === "record-b"), bBefore);
   assert.equal(completed.workspace.previous_draft_id, "record-a", "image completion must not rewrite the navigation hint");
 
@@ -1894,6 +2143,7 @@ test("v3 image transactions persist media before refs, keep active B unchanged, 
     updatedAt: T1,
   });
   assert.equal(failed.action, "STOP");
+  assert.equal(failed.checkpointPersisted, false);
   assert.equal(failed.code, "IMAGE_OPERATION_MEDIA_PERSIST_FAILED");
   assert.equal(writes, 0);
 });
@@ -1965,12 +2215,195 @@ test("a paid v3 PARTIAL that conflicts with edited A commits one recovered sibli
     updatedAt: "2026-08-31T06:15:00.000Z",
   });
   assert.equal(result.action, "STOP");
+  assert.equal(result.checkpointPersisted, true, "a recovered STOP is safe only after the atomic move is read back");
   assert.equal(result.disposition, "RECOVERED_SIBLING_COMMITTED");
   assert.equal(result.recovered_draft.draft_id, "partial-a-recovered");
   assert.equal(result.recovered_draft.pending_image_operation.protocol_state, "PARTIAL");
   assert.equal(result.workspace.drafts.find((item) => item.draft_id === recordA.draft_id).content_package.body, editedA.content_package.body);
+  assert.equal(result.workspace.drafts.find((item) => item.draft_id === recordA.draft_id).pending_image_operation, null, "the edited source must release the moved operation atomically");
   assert.equal(result.workspace.active_draft_id, recordB.draft_id);
   assert.deepEqual(result.active_draft, bBefore);
+});
+
+test("an edited source moves PARTIAL into one recovery authority that refresh can advance in place through COMPLETE", async () => {
+  const operationNonce = "1".repeat(64);
+  const recoveryId = `image-recovery-${operationNonce.slice(0, 32)}`;
+  const originalSession = { ...fullSession("move-old-text"), image_resume: null };
+  const pending = createPendingImageOperation({
+    operationNonce,
+    operationSnapshot: imageOperationSnapshot("move-source-a", originalSession.text_draft),
+    operationSnapshotHash: "2".repeat(64),
+    inputHash: "3".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "READY",
+    runId: "images-2026-09-02T12-00-00-000Z-recovery",
+    completedImageSteps: 0,
+    totalImageSteps: 3,
+  });
+  const sourceA = createDraftRecordV3({
+    draftId: "move-source-a",
+    contentPackage: assembledContent(originalSession, "move-source-a"),
+    generationSession: originalSession,
+    pendingImageOperation: pending,
+    createdAt: T0,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T0,
+    profile: createProfileV2(),
+    active_draft_id: sourceA.draft_id,
+    drafts: [sourceA],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({
+    storage: memoryStorage(),
+    keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+    lockManager: exclusiveLocks(),
+  });
+  assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace })).ok, true);
+
+  const editedText = { ...originalSession.text_draft, draft_id: "move-new-text", body: `${originalSession.text_draft.body}\n这是用户生成中追加的新文字。` };
+  const editedSession = {
+    ...originalSession,
+    text_draft: editedText,
+    text_confirmed: false,
+    assembled_draft_id: null,
+    image_resume: null,
+  };
+  const editedA = createDraftRecordV3({
+    draftId: sourceA.draft_id,
+    contentPackage: { ...sourceA.content_package, body: "用户正在继续编辑 A；旧图片只能进入恢复稿。" },
+    generationSession: editedSession,
+    pendingImageOperation: pending,
+    createdAt: sourceA.created_at,
+    updatedAt: T1,
+  });
+  assert.equal((await coordinator.mergeDraftCas({
+    draftId: sourceA.draft_id,
+    expectedDraftToken: draftRecordToken(sourceA),
+    replacementDraft: editedA,
+  })).ok, true);
+
+  const moved = await commitDraftImageProgressV3({
+    coordinator,
+    mediaStore: null,
+    draftId: sourceA.draft_id,
+    expectedDraftToken: draftRecordToken(sourceA),
+    operationSnapshot: sourceA,
+    recoveredDraftId: recoveryId,
+    imageResume: {
+      resume_run_id: pending.run_id,
+      completed_image_steps: 1,
+      total_image_steps: 3,
+    },
+    responseStatus: "PARTIAL",
+    mediaDelta: [],
+    updatedAt: "2026-09-02T12:01:00.000Z",
+  });
+  assert.equal(moved.action, "STOP", "the paid loop must stop after moving authority");
+  assert.equal(moved.disposition, "RECOVERED_SIBLING_COMMITTED");
+  assert.equal(moved.checkpointPersisted, true);
+  assert.equal(moved.workspace.active_draft_id, sourceA.draft_id);
+  assert.equal(moved.target_draft.pending_image_operation, null);
+  assert.equal(moved.target_draft.content_package.body, editedA.content_package.body);
+  assert.equal(moved.target_draft.generation_session.text_draft.draft_id, editedText.draft_id);
+  assert.equal(moved.recovered_draft.pending_image_operation.completed_image_steps, 1);
+
+  const duplicateSource = createDraftRecordV3({
+    draftId: moved.target_draft.draft_id,
+    contentPackage: moved.target_draft.content_package,
+    generationSession: {
+      ...moved.target_draft.generation_session,
+      image_resume: moved.recovered_draft.generation_session.image_resume,
+    },
+    pendingImageOperation: moved.recovered_draft.pending_image_operation,
+    createdAt: moved.target_draft.created_at,
+    updatedAt: "2026-09-02T12:01:30.000Z",
+  });
+  const duplicated = await coordinator.mergeDraftCas({
+    draftId: moved.target_draft.draft_id,
+    expectedDraftToken: draftRecordToken(moved.target_draft),
+    replacementDraft: duplicateSource,
+    reason: "TEST_LEGACY_DUPLICATE_SOURCE_PENDING",
+  });
+  assert.equal(duplicated.ok, true);
+
+  const refreshed = parseWorkspaceEnvelopeV3(JSON.stringify(coordinator.snapshot().workspace));
+  const authority = imageOperationAuthorityV3(refreshed);
+  assert.equal(authority.source_draft_id, sourceA.draft_id);
+  assert.equal(authority.holder_draft_id, recoveryId);
+  assert.equal(authority.location, "RECOVERY_DUPLICATE_SOURCE_PENDING");
+  assert.equal(authority.record.pending_image_operation.operation_nonce, operationNonce);
+
+  const advanced = await commitDraftImageProgressV3({
+    coordinator,
+    mediaStore: null,
+    draftId: authority.holder_draft_id,
+    expectedDraftToken: draftRecordToken(authority.record),
+    operationSnapshot: authority.record,
+    recoveredDraftId: authority.holder_draft_id,
+    imageResume: {
+      resume_run_id: pending.run_id,
+      completed_image_steps: 2,
+      total_image_steps: 3,
+    },
+    responseStatus: "PARTIAL",
+    mediaDelta: [],
+    updatedAt: "2026-09-02T12:02:00.000Z",
+  });
+  assert.equal(advanced.action, "CONTINUE");
+  assert.equal(advanced.target_draft.draft_id, recoveryId);
+  assert.equal(advanced.target_draft.pending_image_operation.completed_image_steps, 2);
+  assert.equal(advanced.workspace.drafts.filter((draft) => draft.draft_id === recoveryId).length, 1);
+  assert.equal(advanced.workspace.drafts.find((draft) => draft.draft_id === sourceA.draft_id).content_package.body, editedA.content_package.body);
+  assert.equal(advanced.workspace.drafts.find((draft) => draft.draft_id === sourceA.draft_id).pending_image_operation, null, "advancing the recovery lane must atomically retire a legacy duplicate source owner");
+  assert.equal(imageOperationAuthorityV3(advanced.workspace).location, "RECOVERY");
+
+  const finalContent = assembledContent(originalSession, "move-final");
+  finalContent.generation = {
+    ...finalContent.generation,
+    mode: "PROVIDER",
+    provider: "volcengine-ark",
+    source_draft_id: originalSession.text_draft.draft_id,
+    strategy: "resumable_public_image_steps_v1",
+  };
+  const completedAt = "2026-09-02T12:03:00.000Z";
+  const completed = await commitDraftImageCompletionV3({
+    coordinator,
+    mediaStore: null,
+    draftId: recoveryId,
+    expectedDraftToken: draftRecordToken(advanced.target_draft),
+    operationSnapshot: advanced.target_draft,
+    recoveredDraftId: recoveryId,
+    contentPackage: finalContent,
+    mediaDelta: [],
+    updatedAt: completedAt,
+  });
+  assert.equal(completed.action, "COMPLETE");
+  assert.equal(completed.recovered_draft.draft_id, recoveryId);
+  assert.equal(completed.recovered_draft.pending_image_operation, null);
+  assert.equal(completed.recovered_draft.content_package.saved_at, completedAt);
+  assert.equal(completed.workspace.active_draft_id, sourceA.draft_id);
+  assert.equal(completed.workspace.drafts.find((draft) => draft.draft_id === sourceA.draft_id).content_package.body, editedA.content_package.body);
+  assert.equal(completed.workspace.drafts.filter((draft) => draft.draft_id === recoveryId).length, 1);
+  assert.equal(imageOperationAuthorityV3(completed.workspace), null);
+  assert.equal(libraryContentsV3(completed.workspace).some((item) => item.draft_record_id === recoveryId), true);
+
+  const replay = await commitDraftImageCompletionV3({
+    coordinator,
+    mediaStore: null,
+    draftId: recoveryId,
+    expectedDraftToken: draftRecordToken(advanced.target_draft),
+    operationSnapshot: advanced.target_draft,
+    recoveredDraftId: recoveryId,
+    contentPackage: finalContent,
+    mediaDelta: [],
+    updatedAt: completedAt,
+  });
+  assert.equal(replay.action, "COMPLETE");
+  assert.equal(replay.disposition, "NOOP_ALREADY_APPLIED");
+  assert.equal(replay.workspace.drafts.filter((draft) => draft.draft_id === recoveryId).length, 1);
 });
 
 test("v3 image completion never overwrites edited A and commits one final recovered sibling without changing active B", async () => {

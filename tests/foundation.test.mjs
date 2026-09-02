@@ -611,7 +611,7 @@ test("image client STOP and cached replay both use the same consumer gate and ne
     () => provider.generateImages(imageStartInput(), async (payload) => {
       assert.equal(payload.cached, true);
       assert.equal(payload.media_delta[0].media_ref, IMAGE_ASSET_REF);
-      return { action: "STOP" };
+      return { action: "STOP", checkpointPersisted: true };
     }),
     (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT" && error.intentionalStop === true,
   );
@@ -632,13 +632,35 @@ test("READY, READY discovery and COMPLETE all pass through the same persistence 
     await assert.rejects(
       () => provider.generateImages(imageStartInput(), async () => {
         consumerCalls += 1;
-        return { action: "STOP" };
+        return { action: "STOP", checkpointPersisted: true };
       }),
       (error) => error.providerCode === "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT",
     );
     assert.equal(consumerCalls, 1, `${status} must reach the persistence consumer`);
     assert.equal(fetches, 1, `${status} STOP must not issue another request`);
   }
+});
+
+test("image client never describes a failed local write as a safe checkpoint", async () => {
+  let fetches = 0;
+  const provider = createLocalHttpProvider({
+    endpoint: "http://127.0.0.1:9909/generate",
+    fetchImpl: async () => {
+      fetches += 1;
+      return { ok: true, status: 200, json: async () => imageGenerationResponse("PARTIAL") };
+    },
+  });
+  await assert.rejects(
+    () => provider.generateImages(imageStartInput(), async () => ({
+      action: "STOP",
+      checkpointPersisted: false,
+      code: "LOCAL_MEDIA_WRITE_FAILED",
+    })),
+    (error) => error.providerCode === "LOCAL_MEDIA_WRITE_FAILED"
+      && error.checkpointPersisted === false
+      && error.intentionalStop === false,
+  );
+  assert.equal(fetches, 1, "a failed checkpoint must stop before another paid request");
 });
 
 test("access login reconciles 2xx and ambiguous outcomes exactly once, while explicit auth failures stay exact", async () => {

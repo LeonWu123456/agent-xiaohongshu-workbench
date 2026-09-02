@@ -166,6 +166,7 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     return error;
   };
   const progressRequestsStop = (value) => value === "STOP" || value === false || value?.action === "STOP";
+  const progressConfirmsCheckpoint = (value) => value?.action === "STOP" && value?.checkpointPersisted === true;
   const stoppedAfterCheckpoint = (resume) => {
     const error = new Error("IMAGE_RUN_STOPPED_AFTER_CHECKPOINT");
     error.providerCode = "IMAGE_RUN_STOPPED_AFTER_CHECKPOINT";
@@ -173,6 +174,19 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     error.providerDetails = structuredClone(resume);
     error.checkpointPersisted = true;
     error.intentionalStop = true;
+    return error;
+  };
+  const stoppedWithoutCheckpoint = (decision, resume) => {
+    const providerCode = String(decision?.code || "IMAGE_CHECKPOINT_NOT_PERSISTED");
+    const error = new Error(providerCode);
+    error.providerCode = providerCode;
+    error.providerStage = "image";
+    error.providerDetails = {
+      ...structuredClone(resume),
+      local_checkpoint: decision && typeof decision === "object" ? structuredClone(decision) : null,
+    };
+    error.checkpointPersisted = false;
+    error.intentionalStop = false;
     return error;
   };
 
@@ -319,7 +333,10 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
         const payload = parseImageGenerationResponse(await post(imageGenerationUrl, buildImageGenerationRequest(next)));
         if (!new Set(["READY", "READY_DISCOVERY", "PARTIAL", "COMPLETE"]).has(payload.status)) return payload;
         const decision = typeof onProgress === "function" ? await onProgress(structuredClone(payload)) : null;
-        if (progressRequestsStop(decision)) throw stoppedAfterCheckpoint(payload);
+        if (progressRequestsStop(decision)) {
+          if (progressConfirmsCheckpoint(decision)) throw stoppedAfterCheckpoint(payload);
+          throw stoppedWithoutCheckpoint(decision, payload);
+        }
         if (payload.status === "COMPLETE") return payload;
         const nextRequest = decision?.request || decision?.next_request || null;
         if (!nextRequest) return payload;

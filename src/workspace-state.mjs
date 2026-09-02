@@ -226,6 +226,66 @@ export function draftRecordToken(value) {
   });
 }
 
+function imageBootstrapComparableDraftTokenV3(value) {
+  const record = parseDraftRecordV3(value);
+  const generationSession = record.generation_session == null
+    ? null
+    : { ...record.generation_session, image_resume: null };
+  return draftRecordToken(createDraftRecordV3({
+    draftId: record.draft_id,
+    contentPackage: record.content_package,
+    generationSession,
+    pendingImageOperation: null,
+    createdAt: record.created_at,
+    updatedAt: record.created_at,
+  }));
+}
+
+export function imageBootstrapRebaseAllowedV3({ latestDraft, desiredDraft, targetDraftId, operationNonce } = {}) {
+  try {
+    const latest = parseDraftRecordV3(latestDraft);
+    const desired = parseDraftRecordV3(desiredDraft);
+    const targetId = requiredString(targetDraftId, "targetDraftId");
+    const nonce = exactSha256(operationNonce, "operationNonce");
+    if (latest.draft_id !== targetId || desired.draft_id !== targetId) return false;
+    if (latest.pending_image_operation != null) return false;
+    if (desired.pending_image_operation?.operation_nonce !== nonce) return false;
+    return imageBootstrapComparableDraftTokenV3(latest) === imageBootstrapComparableDraftTokenV3(desired);
+  } catch {
+    return false;
+  }
+}
+
+export function authoringSessionForDraftSnapshotV3({ generationSession, draftRecord } = {}) {
+  const record = parseDraftRecordV3(draftRecord);
+  if (generationSession == null) return null;
+  const durableImageResume = record.pending_image_operation == null
+    ? null
+    : record.generation_session?.image_resume ?? null;
+  return normalizeAuthoringSession({ ...generationSession, image_resume: durableImageResume });
+}
+
+export function draftContentWithPreservedBookkeepingV3({ contentPackage, draftRecord } = {}) {
+  const desired = checkedContent(contentPackage, "contentPackage");
+  const source = parseDraftRecordV3(draftRecord).content_package;
+  const savedAt = [source.saved_at, desired.saved_at]
+    .filter((value) => typeof value === "string" && value)
+    .sort()
+    .at(-1);
+  return checkedContent({
+    ...desired,
+    ...(source.id || desired.id ? { id: source.id || desired.id } : {}),
+    ...(savedAt ? { saved_at: savedAt } : {}),
+  }, "contentPackage");
+}
+
+export function draftAutosaveRequiredV3({ baseDraft, candidateDraft } = {}) {
+  const base = parseDraftRecordV3(baseDraft);
+  const candidate = parseDraftRecordV3(candidateDraft);
+  if (base.draft_id !== candidate.draft_id) throw new TypeError("AUTOSAVE_DRAFT_ID_MISMATCH");
+  return draftRecordToken(base) !== draftRecordToken(candidate);
+}
+
 export function activeDraftRecord(value) {
   const workspace = parseWorkspaceEnvelope(value);
   return workspace.drafts.find((draft) => draft.draft_id === workspace.active_draft_id);
@@ -1509,6 +1569,45 @@ export function activeDraftRecordV3(value) {
   return workspace.drafts.find((draft) => draft.draft_id === workspace.active_draft_id);
 }
 
+function imageRecoveryDraftIdV3(operationNonce) {
+  return `image-recovery-${exactSha256(operationNonce, "operationNonce").slice(0, 32)}`;
+}
+
+export function imageOperationAuthorityV3(value, { activeDraftId = null } = {}) {
+  const workspace = parseWorkspaceEnvelopeV3(value);
+  const sourceId = requiredString(activeDraftId || workspace.active_draft_id, "activeDraftId");
+  const active = workspace.drafts.find((draft) => draft.draft_id === sourceId);
+  if (!active) throw new TypeError("IMAGE_OPERATION_SOURCE_DRAFT_MISSING");
+
+  const recoveries = workspace.drafts.filter((draft) => {
+    const pending = draft.pending_image_operation;
+    return pending != null
+      && draft.draft_id === imageRecoveryDraftIdV3(pending.operation_nonce)
+      && pending.operation_snapshot?.draft_record_id === sourceId;
+  });
+  if (recoveries.length > 1) throw new TypeError("IMAGE_OPERATION_AUTHORITY_AMBIGUOUS");
+  if (recoveries.length === 1) {
+    const recovery = recoveries[0];
+    if (active.pending_image_operation != null
+      && active.pending_image_operation.operation_nonce !== recovery.pending_image_operation.operation_nonce) {
+      throw new TypeError("IMAGE_OPERATION_AUTHORITY_AMBIGUOUS");
+    }
+    return Object.freeze({
+      source_draft_id: sourceId,
+      holder_draft_id: recovery.draft_id,
+      location: active.pending_image_operation == null ? "RECOVERY" : "RECOVERY_DUPLICATE_SOURCE_PENDING",
+      record: recovery,
+    });
+  }
+  if (active.pending_image_operation == null) return null;
+  return Object.freeze({
+    source_draft_id: sourceId,
+    holder_draft_id: sourceId,
+    location: "ACTIVE",
+    record: active,
+  });
+}
+
 export function libraryContentsV3(value) {
   return libraryContentsFromNormalized(parseWorkspaceEnvelopeV3(value));
 }
@@ -2782,6 +2881,7 @@ function imageTransactionStopped({ code, message, receipt = null, operationSnaps
     code,
     ...(message == null ? {} : { message }),
     action: "STOP",
+    checkpointPersisted: false,
     operation_snapshot: operationSnapshot,
     media_manifest: mediaManifest,
   };
@@ -2791,6 +2891,146 @@ async function stageImageTransactionMedia({ mediaStore, mediaDelta, persistentVa
   const mediaManifest = await putAndReadbackMediaDelta(mediaStore, mediaDelta);
   await verifyWorkspaceMediaRefs(persistentValue, mediaStore);
   return mediaManifest;
+}
+
+function samePendingImageAuthority(left, right) {
+  return left != null
+    && right != null
+    && left.operation_nonce === right.operation_nonce
+    && left.operation_snapshot_hash === right.operation_snapshot_hash
+    && left.input_hash === right.input_hash;
+}
+
+function recoveryProgressCanAdvance(existing, desired) {
+  if (!samePendingImageAuthority(existing?.pending_image_operation, desired?.pending_image_operation)) return false;
+  const previous = Number(existing.pending_image_operation.completed_image_steps ?? 0);
+  const next = Number(desired.pending_image_operation.completed_image_steps ?? 0);
+  if (!Number.isInteger(previous) || !Number.isInteger(next) || next < previous) return false;
+  if (next === previous && !sameImageTransactionResult(existing, desired, { ignoreCreatedAt: true })) return false;
+  const previousRun = existing.pending_image_operation.run_id;
+  const nextRun = desired.pending_image_operation.run_id;
+  return previousRun == null || nextRun == null || previousRun === nextRun;
+}
+
+async function commitImageRecoveryMoveV3({
+  coordinator,
+  targetDraftId,
+  recoveredDraftId,
+  operationSnapshot,
+  buildRecoveredDraft,
+  mediaManifest,
+  updatedAt,
+  reason,
+} = {}) {
+  if (typeof coordinator?.snapshot !== "function" || typeof coordinator?.fullCas !== "function") {
+    return imageTransactionStopped({
+      code: "WORKSPACE_V3_COORDINATOR_ATOMIC_RECOVERY_UNAVAILABLE",
+      operationSnapshot,
+      mediaManifest,
+    });
+  }
+  const operationPending = operationSnapshot.pending_image_operation;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const latest = coordinator.snapshot();
+    if (!latest.ok || !latest.workspace) {
+      return imageTransactionStopped({ code: latest.code || "WORKSPACE_V3_READ_FAILED", operationSnapshot, mediaManifest });
+    }
+    const latestTarget = latest.workspace.drafts.find((draft) => draft.draft_id === targetDraftId) || null;
+    const existingRecovered = latest.workspace.drafts.find((draft) => draft.draft_id === recoveredDraftId) || null;
+    if (!latestTarget) {
+      return imageTransactionStopped({ code: "WORKSPACE_DRAFT_CAS_CONFLICT", operationSnapshot, mediaManifest });
+    }
+    const targetStillOwnsOperation = samePendingImageAuthority(latestTarget.pending_image_operation, operationPending);
+    if (latestTarget.pending_image_operation != null && !targetStillOwnsOperation) {
+      return imageTransactionStopped({ code: "WORKSPACE_DRAFT_CAS_CONFLICT", operationSnapshot, mediaManifest });
+    }
+    if (existingRecovered?.pending_image_operation != null
+      && !samePendingImageAuthority(existingRecovered.pending_image_operation, operationPending)) {
+      return imageTransactionStopped({ code: "WORKSPACE_RECOVERED_DRAFT_COLLISION", operationSnapshot, mediaManifest });
+    }
+
+    const desiredRecovered = buildRecoveredDraft(existingRecovered);
+    if (existingRecovered) {
+      const exactReplay = sameImageTransactionResult(existingRecovered, desiredRecovered, { ignoreCreatedAt: true });
+      const canAdvance = desiredRecovered.pending_image_operation == null
+        ? existingRecovered.pending_image_operation != null
+        : recoveryProgressCanAdvance(existingRecovered, desiredRecovered);
+      if (!exactReplay && !canAdvance) {
+        return imageTransactionStopped({ code: "WORKSPACE_RECOVERED_DRAFT_COLLISION", operationSnapshot, mediaManifest });
+      }
+      if (exactReplay && !targetStillOwnsOperation) {
+        return {
+          ...latest,
+          ok: true,
+          code: "WORKSPACE_RECOVERED_DRAFT_ALREADY_APPLIED",
+          disposition: "NOOP_ALREADY_APPLIED",
+          target_draft: latestTarget,
+          target_draft_token: draftRecordToken(latestTarget),
+          recovered_draft: existingRecovered,
+          recovered_draft_id: existingRecovered.draft_id,
+          operation_snapshot: existingRecovered,
+          media_manifest: mediaManifest,
+          action: desiredRecovered.pending_image_operation == null ? "COMPLETE" : "STOP",
+          checkpointPersisted: true,
+        };
+      }
+    } else if (latest.workspace.drafts.length >= MAX_DRAFT_RECORDS) {
+      return imageTransactionStopped({ code: "WORKSPACE_DRAFT_LIMIT_REACHED", operationSnapshot, mediaManifest });
+    }
+
+    const releasedTarget = targetStillOwnsOperation
+      ? createDraftRecordV3({
+        draftId: latestTarget.draft_id,
+        contentPackage: latestTarget.content_package,
+        generationSession: latestTarget.generation_session == null
+          ? null
+          : { ...latestTarget.generation_session, image_resume: null },
+        pendingImageOperation: null,
+        createdAt: latestTarget.created_at,
+        updatedAt,
+      })
+      : latestTarget;
+    const drafts = latest.workspace.drafts
+      .filter((draft) => draft.draft_id !== recoveredDraftId)
+      .map((draft) => draft.draft_id === targetDraftId ? releasedTarget : draft);
+    const nextWorkspace = v3WorkspaceFromNormalized({
+      workspace: latest.workspace,
+      drafts: [desiredRecovered, ...drafts],
+      updatedAt,
+    });
+    const receipt = await coordinator.fullCas({
+      expectedWorkspaceToken: latest.workspace_token,
+      workspace: nextWorkspace,
+      reason,
+    });
+    if (!receipt.ok) {
+      if (attempt === 0 && receipt.code === "WORKSPACE_V3_CAS_CONFLICT") continue;
+      return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot, mediaManifest });
+    }
+    const committedTarget = receipt.workspace?.drafts.find((draft) => draft.draft_id === targetDraftId) || null;
+    const committedRecovered = receipt.workspace?.drafts.find((draft) => draft.draft_id === recoveredDraftId) || null;
+    if (!committedTarget
+      || committedTarget.pending_image_operation != null
+      || !committedRecovered
+      || (desiredRecovered.pending_image_operation != null
+        && !samePendingImageAuthority(committedRecovered.pending_image_operation, operationPending))) {
+      return imageTransactionStopped({ code: "IMAGE_OPERATION_RECOVERY_READBACK_MISMATCH", receipt, operationSnapshot, mediaManifest });
+    }
+    return {
+      ...receipt,
+      ok: true,
+      disposition: existingRecovered ? "RECOVERY_LANE_ADVANCED" : "RECOVERED_SIBLING_COMMITTED",
+      target_draft: committedTarget,
+      target_draft_token: draftRecordToken(committedTarget),
+      recovered_draft: committedRecovered,
+      recovered_draft_id: recoveredDraftId,
+      operation_snapshot: committedRecovered,
+      media_manifest: mediaManifest,
+      action: committedRecovered.pending_image_operation == null ? "COMPLETE" : "STOP",
+      checkpointPersisted: true,
+    };
+  }
+  return imageTransactionStopped({ code: "WORKSPACE_V3_CAS_CONFLICT", operationSnapshot, mediaManifest });
 }
 
 export async function commitDraftImageProgressV3({
@@ -2803,6 +3043,7 @@ export async function commitDraftImageProgressV3({
   imageResume,
   responseStatus = "PARTIAL",
   mediaDelta = [],
+  forceRecovery = false,
   updatedAt = new Date().toISOString(),
 } = {}) {
   const coordinator = imageTransactionCoordinator(coordinatorValue);
@@ -2810,7 +3051,7 @@ export async function commitDraftImageProgressV3({
   if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
   const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
   const recoveredId = requiredString(recoveredDraftId, "recoveredDraftId");
-  if (recoveredId === targetId) throw new TypeError("recoveredDraftId must differ from draftId");
+  const recoveryLane = recoveredId === targetId;
   const timestamp = requiredString(updatedAt, "updatedAt");
   let resume;
   try { resume = normalizeV3ImageResume(imageResume); }
@@ -2839,24 +3080,82 @@ export async function commitDraftImageProgressV3({
     updatedAt: timestamp,
   });
   const desiredTarget = buildRecord({ sourceRecord: snapshotRecord, draftId: targetId, createdAt: snapshotRecord.created_at });
-  const recovered = buildRecord({ sourceRecord: snapshotRecord, draftId: recoveredId, createdAt: timestamp });
-  const receipt = await coordinator.mergeDraftCas({
+  if (recoveryLane) {
+    const sourceDraftId = requiredString(
+      snapshotRecord.pending_image_operation.operation_snapshot?.draft_record_id,
+      "pending_image_operation.operation_snapshot.draft_record_id",
+    );
+    if (sourceDraftId === targetId) {
+      return imageTransactionStopped({ code: "IMAGE_OPERATION_RECOVERY_SOURCE_INVALID", operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    const recoveredReceipt = await commitImageRecoveryMoveV3({
+      coordinator,
+      targetDraftId: sourceDraftId,
+      recoveredDraftId: targetId,
+      operationSnapshot: snapshotRecord,
+      buildRecoveredDraft: (existingRecovered) => {
+        const sourceRecord = existingRecovered?.pending_image_operation == null ? snapshotRecord : existingRecovered;
+        const recoveredPending = pendingAfterProgress(sourceRecord.pending_image_operation, resume, mediaManifest, timestamp, nextProtocolState);
+        return createDraftRecordV3({
+          draftId: targetId,
+          contentPackage: sourceRecord.content_package,
+          generationSession: { ...sourceRecord.generation_session, image_resume: resume },
+          pendingImageOperation: recoveredPending,
+          createdAt: existingRecovered?.created_at || snapshotRecord.created_at,
+          updatedAt: timestamp,
+        });
+      },
+      mediaManifest,
+      updatedAt: timestamp,
+      reason: `IMAGE_PARTIAL_RECOVERY_ADVANCE_V3:${pending.operation_nonce}`,
+    });
+    if (!recoveredReceipt.ok) return recoveredReceipt;
+    if (!recoveredReceipt.recovered_draft || recoveredReceipt.recovered_draft.pending_image_operation?.protocol_state !== nextProtocolState) {
+      return imageTransactionStopped({ code: "IMAGE_OPERATION_PROGRESS_READBACK_MISMATCH", receipt: recoveredReceipt, operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    return {
+      ...recoveredReceipt,
+      action: "CONTINUE",
+      checkpointPersisted: true,
+      operation_snapshot: recoveredReceipt.recovered_draft,
+      media_manifest: mediaManifest,
+      recovered_draft_id: targetId,
+    };
+  }
+  const receipt = forceRecovery
+    ? { ok: false, code: "WORKSPACE_DRAFT_CAS_CONFLICT" }
+    : await coordinator.mergeDraftCas({
     draftId: targetId,
     expectedDraftToken,
     buildDraft: (target) => buildRecord({ sourceRecord: target, draftId: target.draft_id, createdAt: target.created_at }),
     isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
-    isRecoveredAlreadyApplied: ({ existing_draft: existing, desired_draft: desired }) => sameImageTransactionResult(existing, desired, { ignoreCreatedAt: true }),
-    onConflict: () => recovered,
     reason: `IMAGE_PARTIAL_V3:${pending.operation_nonce}`,
-  });
-  if (!receipt.ok || receipt.recovered_draft) {
-    return {
-      ...receipt,
-      action: "STOP",
-      operation_snapshot: snapshotRecord,
-      media_manifest: mediaManifest,
-      recovered_draft_id: receipt.recovered_draft?.draft_id || null,
-    };
+    });
+  if (!receipt.ok && receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT") {
+    return commitImageRecoveryMoveV3({
+      coordinator,
+      targetDraftId: targetId,
+      recoveredDraftId: recoveredId,
+      operationSnapshot: snapshotRecord,
+      buildRecoveredDraft: (existingRecovered) => {
+        const sourceRecord = existingRecovered?.pending_image_operation == null ? snapshotRecord : existingRecovered;
+        const recoveredPending = pendingAfterProgress(sourceRecord.pending_image_operation, resume, mediaManifest, timestamp, nextProtocolState);
+        return createDraftRecordV3({
+          draftId: recoveredId,
+          contentPackage: sourceRecord.content_package,
+          generationSession: { ...sourceRecord.generation_session, image_resume: resume },
+          pendingImageOperation: recoveredPending,
+          createdAt: existingRecovered?.created_at || timestamp,
+          updatedAt: timestamp,
+        });
+      },
+      mediaManifest,
+      updatedAt: timestamp,
+      reason: `IMAGE_PARTIAL_RECOVERY_MOVE_V3:${pending.operation_nonce}`,
+    });
+  }
+  if (!receipt.ok) {
+    return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord, mediaManifest });
   }
   if (!receipt.target_draft || receipt.target_draft.pending_image_operation?.protocol_state !== nextProtocolState) {
     return imageTransactionStopped({ code: "IMAGE_OPERATION_PROGRESS_READBACK_MISMATCH", receipt, operationSnapshot: snapshotRecord, mediaManifest });
@@ -2864,6 +3163,7 @@ export async function commitDraftImageProgressV3({
   return {
     ...receipt,
     action: "CONTINUE",
+    checkpointPersisted: true,
     operation_snapshot: receipt.target_draft,
     media_manifest: mediaManifest,
     recovered_draft_id: null,
@@ -3012,6 +3312,7 @@ export async function commitDraftImageCompletionV3({
   recoveredDraftId,
   contentPackage,
   mediaDelta = [],
+  forceRecovery = false,
   updatedAt = new Date().toISOString(),
 } = {}) {
   const coordinator = imageTransactionCoordinator(coordinatorValue);
@@ -3019,9 +3320,8 @@ export async function commitDraftImageCompletionV3({
   if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
   const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
   const recoveredId = requiredString(recoveredDraftId, "recoveredDraftId");
-  if (recoveredId === targetId) throw new TypeError("recoveredDraftId must differ from draftId");
+  const recoveryLane = recoveredId === targetId;
   const timestamp = requiredString(updatedAt, "updatedAt");
-  const currentTextDraft = snapshotRecord.generation_session?.text_draft;
   const frozenTextDraft = frozenImageTextDraft(snapshotRecord);
   const { content, textDraft } = assertFinalImageContent(frozenTextDraft, contentPackage);
   let mediaManifest;
@@ -3047,103 +3347,116 @@ export async function commitDraftImageCompletionV3({
     assembled_draft_id: textDraft.draft_id,
     image_resume: null,
   };
-  const buildRecord = ({ draftId: nextId, createdAt, saveToLibrary = false }) => createDraftRecordV3({
+  const buildRecord = ({ draftId: nextId, createdAt, saveToLibrary = false, sourceRecord = snapshotRecord }) => createDraftRecordV3({
     draftId: nextId,
     contentPackage: saveToLibrary
       ? { ...content, id: nextId, saved_at: timestamp }
-      : content,
+      : draftContentWithPreservedBookkeepingV3({ contentPackage: content, draftRecord: sourceRecord }),
     generationSession: finalSession,
     pendingImageOperation: null,
     createdAt,
     updatedAt: timestamp,
   });
-  const desiredTarget = buildRecord({ draftId: targetId, createdAt: snapshotRecord.created_at });
-  const recovered = buildRecord({ draftId: recoveredId, createdAt: timestamp, saveToLibrary: true });
-
-  if (!sameConfirmedDraft(currentTextDraft, textDraft)) {
-    if (typeof coordinator.snapshot !== "function" || typeof coordinator.fullCas !== "function") {
-      return imageTransactionStopped({ code: "WORKSPACE_V3_COORDINATOR_ATOMIC_RECOVERY_UNAVAILABLE", operationSnapshot: snapshotRecord, mediaManifest });
+  const desiredTarget = buildRecord({
+    draftId: targetId,
+    createdAt: snapshotRecord.created_at,
+    saveToLibrary: recoveryLane,
+  });
+  if (recoveryLane) {
+    const sourceDraftId = requiredString(
+      snapshotRecord.pending_image_operation.operation_snapshot?.draft_record_id,
+      "pending_image_operation.operation_snapshot.draft_record_id",
+    );
+    if (sourceDraftId === targetId) {
+      return imageTransactionStopped({ code: "IMAGE_OPERATION_RECOVERY_SOURCE_INVALID", operationSnapshot: snapshotRecord, mediaManifest });
     }
-    const latest = coordinator.snapshot();
-    if (!latest.ok || !latest.workspace) {
-      return imageTransactionStopped({ code: latest.code || "WORKSPACE_V3_READ_FAILED", operationSnapshot: snapshotRecord, mediaManifest });
-    }
-    const latestTarget = latest.workspace.drafts.find((draft) => draft.draft_id === targetId) || null;
-    const existingRecovered = latest.workspace.drafts.find((draft) => draft.draft_id === recoveredId) || null;
-    if (
-      latestTarget?.pending_image_operation == null
-      && existingRecovered
-      && sameImageTransactionResult(existingRecovered, recovered, { ignoreCreatedAt: true })
-    ) {
-      return completedImageTransactionResult({
-        receipt: {
-          ok: true,
-          code: "WORKSPACE_RECOVERED_DRAFT_ALREADY_APPLIED",
-          disposition: "NOOP_ALREADY_APPLIED",
-          workspace: latest.workspace,
-          workspace_token: latest.workspace_token,
-          active_draft: latest.workspace.drafts.find((draft) => draft.draft_id === latest.workspace.active_draft_id) || null,
-        },
-        targetDraft: latestTarget,
-        recoveredDraft: existingRecovered,
-        snapshotRecord,
-        mediaManifest,
-        textDraft,
-      });
-    }
-    if (
-      !latestTarget
-      || latestTarget.pending_image_operation?.operation_nonce !== snapshotRecord.pending_image_operation.operation_nonce
-    ) return imageTransactionStopped({ code: "WORKSPACE_DRAFT_CAS_CONFLICT", operationSnapshot: snapshotRecord, mediaManifest });
-    if (existingRecovered) {
-      return imageTransactionStopped({ code: "WORKSPACE_RECOVERED_DRAFT_COLLISION", operationSnapshot: snapshotRecord, mediaManifest });
-    }
-    if (latest.workspace.drafts.length >= MAX_DRAFT_RECORDS) {
-      return imageTransactionStopped({ code: "WORKSPACE_DRAFT_LIMIT_REACHED", operationSnapshot: snapshotRecord, mediaManifest });
-    }
-    const releasedTarget = createDraftRecordV3({
-      draftId: latestTarget.draft_id,
-      contentPackage: latestTarget.content_package,
-      generationSession: latestTarget.generation_session == null
-        ? null
-        : { ...latestTarget.generation_session, image_resume: null },
-      pendingImageOperation: null,
-      createdAt: latestTarget.created_at,
+    const recoveredReceipt = await commitImageRecoveryMoveV3({
+      coordinator,
+      targetDraftId: sourceDraftId,
+      recoveredDraftId: targetId,
+      operationSnapshot: snapshotRecord,
+      buildRecoveredDraft: (existingRecovered) => buildRecord({
+        draftId: targetId,
+        createdAt: existingRecovered?.created_at || snapshotRecord.created_at,
+        saveToLibrary: true,
+        sourceRecord: existingRecovered || snapshotRecord,
+      }),
+      mediaManifest,
       updatedAt: timestamp,
+      reason: `IMAGE_COMPLETE_RECOVERY_ADVANCE_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
     });
-    const drafts = latest.workspace.drafts.map((draft) => draft.draft_id === targetId ? releasedTarget : draft);
-    const nextWorkspace = v3WorkspaceFromNormalized({
-      workspace: latest.workspace,
-      drafts: [recovered, ...drafts],
-      updatedAt: timestamp,
-    });
-    const receipt = await coordinator.fullCas({
-      expectedWorkspaceToken: latest.workspace_token,
-      workspace: nextWorkspace,
-      reason: `IMAGE_COMPLETE_RECOVERED_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
-    });
-    if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord, mediaManifest });
-    const committedTarget = receipt.workspace?.drafts.find((draft) => draft.draft_id === targetId) || null;
-    const committedRecovered = receipt.workspace?.drafts.find((draft) => draft.draft_id === recoveredId) || null;
+    if (!recoveredReceipt.ok || recoveredReceipt.action !== "COMPLETE") return recoveredReceipt;
     return completedImageTransactionResult({
-      receipt: { ...receipt, disposition: "RECOVERED_SIBLING_COMMITTED" },
-      targetDraft: committedTarget,
-      recoveredDraft: committedRecovered,
+      receipt: recoveredReceipt,
+      targetDraft: recoveredReceipt.target_draft,
+      recoveredDraft: recoveredReceipt.recovered_draft,
       snapshotRecord,
       mediaManifest,
       textDraft,
     });
   }
-
+  if (!recoveryLane && (forceRecovery || !sameConfirmedDraft(snapshotRecord.generation_session?.text_draft, frozenTextDraft))) {
+    const recoveredReceipt = await commitImageRecoveryMoveV3({
+      coordinator,
+      targetDraftId: targetId,
+      recoveredDraftId: recoveredId,
+      operationSnapshot: snapshotRecord,
+      buildRecoveredDraft: (existingRecovered) => buildRecord({
+        draftId: recoveredId,
+        createdAt: existingRecovered?.created_at || timestamp,
+        saveToLibrary: true,
+      }),
+      mediaManifest,
+      updatedAt: timestamp,
+      reason: `IMAGE_COMPLETE_FROZEN_LINEAGE_RECOVERY_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+    });
+    if (!recoveredReceipt.ok || recoveredReceipt.action !== "COMPLETE") return recoveredReceipt;
+    return completedImageTransactionResult({
+      receipt: recoveredReceipt,
+      targetDraft: recoveredReceipt.target_draft,
+      recoveredDraft: recoveredReceipt.recovered_draft,
+      snapshotRecord,
+      mediaManifest,
+      textDraft,
+    });
+  }
   const receipt = await coordinator.mergeDraftCas({
     draftId: targetId,
     expectedDraftToken,
-    buildDraft: (target) => buildRecord({ draftId: target.draft_id, createdAt: target.created_at }),
+    buildDraft: (target) => buildRecord({
+      draftId: target.draft_id,
+      createdAt: target.created_at,
+      saveToLibrary: recoveryLane,
+      sourceRecord: target,
+    }),
     isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
-    isRecoveredAlreadyApplied: ({ existing_draft: existing, desired_draft: desired }) => sameImageTransactionResult(existing, desired, { ignoreCreatedAt: true }),
-    onConflict: () => recovered,
     reason: `IMAGE_COMPLETE_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
   });
+  if (!receipt.ok && receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT" && !recoveryLane) {
+    const recoveredReceipt = await commitImageRecoveryMoveV3({
+      coordinator,
+      targetDraftId: targetId,
+      recoveredDraftId: recoveredId,
+      operationSnapshot: snapshotRecord,
+      buildRecoveredDraft: (existingRecovered) => buildRecord({
+        draftId: recoveredId,
+        createdAt: existingRecovered?.created_at || timestamp,
+        saveToLibrary: true,
+      }),
+      mediaManifest,
+      updatedAt: timestamp,
+      reason: `IMAGE_COMPLETE_RECOVERY_MOVE_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+    });
+    if (!recoveredReceipt.ok || recoveredReceipt.action !== "COMPLETE") return recoveredReceipt;
+    return completedImageTransactionResult({
+      receipt: recoveredReceipt,
+      targetDraft: recoveredReceipt.target_draft,
+      recoveredDraft: recoveredReceipt.recovered_draft,
+      snapshotRecord,
+      mediaManifest,
+      textDraft,
+    });
+  }
   if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord, mediaManifest });
   return completedImageTransactionResult({
     receipt,

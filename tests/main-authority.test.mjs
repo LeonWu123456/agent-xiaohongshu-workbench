@@ -386,6 +386,12 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.match(imageSource, /rebuildPendingImageStartV3\s*\(/, "a cached BOOTSTRAP must rebuild the same START, not create a new operation");
   assert.match(imageSource, /settleImageBootstrapPersistence\s*\(/);
   assert.match(imageSource, /IMAGE_BOOTSTRAP_STALE_PENDING_SAVED/);
+  const bootstrapConflictSource = between(imageSource, 'if (["WORKSPACE_DRAFT_CAS_CONFLICT", "WORKSPACE_ACTIVE_DRAFT_CONFLICT"].includes(snapshotReceipt?.code) && snapshotReceipt.workspace) {', '} else {\n            mainAuthority.commit');
+  assert.match(bootstrapConflictSource, /hydrateWorkspaceForView\(snapshotReceipt\.workspace\)/, "cross-tab image conflicts must hydrate the authoritative active draft before showing it");
+  assert.match(bootstrapConflictSource, /applyRecord: Boolean\(latestActive\)/, "an external active-draft switch cannot leave A's UI attached to B's authority");
+  const staleBootstrapSource = between(imageSource, 'if (bootstrapSettlement.code === "IMAGE_BOOTSTRAP_STALE_PENDING_SAVED" && latest?.workspace) {', '} else {\n            handleWorkspaceConflict');
+  assert.doesNotMatch(staleBootstrapSource, /applyRecord:\s*true/, "a late bootstrap receipt cannot overwrite same-draft input typed while it was awaiting persistence");
+  assert.match(staleBootstrapSource, /setAutosaveRetryRevision\(\(value\) => value \+ 1\)/, "the preserved dirty input must be rescheduled onto the saved pending snapshot");
   assert.match(imageSource, /setGenerationState\s*\(\s*\(current\)\s*=>\s*current === "IMAGE_GENERATING" \? "IDLE" : current\s*\)/, "operation-id finally must settle global busy even after A to B cutover");
   assert.match(namedFunctionSource(mainSource, "generateImageCandidates"), /^function generateImageCandidates\([^)]*\) \{\s*if \(!mediaWorkspaceIsUsable\(\)\) return;/);
 });
@@ -400,7 +406,13 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.equal(imageRecoveryClickMode({ pendingImageOperation: { protocol_state: "READY" }, requestedDiscoveryOnly: true }), "DISCOVER_ONLY");
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
   assert.match(imageSource, /const discoveryOnly = imageRecoveryClickMode\s*\(/);
-  assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP" \};[\s\S]*nextImageStepRequest/);
+  assert.doesNotMatch(imageSource, /operationWasStaleBeforePersistence/, "staleness sampled before media fetch cannot authorize a later write");
+  assert.match(imageSource, /forceRecovery:\s*!mainAuthority\.isCurrent\(mainOperation\)/, "completion must recheck semantic authority immediately at commit");
+  assert.match(imageSource, /const operationWasStaleAtCommit = !mainAuthority\.isCurrent\(mainOperation\);[\s\S]*?forceRecovery:\s*operationWasStaleAtCommit/, "progress must bind forceRecovery after deferred media fetch");
+  assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP", checkpointPersisted: true,[\s\S]*nextImageStepRequest/);
+  assert.match(imageSource, /checkpointPersisted: progressReceipt\.checkpointPersisted === true/);
+  assert.match(imageSource, /checkpointPersisted: false, code: "IMAGE_OPERATION_CONTEXT_MISSING"/);
+  assert.match(imageSource, /error\?\.intentionalStop === true && error\?\.checkpointPersisted === true/);
   assert.match(imageSource, /零调用查询已完成/);
   assert.match(imageSource, /const observedRequestModes = \[initialRequest\.mode\]/);
   assert.match(imageSource, /upstream_calls: Number\(response\.upstream_calls \?\? response\.progress\?\.upstream_calls \?\? 0\)/);
@@ -522,6 +534,9 @@ test("workspace and draft mutations bind one pre-await base and converge after r
   assert.ok(saveDraftSource.indexOf("mainAuthority.capture") < saveDraftSource.indexOf("await "));
   assert.ok(saveDraftSource.indexOf("baseWorkspace") < saveDraftSource.indexOf("await "));
   assert.match(saveDraftSource, /mergeDraftCas\s*\(/);
+  assert.doesNotMatch(saveDraftSource, /requireActiveDraftId:\s*draftId/, "saving A must remain possible when another tab activates B");
+  assert.match(saveDraftSource, /authoringSessionForDraftSnapshotV3\s*\(/, "manual save must preserve the durable resume cursor from its own DraftRecord");
+  assert.match(saveDraftSource, /adoptCrossTabActiveAfterDraftWrite\s*\(/, "after saving A, the UI must atomically read back externally selected B");
   assert.match(saveDraftSource, /if \(!committed\.applied\)/);
   assert.match(saveDraftSource, /reconcileStaleDraftWrite\(receipt, \{ dirtyDraftId: draftId, issueLabel: "保存" \}\)/);
   assert.match(saveDraftSource, /saved_at:\s*latestContent\.saved_at \|\| now/, "manual save intent must survive a same-active dirty retry");
@@ -532,9 +547,14 @@ test("workspace and draft mutations bind one pre-await base and converge after r
   assert.match(saveFeedbackSource, /reconcileStaleDraftWrite\s*\(/);
 
   const autosaveSource = between(mainSource, "const timer = window.setTimeout(async () => {", "}, 400);");
-  assert.doesNotMatch(autosaveSource, /pending_image_operation|draftMutationLockRef\.current/, "semantic autosave must preserve rather than wait behind the asset lane");
+  assert.doesNotMatch(autosaveSource, /draftMutationLockRef\.current/, "semantic autosave must preserve rather than wait behind the asset lane");
+  assert.match(autosaveSource, /authoringSessionForDraftSnapshotV3\s*\(/, "autosave must derive resume authority from its own DraftRecord snapshot");
+  assert.doesNotMatch(autosaveSource, /requireActiveDraftId:\s*draftId/, "autosave must save its captured draft even if another tab switches the active draft");
+  assert.match(autosaveSource, /adoptCrossTabActiveAfterDraftWrite\s*\(/, "a successful background save must then read back the actual active draft");
+  assert.match(autosaveSource, /if \(!draftAutosaveRequiredV3\(\{ baseDraft: baseRecord, candidateDraft: replacementDraft \}\)\) return;/, "unchanged autosave must not advance the token behind a running image checkpoint");
   assert.ok(count(autosaveSource, /workspaceTransitionLock\.isLocked\(\)/g) >= 2, "autosave must not cross an envelope transition before or after materialization");
   assert.match(autosaveSource, /reconcileStaleDraftWrite\(receipt, \{ dirtyDraftId: draftId, issueLabel: "自动保存" \}\)/, "post-CAS stale autosave must use the shared final-snapshot reconciler");
+  assert.doesNotMatch(between(autosaveSource, "if (!receipt.ok) {", "return;\n        }"), /\? handleWorkspaceConflict\(receipt/, "a same-draft CAS race cannot globally disable the workbench");
   const staleWriteSource = namedFunctionSource(mainSource, "reconcileStaleDraftWrite");
   assert.match(staleWriteSource, /workspaceCoordinator\.snapshot\(\)/);
   assert.match(staleWriteSource, /plan === "RECEIPT_STILL_CURRENT" \|\| plan === "LATEST_SAME_ACTIVE_PRESERVE_LOCAL"/);
@@ -575,6 +595,81 @@ test("deferred image bootstrap exposes the volatile lock and a stale committed p
   if (settlement.code === "IMAGE_BOOTSTRAP_CURRENT") providerCalls += 1;
   assert.equal(settlement.code, "IMAGE_BOOTSTRAP_STALE_PENDING_SAVED");
   assert.equal(providerCalls, 0, "a stale operation may expose recovery, but can never continue into a paid START");
+});
+
+test("image bootstrap retries exactly once only when the latest draft is semantically identical", async () => {
+  const operationNonce = "d".repeat(64);
+  const desiredPending = { operation_nonce: operationNonce };
+  const latestWorkspace = {
+    active_draft_id: "draft-A",
+    drafts: [{ draft_id: "draft-A", pending_image_operation: null }],
+  };
+  let initialWrites = 0;
+  let retryWrites = 0;
+  const successful = await settleImageBootstrapPersistence({
+    persist: async () => {
+      initialWrites += 1;
+      return { ok: false, code: "WORKSPACE_DRAFT_CAS_CONFLICT", workspace: latestWorkspace };
+    },
+    isCurrent: () => true,
+    readLatest: async () => ({ ok: true, workspace: latestWorkspace }),
+    canRetry: () => true,
+    retryPersist: async () => {
+      retryWrites += 1;
+      const targetDraft = { draft_id: "draft-A", pending_image_operation: desiredPending };
+      return { ok: true, target_draft: targetDraft, workspace: { ...latestWorkspace, drafts: [targetDraft] } };
+    },
+    targetDraftId: "draft-A",
+    operationNonce,
+  });
+  assert.equal(successful.code, "IMAGE_BOOTSTRAP_CURRENT");
+  assert.equal(initialWrites, 1);
+  assert.equal(retryWrites, 1);
+
+  retryWrites = 0;
+  const rejected = await settleImageBootstrapPersistence({
+    persist: async () => ({ ok: false, code: "WORKSPACE_DRAFT_CAS_CONFLICT", workspace: latestWorkspace }),
+    isCurrent: () => true,
+    readLatest: async () => ({ ok: true, workspace: latestWorkspace }),
+    canRetry: () => false,
+    retryPersist: async () => { retryWrites += 1; },
+    targetDraftId: "draft-A",
+    operationNonce,
+  });
+  assert.equal(rejected.code, "IMAGE_BOOTSTRAP_NOT_COMMITTED");
+  assert.equal(retryWrites, 0, "a changed draft cannot be merged into the old image request");
+
+  const staleNoop = await settleImageBootstrapPersistence({
+    persist: async () => ({ ok: true, target_draft: latestWorkspace.drafts[0], workspace: latestWorkspace }),
+    isCurrent: () => false,
+    readLatest: async () => { throw new Error("stale no-op must not need another read"); },
+    targetDraftId: "draft-A",
+    operationNonce,
+  });
+  assert.equal(staleNoop.code, "IMAGE_BOOTSTRAP_STALE_NOOP");
+});
+
+test("confirmed text without real pages is presented as text-ready, never as a template or empty draft", () => {
+  assert.match(mainSource, /isDraftInputOnly && textConfirmed \? "文字草稿"/);
+  assert.match(mainSource, /isDraftInputOnly \? 0 : visiblePages\.length/);
+  assert.match(mainSource, /aria-label=\{textConfirmed \? "文字已确认，等待配图" : "空白新稿"\}/);
+  assert.match(mainSource, /textConfirmed \? "TEXT READY" : "NEW DRAFT"/);
+  assert.match(mainSource, /textConfirmed \? "文字已确认，等待配图" : isFreshDraft \? "从一段原文开始" : "原文已就位"/);
+  assert.match(mainSource, /textConfirmed \? "查看配图设置"/);
+});
+
+test("editing text never hides a durable paid image recovery task", () => {
+  const imageSource = namedFunctionSource(mainSource, "generateImageNode");
+  assert.match(imageSource, /if \(!textConfirmed && !pendingImageOperation\)/, "an existing durable recovery must remain callable after text is edited");
+  assert.match(imageSource, /baseRecord\.pending_image_operation\?\.operation_snapshot\?\.confirmed_draft \|\| textDraft/, "recovery must use the frozen confirmed text rather than the newly edited text");
+  assert.match(mainSource, /textDraft && \(textConfirmed \|\| pendingImageOperation\)/, "the recovery panel cannot disappear merely because the current text is unconfirmed");
+  assert.match(mainSource, /旧文字的配图恢复/);
+  assert.match(mainSource, /imageOperationAuthorityV3\(workspaceEnvelopeRef\.current/,
+    "refresh must rediscover a moved recovery holder from the canonical workspace");
+  assert.match(imageSource, /operationAuthority\?\.holder_draft_id \|\| sourceDraftId/);
+  assert.match(imageSource, /operationAuthority\?\.location\?\.startsWith\("RECOVERY"\) \? targetDraftId/,
+    "a recovery holder must advance in place rather than fork a second recovery draft");
+  assert.match(mainSource, /effectiveImageResume/, "the recovery panel must render its durable cursor rather than a cleared React cursor");
 });
 
 test("deferred workspace transition blocks edits and stale NOOP preserves dirty UI with zero apply", async () => {
