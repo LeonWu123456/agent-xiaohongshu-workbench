@@ -21,6 +21,8 @@ const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_ROLLBACK_READBACK_AGE_MS = 10 * 60 * 1000;
 const VERCEL_PROJECT_ID = "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X";
 const VERCEL_TEAM_SLUG = "892350620-5733s-projects";
+const GITHUB_REPO_OWNER = "LeonWu123456";
+const GITHUB_REPO_NAME = "agent-xiaohongshu-workbench";
 
 class DeliveryError extends Error {
   constructor(code, detail) {
@@ -283,7 +285,7 @@ export async function readRollbackReadback(
   } catch {
     fail("ROLLBACK_DEPLOYMENT_URL_INVALID", String(deploymentUrl || ""));
   }
-  const deployment = runVercelJson(["api", `/v13/deployments/${deploymentId}`], { spawnImpl, cliPath, scope, cwd });
+  const deployment = runVercelJson(["api", `/v13/deployments/${deploymentId}?withGitRepoInfo=true`], { spawnImpl, cliPath, scope, cwd });
   const authoritativeUrl = deployment?.url ? new URL(`https://${deployment.url}/`).href : "";
   if (deployment?.id !== deploymentId) fail("ROLLBACK_READBACK_DEPLOYMENT_MISMATCH", `expected=${deploymentId};actual=${String(deployment?.id || "")}`);
   if (authoritativeUrl !== exactUrl.href) fail("ROLLBACK_READBACK_URL_MISMATCH", `expected=${exactUrl.href};actual=${authoritativeUrl}`);
@@ -291,7 +293,21 @@ export async function readRollbackReadback(
   if (deployment?.project?.id !== VERCEL_PROJECT_ID || deployment?.team?.slug !== VERCEL_TEAM_SLUG) {
     fail("ROLLBACK_PROJECT_MISMATCH", `${String(deployment?.project?.id || "")}:${String(deployment?.team?.slug || "")}`);
   }
-  const sourceCommit = String(deployment?.meta?.gitCommitSha || "").toLowerCase();
+  const deploymentSource = String(deployment?.source || "");
+  let sourceCommit = "";
+  if (deploymentSource === "cli") {
+    sourceCommit = String(deployment?.meta?.gitCommitSha || "").toLowerCase();
+  } else {
+    const gitSourceCommit = String(deployment?.gitSource?.sha || "").toLowerCase();
+    const githubCommit = String(deployment?.meta?.githubCommitSha || "").toLowerCase();
+    if (gitSourceCommit && githubCommit && gitSourceCommit !== githubCommit) {
+      fail("ROLLBACK_SOURCE_COMMIT_CONFLICT", `gitSource=${gitSourceCommit};github=${githubCommit}`);
+    }
+    if (deployment?.meta?.githubCommitOrg !== GITHUB_REPO_OWNER || deployment?.meta?.githubCommitRepo !== GITHUB_REPO_NAME) {
+      fail("ROLLBACK_REPOSITORY_MISMATCH", `${String(deployment?.meta?.githubCommitOrg || "")}/${String(deployment?.meta?.githubCommitRepo || "")}`);
+    }
+    sourceCommit = gitSourceCommit || githubCommit;
+  }
   if (sourceCommit !== expectedCommit) fail("ROLLBACK_SOURCE_COMMIT_MISMATCH", `expected=${expectedCommit};actual=${sourceCommit}`);
   const providerReadiness = runVercelJson(["curl", new URL("/api/provider/health", exactUrl).href], { spawnImpl, cliPath, scope, cwd });
   return {

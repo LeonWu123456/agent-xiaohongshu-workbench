@@ -234,6 +234,7 @@ test("rollback readback is collected from Vercel deployment identity and the sam
         id: "dpl_rollback456",
         url: new URL(rollbackDeploymentUrl).hostname,
         readyState: "READY",
+        source: "cli",
         meta: { gitCommitSha: "b".repeat(40) },
         project: { id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X" },
         team: { slug: "892350620-5733s-projects" },
@@ -254,7 +255,7 @@ test("rollback readback is collected from Vercel deployment identity and the sam
   assert.equal(observed.source_commit, "b".repeat(40));
   assert.equal(observed.observed_at, "2026-09-03T00:00:00.000Z");
   assert.equal(calls.length, 2);
-  assert.ok(calls[0].includes("/v13/deployments/dpl_rollback456"));
+  assert.ok(calls[0].includes("/v13/deployments/dpl_rollback456?withGitRepoInfo=true"));
   assert.ok(calls[1].includes(new URL("/api/provider/health", rollbackDeploymentUrl).href));
 });
 
@@ -268,6 +269,7 @@ test("Vercel rollback probe rejects a forged receipt commit before reading deplo
         id: "dpl_rollback456",
         url: new URL(rollbackDeploymentUrl).hostname,
         readyState: "READY",
+        source: "cli",
         meta: { gitCommitSha: "b".repeat(40) },
         project: { id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X" },
         team: { slug: "892350620-5733s-projects" },
@@ -284,6 +286,45 @@ test("Vercel rollback probe rejects a forged receipt commit before reading deplo
     (error) => error.code === "ROLLBACK_SOURCE_COMMIT_MISMATCH",
   );
   assert.equal(calls, 1);
+});
+
+test("GitHub rollback probe accepts only GitHub commit metadata from the exact repository", async () => {
+  const health = (await passingDependencies.readRollbackReadback()).provider_readiness;
+  const githubDeployment = {
+    id: "dpl_rollback456",
+    url: new URL(rollbackDeploymentUrl).hostname,
+    readyState: "READY",
+    source: "git",
+    meta: {
+      githubCommitSha: "b".repeat(40),
+      githubCommitOrg: "LeonWu123456",
+      githubCommitRepo: "agent-xiaohongshu-workbench",
+    },
+    project: { id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X" },
+    team: { slug: "892350620-5733s-projects" },
+  };
+  let calls = 0;
+  const spawnImpl = () => {
+    calls += 1;
+    return { status: 0, stdout: JSON.stringify(calls === 1 ? githubDeployment : health), stderr: "" };
+  };
+  const observed = await readRollbackReadback({
+    deploymentId: "dpl_rollback456",
+    deploymentUrl: rollbackDeploymentUrl,
+    expectedCommit: "b".repeat(40),
+  }, { spawnImpl, cliPath: "/opt/vercel/index.js" });
+  assert.equal(observed.source_commit, "b".repeat(40));
+
+  const wrongFieldOnly = structuredClone(githubDeployment);
+  wrongFieldOnly.meta = { gitCommitSha: "b".repeat(40), githubCommitOrg: "LeonWu123456", githubCommitRepo: "agent-xiaohongshu-workbench" };
+  await assert.rejects(
+    () => readRollbackReadback({
+      deploymentId: "dpl_rollback456",
+      deploymentUrl: rollbackDeploymentUrl,
+      expectedCommit: "b".repeat(40),
+    }, { spawnImpl: () => ({ status: 0, stdout: JSON.stringify(wrongFieldOnly), stderr: "" }), cliPath: "/opt/vercel/index.js" }),
+    (error) => error.code === "ROLLBACK_SOURCE_COMMIT_MISMATCH",
+  );
 });
 
 test("configured-but-unattested Production and rollback both block handoff", async () => {
