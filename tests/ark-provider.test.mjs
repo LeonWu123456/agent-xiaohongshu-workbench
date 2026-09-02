@@ -448,6 +448,34 @@ test("text retry guidance repairs the failure class without echoing the rejected
   assert.match(textQualityRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:body:source_expansion:300\/220")), /只做压缩、重组和润色/);
 });
 
+test("one-sentence topics are complete inputs and length repair receives the rejected draft plus an exact ruler", () => {
+  const topicInput = { ...input(), topic: "初秋雨天整理小书桌", pillar: "identity" };
+  const request = buildArkDraftTextRequest(topicInput, "doubao-text");
+  const bodySchema = request.tools[0].parameters.properties.body;
+  assert.equal(bodySchema.minLength, 260);
+  assert.equal(bodySchema.maxLength, 600);
+  assert.match(request.input[0].content, /INPUT_MODE=TOPIC_SEED/);
+  assert.match(request.input[0].content, /一句话选题就是完整、合法的创作输入/);
+  assert.match(request.input[0].content, /不能要求用户再补原文/);
+  assert.match(request.input[0].content, /不得编造.*我亲测/);
+
+  const rejected = { ...planValue(), content_type: "method_checklist", body: "整理".repeat(90), recommended_image_count: 5 };
+  delete rejected.pages;
+  const response = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(rejected) }] };
+  let failure;
+  try { extractArkTextDraft(response, topicInput); } catch (error) { failure = error; }
+  assert.ok(failure);
+  assert.match(failure.message, /TEXT_QUALITY_GATE_FAILED:body:length:180\/240-600/);
+  const repair = textQualityRetryGuidance(failure, { finalAttempt: true });
+  assert.match(repair, /上一版正文是180个有效字符/);
+  assert.match(repair, /后台验收区间是240–600个/);
+  assert.match(repair, /必须扩写到区间内/);
+  assert.match(repair, /系统最后一次有界自动修稿/);
+  assert.match(repair, /<rejected_text_draft>/);
+  assert.match(repair, /"body":"整理整理/);
+  assert.doesNotMatch(repair, /修改原文|补充要求/);
+});
+
 test("page-plan retry guidance turns production gate codes into bounded repair instructions", () => {
   const eyeCare = pagePlanRetryGuidance(new Error("TEXT_QUALITY_GATE_FAILED:pages[4].image_prompt:eye_care_action_not_visible"));
   assert.match(eyeCare, /第5页/);

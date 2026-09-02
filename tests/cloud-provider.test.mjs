@@ -13,6 +13,7 @@ import {
   createProviderHandler,
   createUpstashImageLedger,
   createUpstashImageLedgerFromEnv,
+  generateTextDraft,
   generateImages,
   imageLedgerRuntimeBinding,
   imageLedgerIdentity,
@@ -38,6 +39,7 @@ import { computeImageGenerationInputSha256, parsePageCandidateResponse, PAGE_CAN
 import { sha256Bytes } from "../src/ark-provider-core.mjs";
 import { admitPublicImageJob, createPublicImageRun, failPublicImageJob, startPublicImageJob } from "../src/public-image-run.mjs";
 import { createLocalHttpProvider } from "../src/provider-client.mjs";
+import { buildGenerationContract, createProfileV2 } from "../src/profile-v2.mjs";
 import sharp from "sharp";
 
 function responseProbe() {
@@ -52,6 +54,60 @@ function responseProbe() {
     send(value = null) { this.body = value; return this; },
   };
 }
+
+test("server text retries repair a one-sentence topic from the previous measured draft without entering the image lane", async () => {
+  const base = {
+    content_type: "method_checklist",
+    titles: ["初秋雨天整理一方小书桌", "雨天把书桌慢慢收拾清楚", "小书桌从这几个动作开始"],
+    selected_title: "初秋雨天整理一方小书桌",
+    tags: ["书桌整理", "雨天周末", "居家收纳", "生活秩序", "小师妹"],
+    recommended_image_count: 5,
+    facts: [],
+    risks: [],
+  };
+  const candidates = [
+    { ...base, body: "整理".repeat(90) },
+    { ...base, body: "收拾".repeat(110) },
+    { ...base, body: [
+      "初秋下雨时，不必把整个房间都翻出来。先把注意力放回眼前的小书桌，看看哪些东西正在挤占真正要用的位置，也顺便分清今天想在这里完成什么。",
+      "第一步把不属于桌面的物品放回原处，只留下纸笔、常用杯子和正在阅读的书。动作越具体，越不容易在一半时被别的杂物带走。",
+      "第二步擦掉浮灰，再把线材和零碎物品放到固定位置。不是为了拍出完美房间，而是让下次取用时少一次寻找，也让桌面重新出现能工作的空白。",
+      "最后开一盏暖灯，写下今天最想完成的三件小事。桌面整理到可以坐下就停，不必继续扩大范围；真正有用的标准，是整理后愿意回来使用。",
+      "整理结束后，把经常取用的位置记住。下一个雨天再次坐到这里时，如果能很快找到纸笔并开始手头的事，这次整理就已经发挥作用。",
+    ].join("\n\n") },
+  ];
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    requests.push({ url: String(url), request });
+    const candidate = candidates[requests.length - 1];
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(candidate) }] }) };
+  };
+  let result;
+  try {
+    result = await generateTextDraft({
+      topic: "初秋雨天整理小书桌",
+      pillar: "identity",
+      goal: "save",
+      profile_contract: buildGenerationContract(createProfileV2()),
+      text_requirements: "",
+      prompt_context: {},
+    }, { apiKey: "test-key", textModel: "doubao-text" });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(requests.length, 3);
+  assert.deepEqual(result.generation.attempts.map(({ status }) => status), ["REJECTED", "REJECTED", "PASS"]);
+  assert.match(requests[1].request.input[0].content, /上一版正文是180个有效字符/);
+  assert.match(requests[1].request.input[0].content, /后台验收区间是240–600个/);
+  assert.match(requests[1].request.input[0].content, /"body":"整理整理/);
+  assert.match(requests[2].request.input[0].content, /上一版正文是220个有效字符/);
+  assert.match(requests[2].request.input[0].content, /系统最后一次有界自动修稿/);
+  assert.ok(requests.every(({ url, request }) => url.endsWith("/responses") && request.tools?.[0]?.name === "return_xiaoshimei_text_draft"));
+  assert.equal(result.body.replace(/\s/g, "").length >= 260, true);
+  assert.equal(result.body.replace(/\s/g, "").length <= 600, true);
+});
 
 class FakeAtomicImageLedger {
   constructor({ commitMode = "normal" } = {}) {

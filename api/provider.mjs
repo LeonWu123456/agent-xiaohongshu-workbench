@@ -491,12 +491,12 @@ async function imagePayload(payload) {
   };
 }
 
-async function generateTextDraft(input, settings) {
+export async function generateTextDraft(input, settings) {
   let draft;
   let finalError;
   const attempts = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const qualityFeedback = finalError ? textQualityRetryGuidance(finalError) : "";
+    const qualityFeedback = finalError ? textQualityRetryGuidance(finalError, { finalAttempt: attempt === 3 }) : "";
     const result = await arkPost("/responses", settings.apiKey, buildArkDraftTextRequest({ ...input, quality_feedback: qualityFeedback }, settings.textModel), "TEXT_DRAFT_MODEL_CALL_FAILED");
     try {
       draft = extractArkTextDraft(result, { topic: input.topic, pillar: input.pillar, goal: input.goal });

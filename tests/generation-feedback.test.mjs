@@ -13,6 +13,10 @@ test("generation failures become persistent human-readable recovery states", () 
   assert.equal(lengthFailure.code, "COPY_LENGTH_REJECTED");
   assert.equal(lengthFailure.technical_code, "TEXT_QUALITY_GATE_FAILED:body:length");
   assert.equal(lengthFailure.stage, "text");
+  assert.match(lengthFailure.title, /系统还没/);
+  assert.match(lengthFailure.detail, /不需要改原文/);
+  assert.match(lengthFailure.detail, /不会生成图片/);
+  assert.doesNotMatch(lengthFailure.detail, /修改原文|补充要求/);
   const networkFailure = generationFailureFeedback(Object.assign(new Error("provider request failed: PAGE_PLAN_MODEL_CALL_FAILED:NETWORK_FETCH_FAILED:UND_ERR_CONNECT_TIMEOUT"), { providerCode: "PAGE_PLAN_MODEL_CALL_FAILED:NETWORK_FETCH_FAILED:UND_ERR_CONNECT_TIMEOUT", providerStage: "image" }));
   assert.equal(networkFailure.code, "ARK_NETWORK_UNAVAILABLE");
   assert.equal(networkFailure.stage, "image");
