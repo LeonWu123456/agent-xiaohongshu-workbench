@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 export const DELIVERY_TARGET = "https://xiaoshimei-full-workbench.vercel.app/";
+export const DEFAULT_ALTERNATE_ENTRY_URL = "https://xiaoshimei-full-workbench-892350620-5733s-projects.vercel.app/";
+const ALTERNATE_ENTRY_HOST_SUFFIX = "-892350620-5733s-projects.vercel.app";
 export const JOURNEY_SCHEMA = "xiaoshimei.consumer-journey-readback.v1";
 export const REQUIRED_JOURNEY_STEPS = ["open", "access", "edit", "save", "reopen", "copy", "download"];
 const MAX_OPERATOR_RECEIPT_AGE_MS = 24 * 60 * 60 * 1000;
@@ -199,6 +201,54 @@ export async function readRemoteArtifact(targetUrl, fetchImpl = fetch) {
   return { html_sha256: sha256(htmlResult.bytes), html_size_bytes: htmlResult.bytes.length, assets };
 }
 
+export async function inspectAlternateEntry(alternateUrl, { canonicalUrl = DELIVERY_TARGET, fetchImpl = fetch } = {}) {
+  const classified = classifyTargetUrl(alternateUrl);
+  if (classified.kind !== "PUBLIC_HTTPS") {
+    fail("ALTERNATE_ENTRY_NOT_PUBLIC_HTTPS", String(classified.url || alternateUrl || ""));
+  }
+  const canonical = new URL(canonicalUrl);
+  const alternate = new URL(classified.url);
+  if (alternate.origin === canonical.origin) fail("ALTERNATE_ENTRY_IS_CANONICAL", alternate.href);
+  if (!alternate.hostname.endsWith(ALTERNATE_ENTRY_HOST_SUFFIX)) fail("ALTERNATE_ENTRY_HOST_UNTRUSTED", alternate.hostname);
+
+  let response;
+  try {
+    response = await fetchImpl(alternate.href, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(12_000),
+      headers: { "user-agent": "xiaoshimei-shareable-delivery-verifier/1" },
+    });
+  } catch (error) {
+    fail("ALTERNATE_ENTRY_FETCH_FAILED", `${alternate.href}:${String(error?.message || error)}`);
+  }
+
+  if ([401, 403, 404, 410].includes(response.status)) {
+    return { url: alternate.href, status: response.status, state: "NOT_A_PUBLIC_ENTRY" };
+  }
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers?.get?.("location");
+    if (!location) fail("ALTERNATE_ENTRY_REDIRECT_LOCATION_MISSING", `${alternate.href}:${response.status}`);
+    const destination = new URL(location, alternate.href);
+    if (destination.origin === canonical.origin) {
+      return { url: alternate.href, status: response.status, state: "REDIRECTS_TO_CANONICAL", destination: destination.href };
+    }
+    if (destination.protocol === "https:" && destination.hostname === "vercel.com" && destination.pathname === "/sso-api") {
+      let protectedOrigin = "";
+      try {
+        protectedOrigin = new URL(destination.searchParams.get("url") || "").origin;
+      } catch {
+        protectedOrigin = "";
+      }
+      if (protectedOrigin === alternate.origin) {
+        return { url: alternate.href, status: response.status, state: "PROTECTED_BY_VERCEL" };
+      }
+    }
+    fail("ALTERNATE_ENTRY_REDIRECT_UNSAFE", `${alternate.href}->${destination.href}`);
+  }
+  if (response.ok) fail("ALTERNATE_PUBLIC_ENTRY_ACTIVE", `${alternate.href}:${response.status}`);
+  fail("ALTERNATE_ENTRY_STATE_UNVERIFIED", `${alternate.href}:${response.status}`);
+}
+
 export function compareArtifacts(localArtifact, remoteArtifact) {
   const errors = [];
   if (localArtifact?.html_sha256 !== remoteArtifact?.html_sha256) {
@@ -273,6 +323,23 @@ export async function evaluateDelivery(input, dependencies = {}) {
       return undefined;
     }
   };
+  const providedAlternateUrls = Array.isArray(input.alternateUrls) ? input.alternateUrls.filter(Boolean) : [];
+  const exactDeploymentUrls = providedAlternateUrls.filter((value) => {
+    try {
+      return new URL(value).href !== DEFAULT_ALTERNATE_ENTRY_URL;
+    } catch {
+      return true;
+    }
+  });
+  if (exactDeploymentUrls.length === 0) {
+    errors.push({ code: "ALTERNATE_ENTRY_CENSUS_REQUIRED", detail: "pass the exact promoted deployment URL with --alternate-url" });
+  }
+  const alternateUrls = [...new Set([DEFAULT_ALTERNATE_ENTRY_URL, ...providedAlternateUrls].map((value) => String(value)))];
+  const alternateEntries = [];
+  for (const alternateUrl of alternateUrls) {
+    const entry = await capture(() => (dependencies.inspectAlternateEntry || inspectAlternateEntry)(alternateUrl, { canonicalUrl: target.url }));
+    if (entry) alternateEntries.push(entry);
+  }
   const candidate = await capture(() => (dependencies.inspectCandidate || inspectCandidate)(input.candidateRoot, input.expectedCommit));
   const dnsAddresses = await capture(() => (dependencies.resolvePublicTarget || resolvePublicTarget)(target.url)) || [];
   const localArtifact = await capture(() => (dependencies.readLocalArtifact || readLocalArtifact)(input.candidateRoot));
@@ -283,13 +350,13 @@ export async function evaluateDelivery(input, dependencies = {}) {
   const journey = validateJourneyReceipt(input.receipt, { targetUrl: target.url, expectedCommit: input.expectedCommit });
   errors.push(...journey.errors);
   if (errors.length) {
-    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, local_artifact: localArtifact, remote_artifact: remoteArtifact } };
+    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, local_artifact: localArtifact, remote_artifact: remoteArtifact } };
   }
   return {
     ...base,
     verdict: "HANDOFF_READY",
     errors: [],
-    checks: { candidate, dns_addresses: dnsAddresses, artifact_identity: localArtifact },
+    checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, artifact_identity: localArtifact },
     consumer: {
       operator_actor_role: journey.actor_role,
       same_draft_id: input.receipt.same_draft.initial_draft_id,
@@ -303,7 +370,13 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (!flag.startsWith("--") || !argv[index + 1]) fail("ARGUMENT_INVALID", flag);
-    values[flag.slice(2)] = argv[index + 1];
+    const key = flag.slice(2);
+    if (key === "alternate-url") {
+      values[key] ||= [];
+      values[key].push(argv[index + 1]);
+    } else {
+      values[key] = argv[index + 1];
+    }
     index += 1;
   }
   for (const key of ["url", "expected-commit"]) {
@@ -322,6 +395,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       targetUrl: args.url,
       expectedCommit: args["expected-commit"],
       candidateRoot: path.resolve(args["candidate-root"] || process.cwd()),
+      alternateUrls: args["alternate-url"] || [],
       receipt,
     });
   } catch (error) {

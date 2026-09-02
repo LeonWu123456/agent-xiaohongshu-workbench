@@ -9,12 +9,15 @@ npm run verify:shareable-delivery -- \
   --url https://xiaoshimei-full-workbench.vercel.app/ \
   --expected-commit <exact-40-char-commit> \
   --candidate-root <clean-worktree> \
+  --alternate-url <exact-promoted-deployment-url> \
+  --alternate-url <latest-preview-url> \
   --receipt <operator-journey.json>
 ```
 
 - `LOCAL_ONLY`：只在当前机器可用，绝不能把地址发给另一台设备。
 - `BLOCKED`：HTTPS/DNS、候选身份、静态制品或同稿旅程至少一项不成立。
 - `HANDOFF_READY`：公共稳定入口、exact committed build 和 operator 同稿旅程已经一致；此时只能说“可以发给她试用”。
+- 唯一公网真相：判定器固定检查 Vercel 自动项目别名，并要求传入 exact promoted deployment URL；可继续追加最近 Preview。备用入口只能被 Vercel SSO/401/403/404/410 阻断，或重定向回稳定域。任一备用地址直接返回 2xx 或跳向第三处，均以 `ALTERNATE_PUBLIC_ENTRY_ACTIVE` / `ALTERNATE_ENTRY_REDIRECT_UNSAFE` 拒绝交付。
 - `CONSUMER_VALIDATED`：只能由小师妹本人在独立设备上的直接反馈证明；本判定器永远不能签发这个结论，自填 `actor=xiaoshimei` 反而会被拒绝。
 
 判定器不生成旅程证据，也不授予推送、Preview、Production、回滚或外部发布 Authority。完整回执 schema 由 `tests/shareable-delivery.test.mjs` 锁定。

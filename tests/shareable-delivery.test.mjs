@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_ALTERNATE_ENTRY_URL,
   JOURNEY_SCHEMA,
   classifyTargetUrl,
   collectEntrypointAssetPaths,
   compareArtifacts,
   evaluateDelivery,
   isPublicAddress,
+  inspectAlternateEntry,
   readRemoteArtifact,
   resolvePublicTarget,
   validateJourneyReceipt,
@@ -15,6 +17,7 @@ import {
 
 const commit = "a".repeat(40);
 const url = "https://xiaoshimei-full-workbench.vercel.app/";
+const deploymentUrl = "https://xiaoshimei-full-workbench-build-892350620-5733s-projects.vercel.app/";
 const artifact = {
   html_sha256: "1".repeat(64),
   html_size_bytes: 123,
@@ -37,11 +40,16 @@ function receipt(role = "operator") {
 }
 
 const passingDependencies = {
+  inspectAlternateEntry: async (alternateUrl) => ({ url: alternateUrl, status: 302, state: "PROTECTED_BY_VERCEL" }),
   inspectCandidate: async () => ({ root: "/candidate", head: commit, worktree: "CLEAN" }),
   resolvePublicTarget: async () => ["76.76.21.21"],
   readLocalArtifact: async () => structuredClone(artifact),
   readRemoteArtifact: async () => structuredClone(artifact),
 };
+
+function deliveryInput(overrides = {}) {
+  return { targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate", alternateUrls: [deploymentUrl], receipt: receipt(), ...overrides };
+}
 
 test("loopback, LAN, HTTP and credentialed URLs never become shareable", () => {
   for (const value of ["http://127.0.0.1:4184/", "https://localhost/", "https://192.168.1.8/", "https://[::1]/"]) {
@@ -53,7 +61,7 @@ test("loopback, LAN, HTTP and credentialed URLs never become shareable", () => {
 });
 
 test("a different public HTTPS origin is not the stable delivery target", async () => {
-  const result = await evaluateDelivery({ targetUrl: "https://example.com/", expectedCommit: commit, candidateRoot: "/candidate", receipt: receipt() }, passingDependencies);
+  const result = await evaluateDelivery(deliveryInput({ targetUrl: "https://example.com/" }), passingDependencies);
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "STABLE_TARGET_REQUIRED"));
 });
@@ -82,6 +90,30 @@ test("a redirect to loopback is rejected before the second fetch", async () => {
   assert.equal(calls, 1);
 });
 
+test("alternate deployment URLs must be protected or redirect to the one canonical origin", async () => {
+  const protectedResult = await inspectAlternateEntry(deploymentUrl, {
+    fetchImpl: async () => new Response(null, { status: 302, headers: { location: `https://vercel.com/sso-api?url=${encodeURIComponent(deploymentUrl)}` } }),
+  });
+  assert.equal(protectedResult.state, "PROTECTED_BY_VERCEL");
+  const redirectedResult = await inspectAlternateEntry(deploymentUrl, {
+    fetchImpl: async () => new Response(null, { status: 308, headers: { location: url } }),
+  });
+  assert.equal(redirectedResult.state, "REDIRECTS_TO_CANONICAL");
+  await assert.rejects(
+    () => inspectAlternateEntry(deploymentUrl, { fetchImpl: async () => new Response("second truth", { status: 200 }) }),
+    (error) => error.code === "ALTERNATE_PUBLIC_ENTRY_ACTIVE",
+  );
+  await assert.rejects(
+    () => inspectAlternateEntry("https://example.com/", { fetchImpl: async () => new Response(null, { status: 403 }) }),
+    (error) => error.code === "ALTERNATE_ENTRY_HOST_UNTRUSTED",
+  );
+  await assert.rejects(
+    () => inspectAlternateEntry(deploymentUrl, { fetchImpl: async () => new Response(null, { status: 302, headers: { location: "https://vercel.com/sso-api?url=https%3A%2F%2Fevil.example%2F" } }) }),
+    (error) => error.code === "ALTERNATE_ENTRY_REDIRECT_UNSAFE",
+  );
+  assert.notEqual(DEFAULT_ALTERNATE_ENTRY_URL, url);
+});
+
 test("entrypoint assets and byte identity are exact", () => {
   const html = '<link rel="stylesheet" href="/assets/index.css"><script type="module" src="/assets/index.js"></script>';
   assert.deepEqual(collectEntrypointAssetPaths(html), ["/assets/index.css", "/assets/index.js"]);
@@ -94,25 +126,25 @@ test("entrypoint assets and byte identity are exact", () => {
 test("a public URL with the wrong deployed artifact is BLOCKED", async () => {
   const old = structuredClone(artifact);
   old.html_sha256 = "9".repeat(64);
-  const result = await evaluateDelivery({ targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate", receipt: receipt() }, { ...passingDependencies, readRemoteArtifact: async () => old });
+  const result = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readRemoteArtifact: async () => old });
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "HTML_ARTIFACT_MISMATCH"));
 });
 
 test("missing journey evidence cannot be upgraded by a public exact artifact", async () => {
-  const result = await evaluateDelivery({ targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate" }, passingDependencies);
+  const result = await evaluateDelivery(deliveryInput({ receipt: undefined }), passingDependencies);
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "JOURNEY_RECEIPT_REQUIRED"));
 });
 
 test("operator same-draft journey grants HANDOFF_READY only", async () => {
-  const result = await evaluateDelivery({ targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate", receipt: receipt() }, passingDependencies);
+  const result = await evaluateDelivery(deliveryInput(), passingDependencies);
   assert.equal(result.verdict, "HANDOFF_READY");
   assert.equal(result.authority_granted, false);
 });
 
 test("a self-labelled Xiaoshimei receipt cannot mint consumer validation", async () => {
-  const result = await evaluateDelivery({ targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate", receipt: receipt("xiaoshimei") }, passingDependencies);
+  const result = await evaluateDelivery(deliveryInput({ receipt: receipt("xiaoshimei") }), passingDependencies);
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "CONSUMER_SELF_ASSERTION_UNVERIFIED"));
 });
@@ -131,9 +163,26 @@ test("a stale operator receipt cannot be reused for a later deployment handoff",
   assert.ok(result.errors.some((row) => row.code === "JOURNEY_RECEIPT_STALE"));
 });
 
+test("HANDOFF_READY requires an exact alternate-entry census and blocks a second public truth", async () => {
+  const missing = await evaluateDelivery(deliveryInput({ alternateUrls: [] }), passingDependencies);
+  assert.equal(missing.verdict, "BLOCKED");
+  assert.ok(missing.errors.some((row) => row.code === "ALTERNATE_ENTRY_CENSUS_REQUIRED"));
+  const repeatedDefault = await evaluateDelivery(deliveryInput({ alternateUrls: [DEFAULT_ALTERNATE_ENTRY_URL] }), passingDependencies);
+  assert.ok(repeatedDefault.errors.some((row) => row.code === "ALTERNATE_ENTRY_CENSUS_REQUIRED"));
+
+  const active = await evaluateDelivery(deliveryInput(), {
+    ...passingDependencies,
+    inspectAlternateEntry: async (alternateUrl) => {
+      throw Object.assign(new Error("second public truth"), { code: "ALTERNATE_PUBLIC_ENTRY_ACTIVE", detail: alternateUrl });
+    },
+  });
+  assert.equal(active.verdict, "BLOCKED");
+  assert.ok(active.errors.some((row) => row.code === "ALTERNATE_PUBLIC_ENTRY_ACTIVE"));
+});
+
 test("a DNS rebinding target that resolves privately is BLOCKED before delivery", async () => {
   let remoteReads = 0;
-  const result = await evaluateDelivery({ targetUrl: url, expectedCommit: commit, candidateRoot: "/candidate", receipt: receipt() }, {
+  const result = await evaluateDelivery(deliveryInput(), {
     ...passingDependencies,
     resolvePublicTarget: async () => { throw Object.assign(new Error("private address"), { code: "DNS_PRIVATE_ADDRESS", detail: "127.0.0.1" }); },
     readRemoteArtifact: async () => { remoteReads += 1; return artifact; },
