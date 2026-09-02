@@ -556,7 +556,7 @@ test("text draft deterministically formats complete sentences into readable para
   assert.ok((draft.body.match(/\n\n/g) || []).length >= 3);
 });
 
-test("soft tool-threshold filler is removed while guaranteed-relief filler still fails closed", () => {
+test("soft tool-threshold and whole effect sentences are removed while hard outcome claims still fail closed", () => {
   const titles = ["盯屏幕太久先给眼睛一个暂停", "眼睛发紧时我会按顺序做这几步", "放下手机后这样让视线慢慢休息"];
   const base = "盯屏幕后眼周容易发紧。先放下手机，接着洗净双手，之后揉搓掌心，然后闭眼轻覆眼眶但不按压眼球，最后眺望远处。如果刺痛或酸涩加重就停下来咨询专业人士。";
   const responseFor = (ending, titleList = titles) => ({ output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify({ content_type: "method_checklist", titles: titleList, selected_title: titleList[0], recommended_image_count: 4, body: `${base}\n\n${base}\n\n${ending}${base}\n\n${base}`, tags: ["眼部放松", "屏幕休息", "日常养生", "生活方式", "轻缓练习"], facts: [], risks: [] }) }] });
@@ -567,7 +567,13 @@ test("soft tool-threshold filler is removed while guaranteed-relief filler still
   const cleanedTitle = extractArkTextDraft(responseFor("", toolTitle), { ...input(), pillar: "wellness" });
   assert.equal(cleanedTitle.titles[0], "盯屏幕太久先给眼睛一个暂停");
   assert.ok(cleanedTitle.qualityRepairs.some((item) => item.includes("soft_hook_removed")));
-  assert.throws(() => extractArkTextDraft(responseFor("做完之后整个人会松下来。"), { ...input(), pillar: "wellness" }), /cheap_or_unverifiable_hook/);
+  const cleanedEffect = extractArkTextDraft(responseFor("做完之后整个人会松下来。"), { ...input(), pillar: "wellness" });
+  assert.doesNotMatch(cleanedEffect.body, /整个人会松下来/);
+  assert.ok(cleanedEffect.qualityRepairs.includes("body:soft_effect_sentence_removed"));
+  const cleanedPreviewPhrase = extractArkTextDraft(responseFor("会慢慢舒展起来。"), { ...input(), pillar: "wellness" });
+  assert.doesNotMatch(cleanedPreviewPhrase.body, /会慢慢舒展起来/);
+  assert.ok(cleanedPreviewPhrase.qualityRepairs.includes("body:soft_effect_sentence_removed"));
+  assert.throws(() => extractArkTextDraft(responseFor("这个方法可以根治眼睛疲劳。"), { ...input(), pillar: "wellness" }), /cheap_or_unverifiable_hook/);
 });
 
 test("confirmed text produces an exact 1-8 page plan and reloadable package", () => {
