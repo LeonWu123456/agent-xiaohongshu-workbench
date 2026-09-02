@@ -201,6 +201,58 @@ export async function readRemoteArtifact(targetUrl, fetchImpl = fetch) {
   return { html_sha256: sha256(htmlResult.bytes), html_size_bytes: htmlResult.bytes.length, assets };
 }
 
+export function validateProviderReadiness(health) {
+  if (!health || typeof health !== "object" || Array.isArray(health)) {
+    return [{ code: "PROVIDER_HEALTH_INVALID", detail: String(health || "") }];
+  }
+  const checks = [
+    [health.configured === true, "PROVIDER_SERVER_KEY_MISSING", `configured=${String(health.configured)}`],
+    [health.credential_mode === "SERVER_MANAGED", "PROVIDER_CREDENTIAL_MODE_INVALID", String(health.credential_mode || "")],
+    [health.key_store === "Vercel Sensitive Environment Variable", "PROVIDER_KEY_STORE_INVALID", String(health.key_store || "")],
+    [health.access_required === true, "PROVIDER_ACCESS_NOT_REQUIRED", `access_required=${String(health.access_required)}`],
+    [health.access_configured === true, "PROVIDER_ACCESS_NOT_CONFIGURED", `access_configured=${String(health.access_configured)}`],
+    [health.authentication_mode === "STUDIO_ACCESS_SESSION", "PROVIDER_AUTHENTICATION_MODE_INVALID", String(health.authentication_mode || "")],
+    [health.authenticated === false, "PROVIDER_PUBLIC_PROBE_ALREADY_AUTHENTICATED", `authenticated=${String(health.authenticated)}`],
+    [health.status === "ACCESS_SESSION_REQUIRED", "PROVIDER_PUBLIC_STATUS_INVALID", String(health.status || "")],
+    [health.image_ledger_configured === true, "PROVIDER_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(health.image_ledger_configured)}`],
+  ];
+  return checks.filter(([passed]) => !passed).map(([, code, detail]) => ({ code, detail }));
+}
+
+export async function readProviderReadiness(targetUrl, fetchImpl = fetch) {
+  const expectedOrigin = new URL(targetUrl).origin;
+  const healthUrl = new URL("/api/provider/health", `${expectedOrigin}/`).href;
+  let response;
+  try {
+    response = await fetchImpl(healthUrl, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(12_000),
+      headers: {
+        accept: "application/json",
+        "user-agent": "xiaoshimei-shareable-delivery-verifier/1",
+      },
+    });
+  } catch (error) {
+    fail("PROVIDER_HEALTH_FETCH_FAILED", String(error?.message || error));
+  }
+  if (response.status >= 300 && response.status < 400) {
+    fail("PROVIDER_HEALTH_REDIRECTED", `${healthUrl}:${response.status}`);
+  }
+  if (!response.ok) fail("PROVIDER_HEALTH_HTTP_FAILED", `${healthUrl}:${response.status}`);
+  const finalUrl = response.url || healthUrl;
+  if (new URL(finalUrl).origin !== expectedOrigin) fail("PROVIDER_HEALTH_ORIGIN_MISMATCH", finalUrl);
+  let health;
+  try {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > 64_000) fail("PROVIDER_HEALTH_TOO_LARGE", String(Buffer.byteLength(text, "utf8")));
+    health = JSON.parse(text);
+  } catch (error) {
+    if (error instanceof DeliveryError) throw error;
+    fail("PROVIDER_HEALTH_JSON_INVALID", String(error?.message || error));
+  }
+  return health;
+}
+
 export async function inspectAlternateEntry(alternateUrl, { canonicalUrl = DELIVERY_TARGET, fetchImpl = fetch } = {}) {
   const classified = classifyTargetUrl(alternateUrl);
   if (classified.kind !== "PUBLIC_HTTPS") {
@@ -292,6 +344,20 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
   for (const step of REQUIRED_JOURNEY_STEPS) {
     if (receipt.steps?.[step] !== true) errors.push({ code: "JOURNEY_STEP_NOT_PASS", detail: step });
   }
+  if (receipt.fresh_user?.new_draft !== true) errors.push({ code: "FRESH_USER_NEW_DRAFT_NOT_PASS", detail: String(receipt.fresh_user?.new_draft) });
+  if (receipt.fresh_user?.generate_text !== true) errors.push({ code: "FRESH_USER_TEXT_GENERATION_NOT_PASS", detail: String(receipt.fresh_user?.generate_text) });
+  if (typeof receipt.fresh_user?.text_draft_id !== "string" || !receipt.fresh_user.text_draft_id.trim()) {
+    errors.push({ code: "FRESH_USER_TEXT_DRAFT_ID_MISSING", detail: String(receipt.fresh_user?.text_draft_id || "") });
+  }
+  if (!Number.isInteger(receipt.fresh_user?.body_length) || receipt.fresh_user.body_length < 1) {
+    errors.push({ code: "FRESH_USER_TEXT_BODY_EMPTY", detail: String(receipt.fresh_user?.body_length) });
+  }
+  if (!Number.isInteger(receipt.fresh_user?.tag_count) || receipt.fresh_user.tag_count < 1) {
+    errors.push({ code: "FRESH_USER_TAGS_EMPTY", detail: String(receipt.fresh_user?.tag_count) });
+  }
+  if (receipt.fresh_user?.image_calls !== 0) {
+    errors.push({ code: "FRESH_USER_IMAGE_CALLS_NOT_ZERO", detail: String(receipt.fresh_user?.image_calls) });
+  }
   const ids = [receipt.same_draft?.initial_draft_id, receipt.same_draft?.saved_draft_id, receipt.same_draft?.reopened_draft_id, receipt.same_draft?.export_source_draft_id];
   if (ids.some((value) => typeof value !== "string" || !value.trim()) || new Set(ids).size !== 1) {
     errors.push({ code: "JOURNEY_DRAFT_IDENTITY_MISMATCH", detail: ids.map((value) => String(value || "")).join(",") });
@@ -347,16 +413,20 @@ export async function evaluateDelivery(input, dependencies = {}) {
     ? await capture(() => (dependencies.readRemoteArtifact || readRemoteArtifact)(target.url))
     : undefined;
   if (localArtifact && remoteArtifact) errors.push(...compareArtifacts(localArtifact, remoteArtifact));
+  const providerHealth = dnsAddresses.length
+    ? await capture(() => (dependencies.readProviderReadiness || readProviderReadiness)(target.url))
+    : undefined;
+  if (providerHealth) errors.push(...validateProviderReadiness(providerHealth));
   const journey = validateJourneyReceipt(input.receipt, { targetUrl: target.url, expectedCommit: input.expectedCommit });
   errors.push(...journey.errors);
   if (errors.length) {
-    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, local_artifact: localArtifact, remote_artifact: remoteArtifact } };
+    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, local_artifact: localArtifact, remote_artifact: remoteArtifact, provider_health: providerHealth } };
   }
   return {
     ...base,
     verdict: "HANDOFF_READY",
     errors: [],
-    checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, artifact_identity: localArtifact },
+    checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, artifact_identity: localArtifact, provider_health: providerHealth },
     consumer: {
       operator_actor_role: journey.actor_role,
       same_draft_id: input.receipt.same_draft.initial_draft_id,

@@ -15,12 +15,13 @@ npm run verify:shareable-delivery -- \
 ```
 
 - `LOCAL_ONLY`：只在当前机器可用，绝不能把地址发给另一台设备。
-- `BLOCKED`：HTTPS/DNS、候选身份、静态制品或同稿旅程至少一项不成立。
-- `HANDOFF_READY`：公共稳定入口、exact committed build 和 operator 同稿旅程已经一致；此时只能说“可以发给她试用”。
+- `BLOCKED`：HTTPS/DNS、候选身份、静态制品、Provider server-managed readiness、fresh-user 新建/文字生成或同稿旅程至少一项不成立。
+- `HANDOFF_READY`：公共稳定入口、exact committed build、public health 的 server-managed/access/ledger 状态、fresh-user 新建与文字生成、operator 同稿旅程全部一致；此时只能说“可以发给她试用”。
+- 生成服务硬门：稳定域 `/api/provider/health` 必须返回 `configured=true`、`credential_mode=SERVER_MANAGED`、`key_store=Vercel Sensitive Environment Variable`、`access_required=true`、`access_configured=true`、`authentication_mode=STUDIO_ACCESS_SESSION`、`authenticated=false`、`status=ACCESS_SESSION_REQUIRED`、`image_ledger_configured=true`。`AWAITING_BYOK`、`BROWSER_BYOK`、当前标签页 `sessionStorage`、缺访问合同或缺图片账本一律拒绝交付。
 - 唯一公网真相：判定器固定检查 Vercel 自动项目别名，并要求传入 exact promoted deployment URL；可继续追加最近 Preview。备用入口只能被 Vercel SSO/401/403/404/410 阻断，或重定向回稳定域。任一备用地址直接返回 2xx 或跳向第三处，均以 `ALTERNATE_PUBLIC_ENTRY_ACTIVE` / `ALTERNATE_ENTRY_REDIRECT_UNSAFE` 拒绝交付。
 - `CONSUMER_VALIDATED`：只能由小师妹本人在独立设备上的直接反馈证明；本判定器永远不能签发这个结论，自填 `actor=xiaoshimei` 反而会被拒绝。
 
-判定器不生成旅程证据，也不授予推送、Preview、Production、回滚或外部发布 Authority。完整回执 schema 由 `tests/shareable-delivery.test.mjs` 锁定。
+判定器不生成旅程证据，也不授予推送、Preview、Production、回滚或外部发布 Authority。完整回执 schema 由 `tests/shareable-delivery.test.mjs` 锁定；其中 `new_draft=true` 与 `generate_text=true` 证明 fresh user 不是只在修旧稿。
 
 更新时间：2026-08-31
 
@@ -48,7 +49,7 @@ npm run verify:shareable-delivery -- \
 - GitHub/Vercel 只接收源码和公开静态资产。
 - `.data`、生成图片、Provider 回执、账号素材、下载包和 `.env*` 不进入 Git。
 - 本地运行数据落在 `~/.mesy/runtime/packages/xiaoshimei-studio-v2/`。
-- Vercel BYOK API Key 只由使用者当前标签页提交到 `/api/provider`，服务端不持久化；本地 Key 只从 Keychain/环境读取。
+- Production 只允许 server-managed `ARK_API_KEY` 存在于 Vercel Sensitive Environment Variable；浏览器不得接收 Key，也不得要求每个使用者/标签页重复填写。BYOK 只属于本机开发降级路径，任何 Production `BROWSER_BYOK` 回读都必须阻断交付。本地 Key 只从 Keychain/环境读取。
 
 ## D36 跨实例图片账本（当前仅本地候选，未启用）
 

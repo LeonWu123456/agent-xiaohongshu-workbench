@@ -10,9 +10,11 @@ import {
   evaluateDelivery,
   isPublicAddress,
   inspectAlternateEntry,
+  readProviderReadiness,
   readRemoteArtifact,
   resolvePublicTarget,
   validateJourneyReceipt,
+  validateProviderReadiness,
 } from "../scripts/verify-shareable-delivery.mjs";
 
 const commit = "a".repeat(40);
@@ -35,6 +37,7 @@ function receipt(role = "operator") {
     observed_at: new Date().toISOString(),
     actor: { role, identity: role === "xiaoshimei" ? "xiaoshimei" : "release-operator" },
     steps: { open: true, access: true, edit: true, save: true, reopen: true, copy: true, download: true },
+    fresh_user: { new_draft: true, generate_text: true, text_draft_id: "text-draft-new", body_length: 294, tag_count: 5, image_calls: 0 },
     same_draft: { initial_draft_id: "draft-one", saved_draft_id: "draft-one", reopened_draft_id: "draft-one", export_source_draft_id: "draft-one" },
   };
 }
@@ -45,6 +48,17 @@ const passingDependencies = {
   resolvePublicTarget: async () => ["76.76.21.21"],
   readLocalArtifact: async () => structuredClone(artifact),
   readRemoteArtifact: async () => structuredClone(artifact),
+  readProviderReadiness: async () => ({
+    status: "ACCESS_SESSION_REQUIRED",
+    configured: true,
+    access_required: true,
+    access_configured: true,
+    authenticated: false,
+    authentication_mode: "STUDIO_ACCESS_SESSION",
+    image_ledger_configured: true,
+    credential_mode: "SERVER_MANAGED",
+    key_store: "Vercel Sensitive Environment Variable",
+  }),
 };
 
 function deliveryInput(overrides = {}) {
@@ -135,6 +149,56 @@ test("missing journey evidence cannot be upgraded by a public exact artifact", a
   const result = await evaluateDelivery(deliveryInput({ receipt: undefined }), passingDependencies);
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "JOURNEY_RECEIPT_REQUIRED"));
+});
+
+test("BYOK or an absent server-managed production key blocks handoff", async () => {
+  const health = {
+    status: "AWAITING_BYOK",
+    configured: false,
+    access_required: false,
+    access_configured: false,
+    authenticated: false,
+    authentication_mode: "BROWSER_BYOK",
+    image_ledger_configured: true,
+    credential_mode: "BROWSER_BYOK",
+    key_store: "当前标签页 sessionStorage",
+  };
+  assert.deepEqual(validateProviderReadiness(health).map((row) => row.code), [
+    "PROVIDER_SERVER_KEY_MISSING",
+    "PROVIDER_CREDENTIAL_MODE_INVALID",
+    "PROVIDER_KEY_STORE_INVALID",
+    "PROVIDER_ACCESS_NOT_REQUIRED",
+    "PROVIDER_ACCESS_NOT_CONFIGURED",
+    "PROVIDER_AUTHENTICATION_MODE_INVALID",
+    "PROVIDER_PUBLIC_STATUS_INVALID",
+  ]);
+  const result = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readProviderReadiness: async () => health });
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.errors.some((row) => row.code === "PROVIDER_SERVER_KEY_MISSING"));
+});
+
+test("provider health must be same-origin JSON without redirects", async () => {
+  await assert.rejects(
+    () => readProviderReadiness(url, async () => new Response(null, { status: 302, headers: { location: "https://example.com/" } })),
+    (error) => error.code === "PROVIDER_HEALTH_REDIRECTED",
+  );
+  await assert.rejects(
+    () => readProviderReadiness(url, async () => new Response("not-json", { status: 200 })),
+    (error) => error.code === "PROVIDER_HEALTH_JSON_INVALID",
+  );
+});
+
+test("an old-draft edit/export receipt cannot replace fresh-user creation and text generation", async () => {
+  const legacy = receipt();
+  delete legacy.fresh_user;
+  const result = await evaluateDelivery(deliveryInput({ receipt: legacy }), passingDependencies);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_NEW_DRAFT_NOT_PASS"));
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TEXT_GENERATION_NOT_PASS"));
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TEXT_DRAFT_ID_MISSING"));
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TEXT_BODY_EMPTY"));
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_TAGS_EMPTY"));
+  assert.ok(result.errors.some((row) => row.code === "FRESH_USER_IMAGE_CALLS_NOT_ZERO"));
 });
 
 test("operator same-draft journey grants HANDOFF_READY only", async () => {
