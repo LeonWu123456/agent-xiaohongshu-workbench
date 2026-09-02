@@ -845,7 +845,7 @@ function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "
   const rootTag = createHash("sha256").update(appScope).digest("hex").slice(0, 32);
   const productRoot = "xiaoshimei:image-d37:{xiaoshimei-studio-v2}";
   const root = `${productRoot}:scope:${rootTag}`;
-  const readinessKey = `${root}:readiness`;
+  const readinessKey = `${root}:candidate:${envelope.payload.candidate_commit}:readiness`;
   const capacityKey = `${productRoot}:capacity`;
   const commands = [];
   const keys = mode === "START" ? [...new Set([capacityKey, readinessKey, ...extraKeys])].sort() : [];
@@ -867,6 +867,7 @@ function runtimeLedgerFixture({ attestation, nowMs = 1_788_192_000_000, mode = "
     if (command === "PING") result = "PONG";
     else if (command === "TIME") result = [String(Math.floor(nowMs / 1000)), String((nowMs % 1000) * 1000)];
     else if (command === "GET" && body[1] === readinessKey) result = JSON.stringify(envelope);
+    else if (command === "GET" && body[1].endsWith(":readiness")) result = null;
     else if (command === "ZRANGEBYSCORE") result = [];
     else if (command === "DBSIZE") result = keys.length;
     else if (command === "SCAN") result = ["0", keys];
@@ -916,7 +917,7 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
       { id: "audit-too-old", timestamp: nowMs - 9 * 24 * 60 * 60 * 1000, action: "create", resource_id: databaseId },
       { id: "audit-current", timestamp: nowMs - 60_000, action: "read", resource_id: databaseId },
     ],
-    readiness: null,
+    readinessByKey: new Map(),
     capacity: {},
     calibration: new Map(),
     calibrationUsage: 1_400_000,
@@ -951,7 +952,7 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
     let result;
     if (body[0] === "TIME") result = [String(Math.floor(state.nowMs / 1000)), String((state.nowMs % 1000) * 1000)];
     else if (body[0] === "GET") {
-      if (body[1].endsWith(":readiness")) result = state.readiness;
+      if (body[1].endsWith(":readiness")) result = state.readinessByKey.get(body[1]) ?? null;
       else result = state.calibration.get(body[1]) ?? null;
     } else if (body[0] === "SET") {
       state.calibration.set(body[1], body[2]);
@@ -981,7 +982,7 @@ function attestorFixture({ nowMs = 1_788_192_000_000 } = {}) {
           live_reservations: preserve ? state.capacity.live_reservations || 0 : 0,
           unfinalized_inventory: preserve ? state.capacity.unfinalized_inventory || 0 : 0,
         };
-        state.readiness = body[11];
+        state.readinessByKey.set(body[4], body[11]);
         result = ["INSTALLED", String(state.capacity.reserved_bytes), String(state.capacity.live_reservations), String(state.capacity.unfinalized_inventory)];
       }
     } else throw new Error(`UNEXPECTED_ATTESTOR_COMMAND:${body.join(":")}`);
@@ -1017,6 +1018,7 @@ test("D55 health proves the exact signed attestation with read-only PING TIME GE
   assert.equal(health.body.image_ledger_configured, true);
   assert.equal(health.body.image_ledger_attested, true);
   assert.equal(health.body.image_ledger_attestation_status, "READY");
+  assert.equal(health.body.image_ledger_attestation_candidate_commit, fixture.envelope.payload.candidate_commit);
   assert.ok(health.body.image_ledger_attestation_remaining_seconds > 0);
   assert.deepEqual(fixture.commands.map((body) => body[0]), ["PING", "TIME", "GET"]);
 
@@ -1062,11 +1064,17 @@ test("D55 health exposes missing expired and deployment-mismatched attestations 
 
   const mismatchFixture = runtimeLedgerFixture({ nowMs, mode: "STEP" });
   const mismatchEnv = { ...mismatchFixture.env, ARK_API_KEY: "server-secret-test-key", XIAOSHIMEI_CANDIDATE_COMMIT: "9".repeat(40) };
+  const mismatchFetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body[0] !== "GET") return mismatchFixture.fetchImpl(url, options);
+    mismatchFixture.commands.push(body);
+    return { ok: true, json: async () => ({ result: JSON.stringify(mismatchFixture.envelope) }) };
+  };
   cases.push({
     expected: "IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH",
     fixture: mismatchFixture,
     env: mismatchEnv,
-    ledger: createUpstashImageLedgerFromEnv(mismatchEnv, { fetchImpl: mismatchFixture.fetchImpl }),
+    ledger: createUpstashImageLedgerFromEnv(mismatchEnv, { fetchImpl: mismatchFetch }),
   });
 
   for (const item of cases) {
@@ -1084,7 +1092,7 @@ test("D55 health exposes missing expired and deployment-mismatched attestations 
 
 test("D37 START accepts sibling environment and inventoried legacy D36 roots while sharing one conservative capacity total", async () => {
   const legacyRoot = `xiaoshimei:image-d36:{${"a".repeat(32)}}`;
-  const siblingReadiness = `xiaoshimei:image-d37:{xiaoshimei-studio-v2}:scope:${"b".repeat(32)}:readiness`;
+  const siblingReadiness = `xiaoshimei:image-d37:{xiaoshimei-studio-v2}:scope:${"b".repeat(32)}:candidate:${"8".repeat(40)}:readiness`;
   const legacyCapacity = `${legacyRoot}:capacity`;
   const fixture = runtimeLedgerFixture({
     extraKeys: [siblingReadiness, `${legacyRoot}:readiness`, legacyCapacity],
@@ -1304,24 +1312,27 @@ test("D36 scheduled attestor renews inside the lead window but rejects signature
   assert.equal(due.state.commands.some((body) => body[0] === "SET"), true);
 
   const wrongBinding = attestorFixture();
-  await buildAndInstallAttestation({ env: wrongBinding.env, fetchImpl: wrongBinding.fetchImpl });
+  const wrongInstalled = await buildAndInstallAttestation({ env: wrongBinding.env, fetchImpl: wrongBinding.fetchImpl });
+  const wrongEnvelope = JSON.parse(wrongBinding.state.readinessByKey.get(wrongInstalled.readiness_key));
+  wrongEnvelope.payload.vercel_project_id = "prj_wrong";
+  wrongEnvelope.signature = sign(null, Buffer.from(canonicalAttestationJson(wrongEnvelope.payload)), wrongBinding.privateKey).toString("base64");
+  wrongBinding.state.readinessByKey.set(wrongInstalled.readiness_key, JSON.stringify(wrongEnvelope));
   wrongBinding.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
   wrongBinding.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
-  wrongBinding.env.XIAOSHIMEI_CANDIDATE_COMMIT = "f".repeat(40);
   wrongBinding.state.commands.length = 0;
   wrongBinding.state.developerRequests.length = 0;
   await assert.rejects(
     () => buildAndInstallAttestation({ env: wrongBinding.env, fetchImpl: wrongBinding.fetchImpl }),
-    /ATTESTATION_PRIOR_BINDING_MISMATCH:candidate_commit/,
+    /ATTESTATION_PRIOR_BINDING_MISMATCH:vercel_project_id/,
   );
   assert.equal(wrongBinding.state.developerRequests.length, 0);
   assert.deepEqual(wrongBinding.state.commands.map((body) => body[0]), ["TIME", "GET"]);
 
   const badSignature = attestorFixture();
-  await buildAndInstallAttestation({ env: badSignature.env, fetchImpl: badSignature.fetchImpl });
-  const envelope = JSON.parse(badSignature.state.readiness);
+  const badInstalled = await buildAndInstallAttestation({ env: badSignature.env, fetchImpl: badSignature.fetchImpl });
+  const envelope = JSON.parse(badSignature.state.readinessByKey.get(badInstalled.readiness_key));
   envelope.signature = Buffer.alloc(64, 7).toString("base64");
-  badSignature.state.readiness = JSON.stringify(envelope);
+  badSignature.state.readinessByKey.set(badInstalled.readiness_key, JSON.stringify(envelope));
   badSignature.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
   badSignature.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
   badSignature.state.commands.length = 0;
@@ -1334,7 +1345,7 @@ test("D36 scheduled attestor renews inside the lead window but rejects signature
   assert.deepEqual(badSignature.state.commands.map((body) => body[0]), ["TIME", "GET"]);
 });
 
-test("D39 explicit manual attestation rotates only the candidate binding while preserving the signed chain and capacity identity", async () => {
+test("D56 different candidate attestations coexist while preserving one shared capacity identity", async () => {
   const fixture = attestorFixture();
   const first = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
   fixture.state.nowMs += 60_000;
@@ -1352,7 +1363,10 @@ test("D39 explicit manual attestation rotates only the candidate binding while p
     "/v2/redis/database/db-xiaoshimei-native-test",
     "/v2/redis/stats/db-xiaoshimei-native-test",
   ]);
-  assert.equal(JSON.parse(fixture.state.readiness).payload.candidate_commit, "3".repeat(40));
+  assert.notEqual(rotated.readiness_key, first.readiness_key);
+  assert.equal(JSON.parse(fixture.state.readinessByKey.get(first.readiness_key)).payload.candidate_commit, "2".repeat(40));
+  assert.equal(JSON.parse(fixture.state.readinessByKey.get(rotated.readiness_key)).payload.candidate_commit, "3".repeat(40));
+  assert.equal(fixture.state.readinessByKey.size, 2);
 });
 
 test("D39 scheduled renewal can never combine due mode with candidate rotation authority", async () => {
@@ -2343,7 +2357,7 @@ test("D36 signed expiry finalizer waits through 7d-1ms, then releases capacity o
     const asset = `${runRoot}:asset:${"a".repeat(64)}`;
     const keys = [asset, inventory, meta].sort();
     const expiry = `${appRoot}:expiry`;
-    const readiness = `${appRoot}:readiness`;
+    const readiness = `${appRoot}:candidate:${signed.envelope.payload.candidate_commit}:readiness`;
     const capacity = `${productRoot}:capacity`;
     const member = `${meta}|${signed.envelope.payload.capacity_generation}|${signed.envelope.payload.worst_case_run_bytes}`;
     const commands = [];

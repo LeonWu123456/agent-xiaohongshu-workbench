@@ -203,7 +203,7 @@ export async function readRemoteArtifact(targetUrl, fetchImpl = fetch) {
   return { html_sha256: sha256(htmlResult.bytes), html_size_bytes: htmlResult.bytes.length, assets };
 }
 
-export function validateProviderReadiness(health) {
+export function validateProviderReadiness(health, { expectedCommit = "" } = {}) {
   if (!health || typeof health !== "object" || Array.isArray(health)) {
     return [{ code: "PROVIDER_HEALTH_INVALID", detail: String(health || "") }];
   }
@@ -218,6 +218,7 @@ export function validateProviderReadiness(health) {
     [health.status === "ACCESS_SESSION_REQUIRED", "PROVIDER_PUBLIC_STATUS_INVALID", String(health.status || "")],
     [health.image_ledger_configured === true, "PROVIDER_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(health.image_ledger_configured)}`],
     [health.image_ledger_attested === true, "PROVIDER_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(health.image_ledger_attested)} status=${String(health.image_ledger_attestation_status || "")}`],
+    [!expectedCommit || health.image_ledger_attestation_candidate_commit === expectedCommit, "PROVIDER_IMAGE_LEDGER_CANDIDATE_MISMATCH", `expected=${expectedCommit};actual=${String(health.image_ledger_attestation_candidate_commit || "")}`],
   ];
   return checks.filter(([passed]) => !passed).map(([, code, detail]) => ({ code, detail }));
 }
@@ -403,6 +404,7 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
     [rollbackProvider?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(rollbackProvider?.credential_mode || "")],
     [rollbackProvider?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(rollbackProvider?.image_ledger_configured)}`],
     [rollbackProvider?.image_ledger_attested === true, "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(rollbackProvider?.image_ledger_attested)} status=${String(rollbackProvider?.image_ledger_attestation_status || "")}`],
+    [rollbackProvider?.image_ledger_attestation_candidate_commit === rollback?.source_commit, "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH", `expected=${String(rollback?.source_commit || "")};actual=${String(rollbackProvider?.image_ledger_attestation_candidate_commit || "")}`],
   ]) {
     if (!passed) errors.push({ code, detail });
   }
@@ -464,7 +466,7 @@ export async function evaluateDelivery(input, dependencies = {}) {
   const providerHealth = dnsAddresses.length
     ? await capture(() => (dependencies.readProviderReadiness || readProviderReadiness)(target.url))
     : undefined;
-  if (providerHealth) errors.push(...validateProviderReadiness(providerHealth));
+  if (providerHealth) errors.push(...validateProviderReadiness(providerHealth, { expectedCommit: input.expectedCommit }));
   const journey = validateJourneyReceipt(input.receipt, { targetUrl: target.url, expectedCommit: input.expectedCommit });
   errors.push(...journey.errors);
   if (errors.length) {

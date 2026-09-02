@@ -463,6 +463,7 @@ async function publicProviderHealth(request, { env = process.env, nowMs = Date.n
       ...config,
       image_ledger_attested: true,
       image_ledger_attestation_status: "READY",
+      image_ledger_attestation_candidate_commit: String(attestation?.candidate_commit || ""),
       ...(Number.isFinite(hardExpiryMs) && hardExpiryMs > 0 ? {
         image_ledger_attestation_expires_at: new Date(hardExpiryMs).toISOString(),
         image_ledger_attestation_remaining_seconds: Math.max(0, Math.floor((hardExpiryMs - nowMs) / 1000)),
@@ -879,8 +880,10 @@ function d36LegacyAppRoot(appScopeId) {
   return `xiaoshimei:image-d36:{${d36ScopeTag(appScopeId)}}`;
 }
 
-function d36ReadinessKey(appScopeId) {
-  return `${d36AppRoot(appScopeId)}:readiness`;
+function d36ReadinessKey(appScopeId, candidateCommit) {
+  const commit = String(candidateCommit || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new TypeError("IMAGE_LEDGER_CANDIDATE_REQUIRED");
+  return `${d36AppRoot(appScopeId)}:candidate:${commit}:readiness`;
 }
 
 function d36CapacityKey() {
@@ -1643,7 +1646,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     const appScopeId = String(context?.appScopeId || "");
     if (appScopeId !== runtimeBinding.expected?.app_scope) throw new Error("IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH:app_scope");
     const nowMs = await redisTimeMs();
-    const raw = await command(["GET", d36ReadinessKey(appScopeId)]);
+    const raw = await command(["GET", d36ReadinessKey(appScopeId, runtimeBinding.expected.candidate_commit)]);
     if (typeof raw !== "string") throw new Error("IMAGE_LEDGER_ATTESTATION_MISSING");
     let envelope;
     try { envelope = JSON.parse(raw); } catch { throw new Error("IMAGE_LEDGER_ATTESTATION_ENVELOPE_INVALID"); }
@@ -1741,7 +1744,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     }
     const runMetaKeys = keys.filter((key) => /:run:images-[^:]+:meta$/.test(key));
     const inventoryUnion = new Set(keys.filter((key) => key === d36CapacityKey(appScopeId)
-      || /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:(readiness|expiry)$/.test(key)
+      || /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:(?:(?:candidate:[0-9a-f]{40}:)?readiness|expiry)$/.test(key)
       || /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:(readiness|capacity|expiry)$/.test(key)));
     for (const metaKey of runMetaKeys) {
       const inventoryKey = metaKey.replace(/:meta$/, ":inventory");

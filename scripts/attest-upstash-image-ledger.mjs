@@ -148,6 +148,11 @@ function appRoot(appScope) {
   return `${D37_PRODUCT_ROOT}:scope:${sha256(Buffer.from(appScope)).slice(0, 32)}`;
 }
 
+function readinessKey(appScope, candidateCommit) {
+  if (!/^[0-9a-f]{40}$/.test(candidateCommit)) throw new Error("ATTESTATION_CANDIDATE_INVALID");
+  return `${appRoot(appScope)}:candidate:${candidateCommit}:readiness`;
+}
+
 function productCapacityKey() {
   return `${D37_PRODUCT_ROOT}:capacity`;
 }
@@ -214,7 +219,7 @@ function verifyPriorEnvelope(value, publicKey) {
   return value.payload;
 }
 
-function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit }, { allowCandidateRotation = false } = {}) {
+function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId, environment, candidateCommit }) {
   if (payload?.schema !== ATTESTATION_SCHEMA) throw new Error("ATTESTATION_PRIOR_SCHEMA_INVALID");
   const expected = {
     database_id_sha256: sha256(Buffer.from(databaseId)),
@@ -225,7 +230,6 @@ function assertPriorBinding(payload, { databaseId, redisUrl, appScope, projectId
     candidate_commit: candidateCommit,
   };
   for (const [field, value] of Object.entries(expected)) {
-    if (field === "candidate_commit" && allowCandidateRotation) continue;
     if (payload[field] !== value) throw new Error(`ATTESTATION_PRIOR_BINDING_MISMATCH:${field}`);
   }
   const signedAtMs = Number(payload.signed_at_ms);
@@ -413,9 +417,9 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const redis = { command: (args) => redisCommand(redisUrl, redisToken, args, fetchImpl) };
   const signedAtMs = await redisTimeMs(redis);
   const root = appRoot(appScope);
-  const readinessKey = `${root}:readiness`;
+  const candidateReadinessKey = readinessKey(appScope, candidateCommit);
   const capacityKey = productCapacityKey();
-  const priorRaw = await redis.command(["GET", readinessKey]);
+  const priorRaw = await redis.command(["GET", candidateReadinessKey]);
   let priorEnvelope = null;
   if (typeof priorRaw === "string") {
     try { priorEnvelope = JSON.parse(priorRaw); } catch { throw new Error("ATTESTATION_PRIOR_INVALID"); }
@@ -423,11 +427,9 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     throw new Error("ATTESTATION_PRIOR_INVALID");
   }
   const prior = verifyPriorEnvelope(priorEnvelope, publicKey);
-  if (allowCandidateRotation && !prior) throw new Error("ATTESTATION_CANDIDATE_ROTATION_PRIOR_REQUIRED");
   if (prior) assertPriorBinding(
     prior,
     { databaseId, redisUrl, appScope, projectId, environment, candidateCommit },
-    { allowCandidateRotation },
   );
 
   if (onlyIfDue && prior) {
@@ -439,7 +441,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
       return {
         status: "ATTESTATION_NOT_DUE",
         public_key_spki_base64: publicKeyDerBase64(privateKey),
-        readiness_key: readinessKey,
+        readiness_key: candidateReadinessKey,
         capacity_key: capacityKey,
         attestation_generation: prior.attestation_generation,
         capacity_generation: prior.capacity_generation,
@@ -539,7 +541,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     signature: sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64"),
   };
   const serialized = canonicalJson(envelope);
-  const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, "2", capacityKey, readinessKey,
+  const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, "2", capacityKey, candidateReadinessKey,
     CAPACITY_SCHEMA,
     capacityGeneration,
     attestationGeneration,
@@ -552,7 +554,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     if (Array.isArray(installed) && installed[0] === "CAPACITY_ROTATION_BLOCKED") throw new Error("ATTESTATION_CAPACITY_ROTATION_BLOCKED");
     throw new Error("ATTESTATION_SENTINEL_WRITE_FAILED");
   }
-  if (await redis.command(["GET", readinessKey]) !== serialized) throw new Error("ATTESTATION_SENTINEL_READBACK_FAILED");
+  if (await redis.command(["GET", candidateReadinessKey]) !== serialized) throw new Error("ATTESTATION_SENTINEL_READBACK_FAILED");
   const installedCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
   if (installedCapacity.attestation_generation !== attestationGeneration || installedCapacity.capacity_generation !== capacityGeneration) {
     throw new Error("ATTESTATION_CAPACITY_READBACK_FAILED");
@@ -560,7 +562,7 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   return {
     envelope,
     public_key_spki_base64: publicKeyDerBase64(privateKey),
-    readiness_key: readinessKey,
+    readiness_key: candidateReadinessKey,
     capacity_key: capacityKey,
     control_config_hash: controlConfigHash,
     relevant_audit_set_hash: relevantAuditSetHash,

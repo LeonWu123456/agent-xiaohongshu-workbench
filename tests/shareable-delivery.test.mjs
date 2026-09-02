@@ -47,7 +47,7 @@ function receipt(role = "operator") {
       evidence_ref: "Evidence/KNOWN_GOOD_ROLLBACK.json",
       evidence_sha256: "c".repeat(64),
       verified_at: new Date(Date.now() - 60_000).toISOString(),
-      provider_readiness: { configured: true, access_required: true, credential_mode: "SERVER_MANAGED", image_ledger_configured: true, image_ledger_attested: true, image_ledger_attestation_status: "READY" },
+      provider_readiness: { configured: true, access_required: true, credential_mode: "SERVER_MANAGED", image_ledger_configured: true, image_ledger_attested: true, image_ledger_attestation_status: "READY", image_ledger_attestation_candidate_commit: "b".repeat(40) },
     },
     same_draft: { initial_draft_id: "draft-one", saved_draft_id: "draft-one", reopened_draft_id: "draft-one", export_source_draft_id: "draft-one" },
   };
@@ -69,6 +69,7 @@ const passingDependencies = {
     image_ledger_configured: true,
     image_ledger_attested: true,
     image_ledger_attestation_status: "READY",
+    image_ledger_attestation_candidate_commit: commit,
     credential_mode: "SERVER_MANAGED",
     key_store: "Vercel Sensitive Environment Variable",
   }),
@@ -216,6 +217,20 @@ test("configured-but-unattested Production and rollback both block handoff", asy
   const rollbackResult = await evaluateDelivery(deliveryInput({ receipt: rollback }), passingDependencies);
   assert.equal(rollbackResult.verdict, "BLOCKED");
   assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED"));
+});
+
+test("current and rollback readiness must each bind their exact different candidate commit", async () => {
+  const wrongCurrent = await passingDependencies.readProviderReadiness();
+  wrongCurrent.image_ledger_attestation_candidate_commit = "c".repeat(40);
+  const currentResult = await evaluateDelivery(deliveryInput(), { ...passingDependencies, readProviderReadiness: async () => wrongCurrent });
+  assert.equal(currentResult.verdict, "BLOCKED");
+  assert.ok(currentResult.errors.some((row) => row.code === "PROVIDER_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
+
+  const wrongRollback = receipt();
+  wrongRollback.rollback_verification.provider_readiness.image_ledger_attestation_candidate_commit = "d".repeat(40);
+  const rollbackResult = await evaluateDelivery(deliveryInput({ receipt: wrongRollback }), passingDependencies);
+  assert.equal(rollbackResult.verdict, "BLOCKED");
+  assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
 });
 
 test("an old-draft edit/export receipt cannot replace fresh-user creation and text generation", async () => {

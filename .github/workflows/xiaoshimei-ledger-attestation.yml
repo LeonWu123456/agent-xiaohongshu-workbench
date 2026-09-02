@@ -75,6 +75,7 @@ jobs:
       XIAOSHIMEI_WORST_CASE_RUN_BYTES: ${{ vars.XIAOSHIMEI_WORST_CASE_RUN_BYTES }}
       VERCEL_ENV: ${{ github.event_name == 'schedule' && 'production' || inputs.vercel_environment }}
       XIAOSHIMEI_CANDIDATE_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_COMMIT || inputs.candidate_commit }}
+      XIAOSHIMEI_ROLLBACK_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_ROLLBACK_COMMIT || '' }}
       XIAOSHIMEI_APP_SCOPE: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_APP_SCOPE || inputs.app_scope }}
       XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_candidate_rotation && 'true' || 'false' }}
@@ -102,6 +103,11 @@ jobs:
           test "$VERCEL_ENV" = "preview" || test "$VERCEL_ENV" = "production"
           test "${#XIAOSHIMEI_CANDIDATE_COMMIT}" -eq 40
           case "$XIAOSHIMEI_CANDIDATE_COMMIT" in (*[!0-9a-fA-F]*) exit 1;; esac
+          if test "$GITHUB_EVENT_NAME" = "schedule"; then
+            test "${#XIAOSHIMEI_ROLLBACK_COMMIT}" -eq 40
+            case "$XIAOSHIMEI_ROLLBACK_COMMIT" in (*[!0-9a-fA-F]*) exit 1;; esac
+            test "$XIAOSHIMEI_ROLLBACK_COMMIT" != "$XIAOSHIMEI_CANDIDATE_COMMIT"
+          fi
           test -n "$XIAOSHIMEI_APP_SCOPE"
           test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true" || test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
           test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true" || test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "false"
@@ -119,7 +125,13 @@ jobs:
 
       - name: Verify or renew the signed receipt
         if: env.XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE != 'true'
-        run: node scripts/attest-upstash-image-ledger.mjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/attest-upstash-image-ledger.mjs
+          if test "$GITHUB_EVENT_NAME" = "schedule"; then
+            XIAOSHIMEI_CANDIDATE_COMMIT="$XIAOSHIMEI_ROLLBACK_COMMIT" node scripts/attest-upstash-image-ledger.mjs
+          fi
 
       - name: Recover the exact D43 zero-Provider false UNKNOWN
         if: env.XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE == 'true'
