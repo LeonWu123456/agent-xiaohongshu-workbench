@@ -18,6 +18,9 @@ export const JOURNEY_SCHEMA = "xiaoshimei.consumer-journey-readback.v1";
 export const REQUIRED_JOURNEY_STEPS = ["open", "access", "edit", "save", "reopen", "copy", "download"];
 const MAX_OPERATOR_RECEIPT_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const MAX_ROLLBACK_READBACK_AGE_MS = 10 * 60 * 1000;
+const VERCEL_PROJECT_ID = "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X";
+const VERCEL_TEAM_SLUG = "892350620-5733s-projects";
 
 class DeliveryError extends Error {
   constructor(code, detail) {
@@ -223,7 +226,7 @@ export function validateProviderReadiness(health, { expectedCommit = "" } = {}) 
   return checks.filter(([passed]) => !passed).map(([, code, detail]) => ({ code, detail }));
 }
 
-export function validateRollbackReadback(readback, { deploymentId, deploymentUrl, expectedCommit } = {}) {
+export function validateRollbackReadback(readback, { deploymentId, deploymentUrl, expectedCommit, nowMs = Date.now() } = {}) {
   if (!readback || typeof readback !== "object" || Array.isArray(readback)) {
     return [{ code: "ROLLBACK_PROVIDER_READBACK_REQUIRED", detail: String(deploymentId || "") }];
   }
@@ -233,10 +236,14 @@ export function validateRollbackReadback(readback, { deploymentId, deploymentUrl
   let actualUrl = "";
   try { expectedUrl = new URL(deploymentUrl).href; } catch { expectedUrl = String(deploymentUrl || ""); }
   try { actualUrl = new URL(readback.deployment_url).href; } catch { actualUrl = String(readback.deployment_url || ""); }
+  const observedAt = Date.parse(readback.observed_at);
   const checks = [
     [readback.deployment_id === deploymentId, "ROLLBACK_READBACK_DEPLOYMENT_MISMATCH", `expected=${deploymentId};actual=${String(readback.deployment_id || "")}`],
     [actualUrl === expectedUrl, "ROLLBACK_READBACK_URL_MISMATCH", `expected=${expectedUrl};actual=${actualUrl}`],
     [readback.ready_state === "READY", "ROLLBACK_READBACK_NOT_READY", String(readback.ready_state || "")],
+    [readback.source_commit === expectedCommit, "ROLLBACK_SOURCE_COMMIT_MISMATCH", `expected=${expectedCommit};actual=${String(readback.source_commit || "")}`],
+    [readback.vercel_project_id === VERCEL_PROJECT_ID, "ROLLBACK_PROJECT_MISMATCH", String(readback.vercel_project_id || "")],
+    [Number.isFinite(observedAt) && observedAt <= nowMs + MAX_CLOCK_SKEW_MS && nowMs - observedAt <= MAX_ROLLBACK_READBACK_AGE_MS, "ROLLBACK_READBACK_STALE", String(readback.observed_at || "")],
     [health?.configured === true, "ROLLBACK_PROVIDER_KEY_MISSING", `configured=${String(health?.configured)}`],
     [health?.access_required === true, "ROLLBACK_ACCESS_NOT_REQUIRED", `access_required=${String(health?.access_required)}`],
     [health?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(health?.credential_mode || "")],
@@ -247,6 +254,55 @@ export function validateRollbackReadback(readback, { deploymentId, deploymentUrl
   ];
   for (const [passed, code, detail] of checks) if (!passed) errors.push({ code, detail });
   return errors;
+}
+
+function runVercelJson(args, { spawnImpl = spawnSync, cliPath = "", scope = VERCEL_TEAM_SLUG, cwd = process.cwd() } = {}) {
+  const command = cliPath ? process.execPath : "vercel";
+  const commandArgs = [...(cliPath ? [cliPath] : []), ...args, ...(scope ? ["--scope", scope] : [])];
+  const result = spawnImpl(command, commandArgs, { cwd, encoding: "utf8", timeout: 30_000 });
+  if (result?.status !== 0) {
+    fail("ROLLBACK_VERCEL_PROBE_FAILED", String(result?.stderr || result?.stdout || "vercel command failed").trim().slice(0, 640));
+  }
+  try {
+    return JSON.parse(String(result.stdout || ""));
+  } catch (error) {
+    fail("ROLLBACK_VERCEL_PROBE_JSON_INVALID", String(error?.message || error));
+  }
+}
+
+export async function readRollbackReadback(
+  { deploymentId, deploymentUrl, expectedCommit },
+  { spawnImpl = spawnSync, cliPath = process.env.XIAOSHIMEI_VERCEL_CLI_PATH || "", scope = process.env.XIAOSHIMEI_VERCEL_SCOPE || VERCEL_TEAM_SLUG, cwd = process.cwd(), now = () => new Date() } = {},
+) {
+  if (!VERCEL_DEPLOYMENT_ID.test(String(deploymentId || ""))) fail("ROLLBACK_DEPLOYMENT_ID_INVALID", String(deploymentId || ""));
+  if (!SHA40.test(String(expectedCommit || ""))) fail("ROLLBACK_SOURCE_COMMIT_INVALID", String(expectedCommit || ""));
+  let exactUrl;
+  try {
+    exactUrl = new URL(deploymentUrl);
+    if (exactUrl.protocol !== "https:" || !exactUrl.hostname.endsWith(ALTERNATE_ENTRY_HOST_SUFFIX)) throw new Error("untrusted-host");
+  } catch {
+    fail("ROLLBACK_DEPLOYMENT_URL_INVALID", String(deploymentUrl || ""));
+  }
+  const deployment = runVercelJson(["api", `/v13/deployments/${deploymentId}`], { spawnImpl, cliPath, scope, cwd });
+  const authoritativeUrl = deployment?.url ? new URL(`https://${deployment.url}/`).href : "";
+  if (deployment?.id !== deploymentId) fail("ROLLBACK_READBACK_DEPLOYMENT_MISMATCH", `expected=${deploymentId};actual=${String(deployment?.id || "")}`);
+  if (authoritativeUrl !== exactUrl.href) fail("ROLLBACK_READBACK_URL_MISMATCH", `expected=${exactUrl.href};actual=${authoritativeUrl}`);
+  if (deployment?.readyState !== "READY") fail("ROLLBACK_READBACK_NOT_READY", String(deployment?.readyState || ""));
+  if (deployment?.project?.id !== VERCEL_PROJECT_ID || deployment?.team?.slug !== VERCEL_TEAM_SLUG) {
+    fail("ROLLBACK_PROJECT_MISMATCH", `${String(deployment?.project?.id || "")}:${String(deployment?.team?.slug || "")}`);
+  }
+  const sourceCommit = String(deployment?.meta?.gitCommitSha || "").toLowerCase();
+  if (sourceCommit !== expectedCommit) fail("ROLLBACK_SOURCE_COMMIT_MISMATCH", `expected=${expectedCommit};actual=${sourceCommit}`);
+  const providerReadiness = runVercelJson(["curl", new URL("/api/provider/health", exactUrl).href], { spawnImpl, cliPath, scope, cwd });
+  return {
+    deployment_id: deployment.id,
+    deployment_url: authoritativeUrl,
+    ready_state: deployment.readyState,
+    source_commit: sourceCommit,
+    vercel_project_id: deployment.project.id,
+    observed_at: now().toISOString(),
+    provider_readiness: providerReadiness,
+  };
 }
 
 export async function readProviderReadiness(targetUrl, fetchImpl = fetch) {
@@ -493,9 +549,9 @@ export async function evaluateDelivery(input, dependencies = {}) {
   const journey = validateJourneyReceipt(input.receipt, { targetUrl: target.url, expectedCommit: input.expectedCommit });
   errors.push(...journey.errors);
   const rollback = input.receipt?.rollback_verification;
-  let rollbackReadback = input.rollbackReadback;
-  if (!rollbackReadback && typeof dependencies.readRollbackReadback === "function" && rollback) {
-    rollbackReadback = await capture(() => dependencies.readRollbackReadback({
+  let rollbackReadback;
+  if (rollback) {
+    rollbackReadback = await capture(() => (dependencies.readRollbackReadback || readRollbackReadback)({
       deploymentId: rollback.deployment_id,
       deploymentUrl: rollback.deployment_url,
       expectedCommit: rollback.source_commit,
@@ -548,16 +604,18 @@ export async function runCli(argv = process.argv.slice(2)) {
     const args = parseArgs(argv);
     let receipt;
     if (args.receipt) receipt = JSON.parse(await readFile(path.resolve(args.receipt), "utf8"));
-    const rollbackReadback = args["rollback-readback"]
-      ? JSON.parse(await readFile(path.resolve(args["rollback-readback"]), "utf8"))
-      : undefined;
     result = await evaluateDelivery({
       targetUrl: args.url,
       expectedCommit: args["expected-commit"],
       candidateRoot: path.resolve(args["candidate-root"] || process.cwd()),
       alternateUrls: args["alternate-url"] || [],
       receipt,
-      rollbackReadback,
+    }, {
+      readRollbackReadback: (binding) => readRollbackReadback(binding, {
+        cliPath: args["vercel-cli"] || process.env.XIAOSHIMEI_VERCEL_CLI_PATH || "",
+        scope: args["vercel-scope"] || process.env.XIAOSHIMEI_VERCEL_SCOPE || VERCEL_TEAM_SLUG,
+        cwd: path.resolve(args["candidate-root"] || process.cwd()),
+      }),
     });
   } catch (error) {
     result = {

@@ -10,6 +10,7 @@ import {
   evaluateDelivery,
   isPublicAddress,
   inspectAlternateEntry,
+  readRollbackReadback,
   readProviderReadiness,
   readRemoteArtifact,
   resolvePublicTarget,
@@ -80,6 +81,9 @@ const passingDependencies = {
     deployment_id: "dpl_rollback456",
     deployment_url: rollbackDeploymentUrl,
     ready_state: "READY",
+    source_commit: "b".repeat(40),
+    vercel_project_id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X",
+    observed_at: new Date().toISOString(),
     provider_readiness: {
       configured: true,
       access_required: true,
@@ -220,6 +224,68 @@ test("provider health must be same-origin JSON without redirects", async () => {
   );
 });
 
+test("rollback readback is collected from Vercel deployment identity and the same exact deployment health", async () => {
+  const calls = [];
+  const health = (await passingDependencies.readRollbackReadback()).provider_readiness;
+  const syncSpawn = (_command, args) => {
+    calls.push(args);
+    const payload = args.includes("api")
+      ? {
+        id: "dpl_rollback456",
+        url: new URL(rollbackDeploymentUrl).hostname,
+        readyState: "READY",
+        meta: { gitCommitSha: "b".repeat(40) },
+        project: { id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X" },
+        team: { slug: "892350620-5733s-projects" },
+      }
+      : health;
+    return { status: 0, stdout: JSON.stringify(payload), stderr: "" };
+  };
+  const observed = await readRollbackReadback({
+    deploymentId: "dpl_rollback456",
+    deploymentUrl: rollbackDeploymentUrl,
+    expectedCommit: "b".repeat(40),
+  }, {
+    spawnImpl: syncSpawn,
+    cliPath: "/opt/vercel/index.js",
+    scope: "892350620-5733s-projects",
+    now: () => new Date("2026-09-03T00:00:00Z"),
+  });
+  assert.equal(observed.source_commit, "b".repeat(40));
+  assert.equal(observed.observed_at, "2026-09-03T00:00:00.000Z");
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].includes("/v13/deployments/dpl_rollback456"));
+  assert.ok(calls[1].includes(new URL("/api/provider/health", rollbackDeploymentUrl).href));
+});
+
+test("Vercel rollback probe rejects a forged receipt commit before reading deployment health", async () => {
+  let calls = 0;
+  const spawnImpl = () => {
+    calls += 1;
+    return {
+      status: 0,
+      stdout: JSON.stringify({
+        id: "dpl_rollback456",
+        url: new URL(rollbackDeploymentUrl).hostname,
+        readyState: "READY",
+        meta: { gitCommitSha: "b".repeat(40) },
+        project: { id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X" },
+        team: { slug: "892350620-5733s-projects" },
+      }),
+      stderr: "",
+    };
+  };
+  await assert.rejects(
+    () => readRollbackReadback({
+      deploymentId: "dpl_rollback456",
+      deploymentUrl: rollbackDeploymentUrl,
+      expectedCommit: "f".repeat(40),
+    }, { spawnImpl, cliPath: "/opt/vercel/index.js" }),
+    (error) => error.code === "ROLLBACK_SOURCE_COMMIT_MISMATCH",
+  );
+  assert.equal(calls, 1);
+});
+
 test("configured-but-unattested Production and rollback both block handoff", async () => {
   const health = await passingDependencies.readProviderReadiness();
   health.image_ledger_attested = false;
@@ -250,17 +316,23 @@ test("current readiness must publicly bind the exact candidate commit", async ()
 
 });
 
-test("rollback receipt fields cannot self-certify a different deployment or candidate", async () => {
+test("two matching caller-supplied rollback objects cannot replace the Vercel probe", async () => {
   const forged = receipt();
   forged.rollback_verification.source_commit = "f".repeat(40);
   forged.rollback_verification.provider_readiness.image_ledger_attestation_candidate_commit = "f".repeat(40);
-  const result = await evaluateDelivery(deliveryInput({ receipt: forged }), passingDependencies);
+  const forgedReadback = await passingDependencies.readRollbackReadback();
+  forgedReadback.source_commit = "f".repeat(40);
+  forgedReadback.provider_readiness.image_ledger_attestation_candidate_commit = "f".repeat(40);
+  const result = await evaluateDelivery(deliveryInput({ receipt: forged, rollbackReadback: forgedReadback }), passingDependencies);
   assert.equal(result.verdict, "BLOCKED");
-  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_SOURCE_COMMIT_MISMATCH"));
 });
 
 test("rollback readiness is absent unless an independent deployment readback is supplied", async () => {
-  const { readRollbackReadback: _omitted, ...withoutRollbackReadback } = passingDependencies;
+  const withoutRollbackReadback = {
+    ...passingDependencies,
+    readRollbackReadback: async () => { throw Object.assign(new Error("probe unavailable"), { code: "ROLLBACK_VERCEL_PROBE_FAILED" }); },
+  };
   const result = await evaluateDelivery(deliveryInput(), withoutRollbackReadback);
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_PROVIDER_READBACK_REQUIRED"));
@@ -300,6 +372,9 @@ test("a rollback to an unconfigured or unverified deployment blocks handoff", as
       deployment_id: "dpl_previousBroken",
       deployment_url: rollbackDeploymentUrl,
       ready_state: "READY",
+      source_commit: "not-a-commit",
+      vercel_project_id: "prj_5XpPkMtqpWfY6rYkAaD1RDE5yH9X",
+      observed_at: new Date().toISOString(),
       provider_readiness: { configured: false, access_required: false, credential_mode: "BROWSER_BYOK", image_ledger_configured: false, image_ledger_attested: false },
     }),
   });
