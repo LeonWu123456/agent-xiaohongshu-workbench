@@ -100,7 +100,7 @@ test("server text retries repair a one-sentence topic from the previous measured
   assert.equal(requests.length, 3);
   assert.deepEqual(result.generation.attempts.map(({ status }) => status), ["REJECTED", "REJECTED", "PASS"]);
   assert.match(requests[1].request.input[0].content, /上一版正文是180个有效字符/);
-  assert.match(requests[1].request.input[0].content, /后台验收区间是240–600个/);
+  assert.match(requests[1].request.input[0].content, /后台验收区间是260–600个/);
   assert.match(requests[1].request.input[0].content, /"body":"整理整理/);
   assert.match(requests[2].request.input[0].content, /上一版正文是220个有效字符/);
   assert.match(requests[2].request.input[0].content, /系统最后一次有界自动修稿/);

@@ -459,21 +459,32 @@ test("one-sentence topics are complete inputs and length repair receives the rej
   assert.match(request.input[0].content, /不能要求用户再补原文/);
   assert.match(request.input[0].content, /不得编造.*我亲测/);
 
-  const rejected = { ...planValue(), content_type: "method_checklist", body: "整理".repeat(90), recommended_image_count: 5 };
+  const rejected = { ...planValue(), content_type: "method_checklist", body: `整${"整理".repeat(121)}`, recommended_image_count: 5 };
   delete rejected.pages;
   const response = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(rejected) }] };
   let failure;
   try { extractArkTextDraft(response, topicInput); } catch (error) { failure = error; }
   assert.ok(failure);
-  assert.match(failure.message, /TEXT_QUALITY_GATE_FAILED:body:length:180\/240-600/);
+  assert.match(failure.message, /TEXT_QUALITY_GATE_FAILED:body:length:243\/260-600/);
   const repair = textQualityRetryGuidance(failure, { finalAttempt: true });
-  assert.match(repair, /上一版正文是180个有效字符/);
-  assert.match(repair, /后台验收区间是240–600个/);
+  assert.match(repair, /上一版正文是243个有效字符/);
+  assert.match(repair, /后台验收区间是260–600个/);
   assert.match(repair, /必须扩写到区间内/);
   assert.match(repair, /系统最后一次有界自动修稿/);
   assert.match(repair, /<rejected_text_draft>/);
-  assert.match(repair, /"body":"整理整理/);
+  assert.match(repair, /"body":"整整理/);
   assert.doesNotMatch(repair, /修改原文|补充要求/);
+
+  const boundaryBody = [
+    "雨天先只看书桌这一块。",
+    "把不用的东西暂时放回原处。",
+    "擦完桌面，再把常用物品放到顺手的位置。",
+    "桌面能重新坐下使用就停。",
+  ].join("\n\n").padEnd(266, "整");
+  const accepted = { ...planValue(), content_type: "method_checklist", body: boundaryBody, recommended_image_count: 5 };
+  delete accepted.pages;
+  const acceptedResponse = { output: [{ type: "function_call", name: "return_xiaoshimei_text_draft", arguments: JSON.stringify(accepted) }] };
+  assert.equal(extractArkTextDraft(acceptedResponse, topicInput).body.replace(/\s/g, "").length, 260);
 });
 
 test("page-plan retry guidance turns production gate codes into bounded repair instructions", () => {
@@ -529,7 +540,7 @@ test("tag quality rejects duplicate and generic filler labels", () => {
 });
 
 test("wellness safety gate accepts natural stop-and-consult wording", () => {
-  const body = "盯着屏幕太久后，我会先给眼睛留一段真正离开近距离焦点的时间。\n\n第1步，放下手机并洗净双手，再反复揉搓掌心，让手心自然变暖。\n\n第2步，闭眼后把掌心轻轻覆在眼眶周围，不向下按压眼球，只停留十几秒。\n\n第3步，慢慢移开双手，睁眼眺望窗外较远的树木或屋檐，让视线从近处抽离。\n\n这只是一种日常休息方式，不是治疗方法，也不追求所谓立刻见效。每个人的感受不同，可以缩短时间或直接跳过不舒服的动作。\n\n如果出现刺痛或酸涩加重，请及时停下来找专业人士咨询，不要硬撑。平时持续疼痛或出现视力异常，也应尽快寻求专业医护人员的帮助。";
+  const body = "盯着屏幕太久后，我会先给眼睛留一段真正离开近距离焦点的时间。\n\n第1步，放下手机并洗净双手，再反复揉搓掌心，让手心自然变暖。\n\n第2步，闭眼后把掌心轻轻覆在眼眶周围，不向下按压眼球，只停留十几秒。\n\n第3步，慢慢移开双手，睁眼眺望窗外较远的树木或屋檐，让视线从近处抽离。\n\n这只是一种日常休息方式，不是治疗方法，也不追求所谓立刻见效。每个人的感受不同，可以缩短时间或直接跳过不舒服的动作。做完后先看看自己是否舒服，再决定要不要继续。\n\n如果出现刺痛或酸涩加重，请及时停下来找专业人士咨询，不要硬撑。平时持续疼痛或出现视力异常，也应尽快寻求专业医护人员的帮助。";
   const titles = ["盯屏幕太久先给眼睛一个暂停", "眼睛发紧时我会按顺序做这几步", "放下手机后这样让视线慢慢休息"];
   const value = { content_type: "method_checklist", titles, selected_title: titles[0], recommended_image_count: 4, body, tags: ["眼部放松", "屏幕休息", "日常养生", "生活方式", "轻缓练习"], facts: [], risks: ["不适时停下并咨询专业人士"] };
   delete value.pages;

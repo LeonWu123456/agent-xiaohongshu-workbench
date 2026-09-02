@@ -430,7 +430,7 @@ export function validateArkTextDraft(value, context = {}) {
   const lengthBounds = textDraftLengthBounds(context?.topic || "");
   const generationBounds = textDraftGenerationBounds(lengthBounds);
   const bodyLength = compactLength(body);
-  const validationMinimum = lengthBounds.minimum;
+  const validationMinimum = generationBounds.minimum;
   if (bodyLength < validationMinimum || (!lengthBounds.fullSource && bodyLength > generationBounds.maximum) || bodyLength > 900) {
     throw textLengthFailure(bodyLength, validationMinimum, generationBounds.maximum, bodyLength > generationBounds.maximum ? "compress" : "expand");
   }
