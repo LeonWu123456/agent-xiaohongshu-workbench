@@ -62,7 +62,8 @@ const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockR
 const imageLaneLockSource = namedFunctionSource(mainSource, "imageLaneLockReason").replace(/^export\s+/, "");
 const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
 const workbenchProjectionSource = namedFunctionSource(mainSource, "currentWorkbenchProjection").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${workbenchProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentWorkbenchProjection };`).toString("base64")}`);
+const boundedClipboardSource = namedFunctionSource(mainSource, "boundedClipboardAttempt").replace(/^export\s+/, "");
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${workbenchProjectionSource}\n${boundedClipboardSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentWorkbenchProjection, boundedClipboardAttempt };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -76,6 +77,7 @@ const {
   imageLaneLockReason,
   imageRecoveryClickMode,
   currentWorkbenchProjection,
+  boundedClipboardAttempt,
 } = runtimeModule;
 
 function makeUiState() {
@@ -450,6 +452,35 @@ test("one current-workbench projection keeps the compose header and asset librar
   assert.match(mainSource, /workbenchProjection\.headerStatus/);
   assert.match(mainSource, /workbenchProjection\.libraryStatus/);
   assert.doesNotMatch(mainSource, /<div className="file-title"><strong>\{isDraftInputOnly/);
+});
+
+test("a hanging Clipboard promise reaches the fallback path within a bounded deadline", async () => {
+  let expire;
+  let clearedHandle = null;
+  const pending = boundedClipboardAttempt(() => new Promise(() => {}), {
+    timeoutMs: 25,
+    schedule(callback, delay) {
+      assert.equal(delay, 25);
+      expire = callback;
+      return "clipboard-timeout";
+    },
+    cancel(handle) { clearedHandle = handle; },
+  });
+  assert.equal(typeof expire, "function");
+  expire();
+  await assert.rejects(pending, /CLIPBOARD_WRITE_TIMEOUT/);
+  assert.equal(clearedHandle, "clipboard-timeout");
+
+  let successTimerCleared = false;
+  assert.equal(await boundedClipboardAttempt(() => Promise.resolve(), {
+    schedule() { return "success-timeout"; },
+    cancel(handle) { successTimerCleared = handle === "success-timeout"; },
+  }), true);
+  assert.equal(successTimerCleared, true);
+
+  const copySource = namedFunctionSource(mainSource, "copyTextToClipboard");
+  assert.match(copySource, /boundedClipboardAttempt\(\(\) => navigator\.clipboard\.writeText\(text\)\)/);
+  assert.ok(copySource.indexOf("boundedClipboardAttempt") < copySource.indexOf('document.createElement("textarea")'), "deadline failure must enter the existing selection fallback");
 });
 
 test("a visible-canvas lineage split has one explicit zero-provider repair that preserves pages and pending", () => {

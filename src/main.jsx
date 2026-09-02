@@ -115,11 +115,23 @@ function safeParse(value) {
   try { return parseContentPackage(value); } catch { return null; }
 }
 
+export function boundedClipboardAttempt(action, { timeoutMs = 1000, schedule = setTimeout, cancel = clearTimeout } = {}) {
+  if (typeof action !== "function") throw new TypeError("CLIPBOARD_ACTION_REQUIRED");
+  const deadline = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) >= 0 ? Number(timeoutMs) : 1000;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = schedule(() => reject(new Error("CLIPBOARD_WRITE_TIMEOUT")), deadline);
+  });
+  return Promise.race([Promise.resolve().then(action), timeout]).then(() => true).finally(() => {
+    if (timer !== undefined) cancel(timer);
+  });
+}
+
 async function copyTextToClipboard(value) {
   const text = String(value || "");
   try {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
+      await boundedClipboardAttempt(() => navigator.clipboard.writeText(text));
       return true;
     }
   } catch {
