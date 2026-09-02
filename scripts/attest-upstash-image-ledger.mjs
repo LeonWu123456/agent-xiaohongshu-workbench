@@ -412,8 +412,19 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   const allowCandidateRotation = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION");
   const legacyRuntimeCompat = enabledEnv(env, "XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT");
   if (onlyIfDue && allowCandidateRotation) throw new Error("ATTESTATION_CANDIDATE_ROTATION_MODE_INVALID");
-  if (legacyRuntimeCompat && environment !== "production") throw new Error("ATTESTATION_LEGACY_RUNTIME_COMPAT_ENV_INVALID");
   if (!/^[0-9a-f]{40}$/.test(candidateCommit)) throw new Error("ATTESTATION_CANDIDATE_INVALID");
+  if (legacyRuntimeCompat) {
+    const productionCommit = String(env?.XIAOSHIMEI_PRODUCTION_COMMIT || "").trim().toLowerCase();
+    const rollbackCommit = String(env?.XIAOSHIMEI_ROLLBACK_COMMIT || "").trim().toLowerCase();
+    if (String(env?.GITHUB_EVENT_NAME || "") !== "schedule"
+      || environment !== "production"
+      || !/^[0-9a-f]{40}$/.test(productionCommit)
+      || !/^[0-9a-f]{40}$/.test(rollbackCommit)
+      || candidateCommit !== rollbackCommit
+      || candidateCommit === productionCommit) {
+      throw new Error("ATTESTATION_LEGACY_RUNTIME_COMPAT_SCOPE_INVALID");
+    }
+  }
   const privateKey = createPrivateKey(required(env, "XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY"));
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("ATTESTATION_PRIVATE_KEY_INVALID");
   const publicKey = createPublicKey(privateKey);
@@ -441,7 +452,10 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     if (renewLeadMs > RENEW_MAX_MS) throw new Error("ATTESTATION_RENEW_LEAD_INVALID");
     if (signedAtMs >= prior.hard_expiry_ms) throw new Error("ATTESTATION_PRIOR_EXPIRED");
     const dueAtMs = prior.renew_at_ms - renewLeadMs;
-    if (signedAtMs < dueAtMs) {
+    const sharedCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
+    const capacityStillMatches = sharedCapacity.schema === CAPACITY_SCHEMA
+      && sharedCapacity.capacity_generation === prior.capacity_generation;
+    if (signedAtMs < dueAtMs && capacityStillMatches) {
       if (legacyReadinessKey) {
         if (await redis.command(["GET", legacyReadinessKey]) !== priorRaw) {
           if (await redis.command(["SET", legacyReadinessKey, priorRaw]) !== "OK"

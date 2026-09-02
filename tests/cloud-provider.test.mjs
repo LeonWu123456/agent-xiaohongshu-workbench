@@ -772,7 +772,21 @@ test("Preview ledger binding uses the immutable deployment commit instead of the
   assert.equal(binding.expected.vercel_environment, "preview");
 });
 
-test("Production ledger binding keeps the explicit candidate even when a deployment SHA is present", () => {
+test("Production ledger binding accepts matching deployment and configured candidate commits", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    VERCEL_GIT_COMMIT_SHA: "b".repeat(40),
+    XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "b".repeat(40));
+  assert.equal(binding.expected.vercel_environment, "production");
+  assert.equal(binding.ready, true);
+});
+
+test("Production ledger binding fails closed when deployment and configured candidate commits conflict", () => {
   const binding = imageLedgerRuntimeBinding({
     VERCEL_ENV: "production",
     VERCEL_GIT_COMMIT_SHA: "a".repeat(40),
@@ -782,7 +796,7 @@ test("Production ledger binding keeps the explicit candidate even when a deploym
     XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
   }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
   assert.equal(binding.expected.candidate_commit, "b".repeat(40));
-  assert.equal(binding.expected.vercel_environment, "production");
+  assert.equal(binding.ready, false);
 });
 
 function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {
@@ -1299,7 +1313,7 @@ test("D36 scheduled attestor verifies the signed exact binding and exits not-due
   assert.equal(result.attestation_generation, installed.envelope.payload.attestation_generation);
   assert.equal(result.capacity_generation, installed.envelope.payload.capacity_generation);
   assert.equal(fixture.state.developerRequests.length, 0);
-  assert.deepEqual(fixture.state.commands.map((body) => body[0]), ["TIME", "GET"]);
+  assert.deepEqual(fixture.state.commands.map((body) => body[0]), ["TIME", "GET", "HGETALL"]);
   assert.equal(fixture.state.calibration.size, 0);
 });
 
@@ -1377,21 +1391,88 @@ test("D56 different candidate attestations coexist while preserving one shared c
 test("D56 Production rollback mirrors the exact signed envelope for the already-built legacy runtime", async () => {
   const fixture = attestorFixture();
   fixture.env.VERCEL_ENV = "production";
+  fixture.env.GITHUB_EVENT_NAME = "schedule";
+  fixture.env.XIAOSHIMEI_PRODUCTION_COMMIT = "3".repeat(40);
+  fixture.env.XIAOSHIMEI_ROLLBACK_COMMIT = fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT;
   fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "true";
   const installed = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
   assert.equal(installed.legacy_readiness_key.endsWith(":readiness"), true);
   assert.notEqual(installed.legacy_readiness_key, installed.readiness_key);
   assert.equal(fixture.state.readinessByKey.get(installed.legacy_readiness_key), fixture.state.readinessByKey.get(installed.readiness_key));
 
-  fixture.state.readinessByKey.delete(installed.legacy_readiness_key);
+  const firstHardExpiry = installed.envelope.payload.hard_expiry_ms;
+  fixture.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
+  fixture.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
+  fixture.state.nowMs += 5 * 24 * 60 * 60 * 1000;
+  fixture.state.audits.push({ id: "audit-renewal", timestamp: fixture.state.nowMs - 1_000, action: "read", resource_id: fixture.state.database.database_id });
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+  const renewed = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.ok(renewed.envelope.payload.hard_expiry_ms > firstHardExpiry);
+  assert.equal(fixture.state.readinessByKey.get(installed.legacy_readiness_key), fixture.state.readinessByKey.get(installed.readiness_key));
+  fixture.state.nowMs = firstHardExpiry + 1;
+  const legacyEnvelope = JSON.parse(fixture.state.readinessByKey.get(installed.legacy_readiness_key));
+  const verified = providerModule.verifyImageLedgerAttestationEnvelope(legacyEnvelope, {
+    publicKey: fixture.env.XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY
+      ? createPublicKey(fixture.env.XIAOSHIMEI_LEDGER_ATTESTATION_PRIVATE_KEY).export({ format: "der", type: "spki" }).toString("base64")
+      : "",
+    expected: {
+      database_id_sha256: legacyEnvelope.payload.database_id_sha256,
+      rest_origin: new URL(fixture.env.UPSTASH_REDIS_REST_URL).origin,
+      app_scope: fixture.env.XIAOSHIMEI_APP_SCOPE,
+      vercel_project_id: fixture.env.XIAOSHIMEI_VERCEL_PROJECT_ID,
+      vercel_environment: "production",
+      candidate_commit: fixture.env.XIAOSHIMEI_ROLLBACK_COMMIT,
+    },
+    nowMs: fixture.state.nowMs,
+  });
+  assert.equal(verified.candidate_commit, fixture.env.XIAOSHIMEI_ROLLBACK_COMMIT);
+});
+
+test("D56 a shared capacity rotation forces an otherwise not-due rollback to re-sign", async () => {
+  const fixture = attestorFixture();
+  const rollbackCommit = fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT;
+  const productionCommit = "3".repeat(40);
+  fixture.env.VERCEL_ENV = "production";
+  fixture.env.GITHUB_EVENT_NAME = "schedule";
+  fixture.env.XIAOSHIMEI_PRODUCTION_COMMIT = productionCommit;
+  fixture.env.XIAOSHIMEI_ROLLBACK_COMMIT = rollbackCommit;
+  fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "true";
+  const rollbackBefore = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+
+  fixture.state.nowMs += 60_000;
+  fixture.state.stats.storage_threshold_bytes = 120_000_000;
+  fixture.state.database.max_data_size = 120_000_000;
+  fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT = productionCommit;
+  fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "false";
+  const production = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.notEqual(production.envelope.payload.capacity_generation, rollbackBefore.envelope.payload.capacity_generation);
+
+  fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT = rollbackCommit;
+  fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "true";
   fixture.env.XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE = "true";
   fixture.env.XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS = String(24 * 60 * 60 * 1000);
   fixture.state.commands.length = 0;
   fixture.state.developerRequests.length = 0;
-  const repaired = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
-  assert.equal(repaired.status, "ATTESTATION_NOT_DUE");
-  assert.equal(fixture.state.readinessByKey.get(installed.legacy_readiness_key), fixture.state.readinessByKey.get(installed.readiness_key));
-  assert.equal(fixture.state.developerRequests.length, 0, "legacy mirror repair must not call the Developer API");
+  const rollbackAfter = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.notEqual(rollbackAfter.status, "ATTESTATION_NOT_DUE");
+  assert.equal(rollbackAfter.envelope.payload.capacity_generation, production.envelope.payload.capacity_generation);
+  assert.equal(fixture.state.developerRequests.length, 3);
+  assert.equal(JSON.parse(fixture.state.readinessByKey.get(rollbackAfter.legacy_readiness_key)).payload.candidate_commit, rollbackCommit);
+});
+
+test("D56 legacy rollback projection cannot be enabled for an arbitrary manual candidate", async () => {
+  const fixture = attestorFixture();
+  fixture.env.VERCEL_ENV = "production";
+  fixture.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+  fixture.env.XIAOSHIMEI_PRODUCTION_COMMIT = "3".repeat(40);
+  fixture.env.XIAOSHIMEI_ROLLBACK_COMMIT = fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT;
+  fixture.env.XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT = "true";
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl }),
+    /ATTESTATION_LEGACY_RUNTIME_COMPAT_SCOPE_INVALID/,
+  );
+  assert.equal(fixture.state.commands.length, 0);
 });
 
 test("D39 scheduled renewal can never combine due mode with candidate rotation authority", async () => {

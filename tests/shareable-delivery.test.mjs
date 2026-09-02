@@ -15,11 +15,13 @@ import {
   resolvePublicTarget,
   validateJourneyReceipt,
   validateProviderReadiness,
+  validateRollbackReadback,
 } from "../scripts/verify-shareable-delivery.mjs";
 
 const commit = "a".repeat(40);
 const url = "https://xiaoshimei-full-workbench.vercel.app/";
 const deploymentUrl = "https://xiaoshimei-full-workbench-build-892350620-5733s-projects.vercel.app/";
+const rollbackDeploymentUrl = "https://xiaoshimei-full-workbench-rollback-892350620-5733s-projects.vercel.app/";
 const artifact = {
   html_sha256: "1".repeat(64),
   html_size_bytes: 123,
@@ -41,6 +43,7 @@ function receipt(role = "operator") {
     fresh_user: { new_draft: true, generate_text: true, text_draft_id: "text-draft-new", body_length: 294, tag_count: 5, image_calls: 0 },
     rollback_verification: {
       deployment_id: "dpl_rollback456",
+      deployment_url: rollbackDeploymentUrl,
       source_commit: "b".repeat(40),
       ready_state: "READY",
       action: "promote_existing_deployment",
@@ -72,6 +75,20 @@ const passingDependencies = {
     image_ledger_attestation_candidate_commit: commit,
     credential_mode: "SERVER_MANAGED",
     key_store: "Vercel Sensitive Environment Variable",
+  }),
+  readRollbackReadback: async () => ({
+    deployment_id: "dpl_rollback456",
+    deployment_url: rollbackDeploymentUrl,
+    ready_state: "READY",
+    provider_readiness: {
+      configured: true,
+      access_required: true,
+      credential_mode: "SERVER_MANAGED",
+      image_ledger_configured: true,
+      image_ledger_attested: true,
+      image_ledger_attestation_status: "READY",
+      image_ledger_attestation_candidate_commit: "b".repeat(40),
+    },
   }),
 };
 
@@ -211,10 +228,15 @@ test("configured-but-unattested Production and rollback both block handoff", asy
   assert.equal(production.verdict, "BLOCKED");
   assert.ok(production.errors.some((row) => row.code === "PROVIDER_IMAGE_LEDGER_NOT_ATTESTED"));
 
-  const rollback = receipt();
-  rollback.rollback_verification.provider_readiness.image_ledger_attested = false;
-  rollback.rollback_verification.provider_readiness.image_ledger_attestation_status = "IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH";
-  const rollbackResult = await evaluateDelivery(deliveryInput({ receipt: rollback }), passingDependencies);
+  const rollbackResult = await evaluateDelivery(deliveryInput(), {
+    ...passingDependencies,
+    readRollbackReadback: async () => {
+      const observed = await passingDependencies.readRollbackReadback();
+      observed.provider_readiness.image_ledger_attested = false;
+      observed.provider_readiness.image_ledger_attestation_status = "IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH";
+      return observed;
+    },
+  });
   assert.equal(rollbackResult.verdict, "BLOCKED");
   assert.ok(rollbackResult.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED"));
 });
@@ -226,6 +248,23 @@ test("current readiness must publicly bind the exact candidate commit", async ()
   assert.equal(currentResult.verdict, "BLOCKED");
   assert.ok(currentResult.errors.some((row) => row.code === "PROVIDER_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
 
+});
+
+test("rollback receipt fields cannot self-certify a different deployment or candidate", async () => {
+  const forged = receipt();
+  forged.rollback_verification.source_commit = "f".repeat(40);
+  forged.rollback_verification.provider_readiness.image_ledger_attestation_candidate_commit = "f".repeat(40);
+  const result = await evaluateDelivery(deliveryInput({ receipt: forged }), passingDependencies);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH"));
+});
+
+test("rollback readiness is absent unless an independent deployment readback is supplied", async () => {
+  const { readRollbackReadback: _omitted, ...withoutRollbackReadback } = passingDependencies;
+  const result = await evaluateDelivery(deliveryInput(), withoutRollbackReadback);
+  assert.equal(result.verdict, "BLOCKED");
+  assert.ok(result.errors.some((row) => row.code === "ROLLBACK_PROVIDER_READBACK_REQUIRED"));
+  assert.equal(validateRollbackReadback(null, { deploymentId: "dpl_rollback456" })[0].code, "ROLLBACK_PROVIDER_READBACK_REQUIRED");
 });
 
 test("an old-draft edit/export receipt cannot replace fresh-user creation and text generation", async () => {
@@ -246,6 +285,7 @@ test("a rollback to an unconfigured or unverified deployment blocks handoff", as
   broken.deployment.rollback_deployment_id = "dpl_previousBroken";
   broken.rollback_verification = {
     deployment_id: "dpl_previousBroken",
+    deployment_url: rollbackDeploymentUrl,
     source_commit: "not-a-commit",
     ready_state: "READY",
     action: "promote_existing_deployment",
@@ -254,7 +294,15 @@ test("a rollback to an unconfigured or unverified deployment blocks handoff", as
     verified_at: broken.observed_at,
     provider_readiness: { configured: false, access_required: false, credential_mode: "BROWSER_BYOK", image_ledger_configured: false },
   };
-  const result = await evaluateDelivery(deliveryInput({ receipt: broken }), passingDependencies);
+  const result = await evaluateDelivery(deliveryInput({ receipt: broken }), {
+    ...passingDependencies,
+    readRollbackReadback: async () => ({
+      deployment_id: "dpl_previousBroken",
+      deployment_url: rollbackDeploymentUrl,
+      ready_state: "READY",
+      provider_readiness: { configured: false, access_required: false, credential_mode: "BROWSER_BYOK", image_ledger_configured: false, image_ledger_attested: false },
+    }),
+  });
   assert.equal(result.verdict, "BLOCKED");
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_SOURCE_COMMIT_INVALID"));
   assert.ok(result.errors.some((row) => row.code === "ROLLBACK_EVIDENCE_REF_INVALID"));

@@ -189,18 +189,25 @@ export function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", re
   const vercelEnvironment = String(env?.VERCEL_ENV || "").trim();
   const deploymentCommit = String(env?.VERCEL_GIT_COMMIT_SHA || "").trim().toLowerCase();
   const configuredCandidateCommit = String(env?.XIAOSHIMEI_CANDIDATE_COMMIT || "").trim().toLowerCase();
+  const deploymentCommitValid = /^[0-9a-f]{40}$/.test(deploymentCommit);
+  const configuredCandidateCommitValid = /^[0-9a-f]{40}$/.test(configuredCandidateCommit);
   // A Preview deployment is already bound to an immutable Vercel Git SHA.
   // Prefer that deployment identity so Preview validation cannot accidentally
   // share or rotate Production's explicit candidate binding. Production keeps
   // the configured candidate as its authority and only falls back when absent.
-  const candidateCommit = vercelEnvironment === "preview" && /^[0-9a-f]{40}$/.test(deploymentCommit)
+  const candidateCommit = vercelEnvironment === "preview" && deploymentCommitValid
     ? deploymentCommit
     : configuredCandidateCommit || deploymentCommit;
+  const productionCommitConflict = vercelEnvironment === "production"
+    && deploymentCommitValid
+    && configuredCandidateCommitValid
+    && deploymentCommit !== configuredCandidateCommit;
   return {
     ready: Boolean(publicKey)
       && /^[0-9a-f]{64}$/.test(databaseIdSha256)
       && Boolean(restOrigin && appScopeId && vercelProjectId && vercelEnvironment)
-      && /^[0-9a-f]{40}$/.test(candidateCommit),
+      && /^[0-9a-f]{40}$/.test(candidateCommit)
+      && !productionCommitConflict,
     publicKey,
     expected: {
       database_id_sha256: databaseIdSha256,

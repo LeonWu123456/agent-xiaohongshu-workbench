@@ -223,6 +223,32 @@ export function validateProviderReadiness(health, { expectedCommit = "" } = {}) 
   return checks.filter(([passed]) => !passed).map(([, code, detail]) => ({ code, detail }));
 }
 
+export function validateRollbackReadback(readback, { deploymentId, deploymentUrl, expectedCommit } = {}) {
+  if (!readback || typeof readback !== "object" || Array.isArray(readback)) {
+    return [{ code: "ROLLBACK_PROVIDER_READBACK_REQUIRED", detail: String(deploymentId || "") }];
+  }
+  const health = readback.provider_readiness;
+  const errors = [];
+  let expectedUrl = "";
+  let actualUrl = "";
+  try { expectedUrl = new URL(deploymentUrl).href; } catch { expectedUrl = String(deploymentUrl || ""); }
+  try { actualUrl = new URL(readback.deployment_url).href; } catch { actualUrl = String(readback.deployment_url || ""); }
+  const checks = [
+    [readback.deployment_id === deploymentId, "ROLLBACK_READBACK_DEPLOYMENT_MISMATCH", `expected=${deploymentId};actual=${String(readback.deployment_id || "")}`],
+    [actualUrl === expectedUrl, "ROLLBACK_READBACK_URL_MISMATCH", `expected=${expectedUrl};actual=${actualUrl}`],
+    [readback.ready_state === "READY", "ROLLBACK_READBACK_NOT_READY", String(readback.ready_state || "")],
+    [health?.configured === true, "ROLLBACK_PROVIDER_KEY_MISSING", `configured=${String(health?.configured)}`],
+    [health?.access_required === true, "ROLLBACK_ACCESS_NOT_REQUIRED", `access_required=${String(health?.access_required)}`],
+    [health?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(health?.credential_mode || "")],
+    [health?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(health?.image_ledger_configured)}`],
+    [health?.image_ledger_attested === true, "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(health?.image_ledger_attested)} status=${String(health?.image_ledger_attestation_status || "")}`],
+    [health?.image_ledger_attestation_status === "READY", "ROLLBACK_IMAGE_LEDGER_STATUS_INVALID", String(health?.image_ledger_attestation_status || "")],
+    [health?.image_ledger_attestation_candidate_commit === expectedCommit, "ROLLBACK_IMAGE_LEDGER_CANDIDATE_MISMATCH", `expected=${expectedCommit};actual=${String(health?.image_ledger_attestation_candidate_commit || "")}`],
+  ];
+  for (const [passed, code, detail] of checks) if (!passed) errors.push({ code, detail });
+  return errors;
+}
+
 export async function readProviderReadiness(targetUrl, fetchImpl = fetch) {
   const expectedOrigin = new URL(targetUrl).origin;
   const healthUrl = new URL("/api/provider/health", `${expectedOrigin}/`).href;
@@ -379,6 +405,14 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
   if (!SHA40.test(String(rollback?.source_commit || ""))) {
     errors.push({ code: "ROLLBACK_SOURCE_COMMIT_INVALID", detail: String(rollback?.source_commit || "") });
   }
+  let rollbackDeploymentUrl = "";
+  try {
+    const parsedRollbackUrl = new URL(rollback?.deployment_url);
+    rollbackDeploymentUrl = parsedRollbackUrl.href;
+    if (parsedRollbackUrl.protocol !== "https:" || !parsedRollbackUrl.hostname.endsWith(ALTERNATE_ENTRY_HOST_SUFFIX)) throw new Error("untrusted-host");
+  } catch {
+    errors.push({ code: "ROLLBACK_DEPLOYMENT_URL_INVALID", detail: String(rollback?.deployment_url || "") });
+  }
   if (rollback?.ready_state !== "READY") {
     errors.push({ code: "ROLLBACK_NOT_READY", detail: String(rollback?.ready_state || "") });
   }
@@ -396,16 +430,6 @@ export function validateJourneyReceipt(receipt, { targetUrl, expectedCommit, now
     errors.push({ code: "ROLLBACK_VERIFICATION_TIME_INVALID", detail: String(rollback?.verified_at || "") });
   } else if (rollbackObservedAt > observedAt + MAX_CLOCK_SKEW_MS) {
     errors.push({ code: "ROLLBACK_VERIFICATION_AFTER_JOURNEY", detail: String(rollback.verified_at) });
-  }
-  const rollbackProvider = rollback?.provider_readiness;
-  for (const [passed, code, detail] of [
-    [rollbackProvider?.configured === true, "ROLLBACK_PROVIDER_KEY_MISSING", `configured=${String(rollbackProvider?.configured)}`],
-    [rollbackProvider?.access_required === true, "ROLLBACK_ACCESS_NOT_REQUIRED", `access_required=${String(rollbackProvider?.access_required)}`],
-    [rollbackProvider?.credential_mode === "SERVER_MANAGED", "ROLLBACK_CREDENTIAL_MODE_INVALID", String(rollbackProvider?.credential_mode || "")],
-    [rollbackProvider?.image_ledger_configured === true, "ROLLBACK_IMAGE_LEDGER_NOT_CONFIGURED", `image_ledger_configured=${String(rollbackProvider?.image_ledger_configured)}`],
-    [rollbackProvider?.image_ledger_attested === true, "ROLLBACK_IMAGE_LEDGER_NOT_ATTESTED", `image_ledger_attested=${String(rollbackProvider?.image_ledger_attested)} status=${String(rollbackProvider?.image_ledger_attestation_status || "")}`],
-  ]) {
-    if (!passed) errors.push({ code, detail });
   }
   const ids = [receipt.same_draft?.initial_draft_id, receipt.same_draft?.saved_draft_id, receipt.same_draft?.reopened_draft_id, receipt.same_draft?.export_source_draft_id];
   if (ids.some((value) => typeof value !== "string" || !value.trim()) || new Set(ids).size !== 1) {
@@ -468,14 +492,28 @@ export async function evaluateDelivery(input, dependencies = {}) {
   if (providerHealth) errors.push(...validateProviderReadiness(providerHealth, { expectedCommit: input.expectedCommit }));
   const journey = validateJourneyReceipt(input.receipt, { targetUrl: target.url, expectedCommit: input.expectedCommit });
   errors.push(...journey.errors);
+  const rollback = input.receipt?.rollback_verification;
+  let rollbackReadback = input.rollbackReadback;
+  if (!rollbackReadback && typeof dependencies.readRollbackReadback === "function" && rollback) {
+    rollbackReadback = await capture(() => dependencies.readRollbackReadback({
+      deploymentId: rollback.deployment_id,
+      deploymentUrl: rollback.deployment_url,
+      expectedCommit: rollback.source_commit,
+    }));
+  }
+  errors.push(...validateRollbackReadback(rollbackReadback, {
+    deploymentId: rollback?.deployment_id,
+    deploymentUrl: rollback?.deployment_url,
+    expectedCommit: rollback?.source_commit,
+  }));
   if (errors.length) {
-    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, local_artifact: localArtifact, remote_artifact: remoteArtifact, provider_health: providerHealth } };
+    return { ...base, verdict: "BLOCKED", errors, checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, local_artifact: localArtifact, remote_artifact: remoteArtifact, provider_health: providerHealth, rollback_readback: rollbackReadback } };
   }
   return {
     ...base,
     verdict: "HANDOFF_READY",
     errors: [],
-    checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, artifact_identity: localArtifact, provider_health: providerHealth },
+    checks: { candidate, dns_addresses: dnsAddresses, alternate_entries: alternateEntries, artifact_identity: localArtifact, provider_health: providerHealth, rollback_readback: rollbackReadback },
     consumer: {
       operator_actor_role: journey.actor_role,
       same_draft_id: input.receipt.same_draft.initial_draft_id,
@@ -510,12 +548,16 @@ export async function runCli(argv = process.argv.slice(2)) {
     const args = parseArgs(argv);
     let receipt;
     if (args.receipt) receipt = JSON.parse(await readFile(path.resolve(args.receipt), "utf8"));
+    const rollbackReadback = args["rollback-readback"]
+      ? JSON.parse(await readFile(path.resolve(args["rollback-readback"]), "utf8"))
+      : undefined;
     result = await evaluateDelivery({
       targetUrl: args.url,
       expectedCommit: args["expected-commit"],
       candidateRoot: path.resolve(args["candidate-root"] || process.cwd()),
       alternateUrls: args["alternate-url"] || [],
       receipt,
+      rollbackReadback,
     });
   } catch (error) {
     result = {
