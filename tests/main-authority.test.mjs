@@ -409,6 +409,7 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.doesNotMatch(imageSource, /operationWasStaleBeforePersistence/, "staleness sampled before media fetch cannot authorize a later write");
   assert.match(imageSource, /forceRecovery:\s*!mainAuthority\.isCurrent\(mainOperation\)/, "completion must recheck semantic authority immediately at commit");
   assert.match(imageSource, /const operationWasStaleAtCommit = !mainAuthority\.isCurrent\(mainOperation\);[\s\S]*?forceRecovery:\s*operationWasStaleAtCommit/, "progress must bind forceRecovery after deferred media fetch");
+  assert.equal((imageSource.match(/forceRecoveryNow:\s*\(\) => !mainAuthority\.isCurrent\(mainOperation\)/g) || []).length, 2, "progress and completion must both recheck authority inside the coordinator's exclusive commit lock");
   assert.match(imageSource, /if \(discoveryOnly\)[\s\S]*return \{ action: "STOP", checkpointPersisted: true,[\s\S]*nextImageStepRequest/);
   assert.match(imageSource, /checkpointPersisted: progressReceipt\.checkpointPersisted === true/);
   assert.match(imageSource, /checkpointPersisted: false, code: "IMAGE_OPERATION_CONTEXT_MISSING"/);

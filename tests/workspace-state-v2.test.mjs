@@ -212,6 +212,28 @@ function exclusiveLocks() {
   };
 }
 
+function pauseExclusiveLockRequest(pauseCall = 2) {
+  let callCount = 0;
+  let enteredResolve;
+  let resumeResolve;
+  const entered = new Promise((resolve) => { enteredResolve = resolve; });
+  const resumed = new Promise((resolve) => { resumeResolve = resolve; });
+  return {
+    entered,
+    resume: () => resumeResolve(),
+    lockManager: {
+      async request(_name, _options, callback) {
+        callCount += 1;
+        if (callCount === pauseCall) {
+          enteredResolve();
+          await resumed;
+        }
+        return callback();
+      },
+    },
+  };
+}
+
 function verifiedMediaStore(initial = [], { events = [], failPut = false } = {}) {
   const assets = new Map(initial.map((asset) => [asset.media_ref, structuredClone(asset)]));
   return {
@@ -1785,6 +1807,102 @@ test("bootstrap winning the reverse race makes unchanged autosave a zero-write b
     createdAt: bootstrapReceipt.target_draft.created_at,
   });
   assert.equal(draftAutosaveRequiredV3({ baseDraft: bootstrapReceipt.target_draft, candidateDraft: changedAutosaveDraft }), true, "real text changes must still autosave and force later image results into safe recovery");
+});
+
+test("image progress and completion recheck semantic authority inside the exclusive commit lock", async (t) => {
+  for (const mode of ["progress", "completion"]) {
+    await t.test(mode, async () => {
+      const operationNonce = (mode === "progress" ? "7" : "8").repeat(64);
+      const session = { ...fullSession(`lock-guard-${mode}`), image_resume: null };
+      const pending = createPendingImageOperation({
+        operationNonce,
+        operationSnapshot: imageOperationSnapshot(`lock-guard-${mode}`, session.text_draft),
+        operationSnapshotHash: "9".repeat(64),
+        inputHash: "a".repeat(64),
+        orderedReferenceManifest: [],
+        protocolState: "READY",
+        runId: `lock-guard-${mode}-run`,
+        completedImageSteps: 0,
+        totalImageSteps: 2,
+      });
+      const record = createDraftRecordV3({
+        draftId: `lock-guard-${mode}`,
+        contentPackage: assembledContent(session, `lock-guard-${mode}`),
+        generationSession: session,
+        pendingImageOperation: pending,
+        createdAt: T0,
+      });
+      const workspace = parseWorkspaceEnvelopeV3({
+        schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+        authority_effect: "LOCAL_EDITING_ONLY",
+        updated_at: T0,
+        profile: createProfileV2(),
+        active_draft_id: record.draft_id,
+        drafts: [record],
+        legacy_v2_source: null,
+      });
+      const paused = pauseExclusiveLockRequest();
+      const coordinator = createWorkspaceV3Coordinator({
+        storage: memoryStorage(),
+        keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+        lockManager: paused.lockManager,
+      });
+      assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace })).ok, true);
+
+      let semanticAuthorityMoved = false;
+      let guardReads = 0;
+      const common = {
+        coordinator,
+        mediaStore: null,
+        draftId: record.draft_id,
+        expectedDraftToken: draftRecordToken(record),
+        operationSnapshot: record,
+        recoveredDraftId: `image-recovery-${operationNonce.slice(0, 32)}`,
+        mediaDelta: [],
+        forceRecoveryNow: () => {
+          guardReads += 1;
+          return semanticAuthorityMoved;
+        },
+        updatedAt: T1,
+      };
+      let commitPromise;
+      if (mode === "progress") {
+        commitPromise = commitDraftImageProgressV3({
+          ...common,
+          imageResume: {
+            resume_run_id: pending.run_id,
+            completed_image_steps: 1,
+            total_image_steps: 2,
+          },
+          responseStatus: "PARTIAL",
+        });
+      } else {
+        const finalContent = assembledContent(session, `lock-guard-${mode}-final`);
+        finalContent.generation = {
+          ...finalContent.generation,
+          mode: "PROVIDER",
+          provider: "volcengine-ark",
+          source_draft_id: session.text_draft.draft_id,
+          strategy: "resumable_public_image_steps_v1",
+        };
+        commitPromise = commitDraftImageCompletionV3({ ...common, contentPackage: finalContent });
+      }
+
+      await paused.entered;
+      semanticAuthorityMoved = true;
+      paused.resume();
+      const result = await commitPromise;
+
+      assert.equal(guardReads, 1, "the live authority must be sampled by the locked coordinator, not cached before waiting");
+      assert.equal(result.disposition, "RECOVERED_SIBLING_COMMITTED");
+      assert.equal(result.action, mode === "progress" ? "STOP" : "COMPLETE");
+      assert.equal(result.target_draft.draft_id, record.draft_id);
+      assert.equal(result.target_draft.content_package.body, record.content_package.body, "the source content must not be replaced by the late paid result");
+      assert.equal(result.target_draft.pending_image_operation, null, "the source must release the image lane atomically");
+      assert.equal(result.recovered_draft.draft_id, common.recoveredDraftId);
+      assert.equal(result.recovered_draft.pending_image_operation == null, mode === "completion");
+    });
+  }
 });
 
 test("READY and READY_DISCOVERY persist as planning-ready while only PARTIAL records produced image progress", async () => {

@@ -2620,6 +2620,7 @@ export function createWorkspaceV3Coordinator({
     isAlreadyApplied = null,
     isRecoveredAlreadyApplied = null,
     onConflict = null,
+    commitGuard = null,
     reason = "TARGET_MERGE_V3",
   } = {}) {
     const targetId = requiredString(draftId, "draftId");
@@ -2628,6 +2629,7 @@ export function createWorkspaceV3Coordinator({
     if (isAlreadyApplied != null && typeof isAlreadyApplied !== "function") throw new TypeError("isAlreadyApplied must be a function");
     if (isRecoveredAlreadyApplied != null && typeof isRecoveredAlreadyApplied !== "function") throw new TypeError("isRecoveredAlreadyApplied must be a function");
     if (onConflict != null && typeof onConflict !== "function") throw new TypeError("onConflict must be a function");
+    if (commitGuard != null && typeof commitGuard !== "function") throw new TypeError("commitGuard must be a function");
     return underExclusiveLock(async () => {
       const latest = snapshot();
       if (!latest.ok || !latest.workspace) {
@@ -2697,6 +2699,23 @@ export function createWorkspaceV3Coordinator({
           updatedAt: sibling.updated_at,
         });
         return persistAndReadback(recoveredWorkspace, { targetDraftId: targetId, recoveredDraftId: sibling.draft_id, reason, disposition: "RECOVERED_SIBLING_COMMITTED" });
+      }
+      if (commitGuard != null) {
+        const accepted = syncBuilderResult(
+          commitGuard({ workspace: latest.workspace, target_draft: target }),
+          "WORKSPACE_ASYNC_COMMIT_GUARD_FORBIDDEN",
+        );
+        if (accepted !== true && accepted !== false) throw new TypeError("commitGuard must return a boolean");
+        if (!accepted) {
+          return v3TransactionReceipt({
+            ok: false,
+            code: "WORKSPACE_DRAFT_COMMIT_GUARD_REJECTED",
+            disposition: "NO_WRITE_CONFLICT",
+            snapshot: latest,
+            targetDraftId: targetId,
+            reason,
+          });
+        }
       }
       let candidate = replacementDraft;
       if (typeof buildDraft === "function") candidate = syncBuilderResult(buildDraft(target, latest.workspace), "WORKSPACE_ASYNC_BUILDER_FORBIDDEN");
@@ -3044,6 +3063,7 @@ export async function commitDraftImageProgressV3({
   responseStatus = "PARTIAL",
   mediaDelta = [],
   forceRecovery = false,
+  forceRecoveryNow = null,
   updatedAt = new Date().toISOString(),
 } = {}) {
   const coordinator = imageTransactionCoordinator(coordinatorValue);
@@ -3051,6 +3071,7 @@ export async function commitDraftImageProgressV3({
   if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
   const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
   const recoveredId = requiredString(recoveredDraftId, "recoveredDraftId");
+  if (forceRecoveryNow != null && typeof forceRecoveryNow !== "function") throw new TypeError("forceRecoveryNow must be a function");
   const recoveryLane = recoveredId === targetId;
   const timestamp = requiredString(updatedAt, "updatedAt");
   let resume;
@@ -3129,9 +3150,10 @@ export async function commitDraftImageProgressV3({
     expectedDraftToken,
     buildDraft: (target) => buildRecord({ sourceRecord: target, draftId: target.draft_id, createdAt: target.created_at }),
     isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
+    commitGuard: forceRecoveryNow == null ? null : () => !forceRecoveryNow(),
     reason: `IMAGE_PARTIAL_V3:${pending.operation_nonce}`,
     });
-  if (!receipt.ok && receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT") {
+  if (!receipt.ok && (receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT" || receipt.code === "WORKSPACE_DRAFT_COMMIT_GUARD_REJECTED")) {
     return commitImageRecoveryMoveV3({
       coordinator,
       targetDraftId: targetId,
@@ -3313,6 +3335,7 @@ export async function commitDraftImageCompletionV3({
   contentPackage,
   mediaDelta = [],
   forceRecovery = false,
+  forceRecoveryNow = null,
   updatedAt = new Date().toISOString(),
 } = {}) {
   const coordinator = imageTransactionCoordinator(coordinatorValue);
@@ -3320,6 +3343,7 @@ export async function commitDraftImageCompletionV3({
   if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
   const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
   const recoveredId = requiredString(recoveredDraftId, "recoveredDraftId");
+  if (forceRecoveryNow != null && typeof forceRecoveryNow !== "function") throw new TypeError("forceRecoveryNow must be a function");
   const recoveryLane = recoveredId === targetId;
   const timestamp = requiredString(updatedAt, "updatedAt");
   const frozenTextDraft = frozenImageTextDraft(snapshotRecord);
@@ -3430,9 +3454,10 @@ export async function commitDraftImageCompletionV3({
       sourceRecord: target,
     }),
     isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
+    commitGuard: forceRecoveryNow == null ? null : () => !forceRecoveryNow(),
     reason: `IMAGE_COMPLETE_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
   });
-  if (!receipt.ok && receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT" && !recoveryLane) {
+  if (!receipt.ok && (receipt.code === "WORKSPACE_DRAFT_CAS_CONFLICT" || receipt.code === "WORKSPACE_DRAFT_COMMIT_GUARD_REJECTED") && !recoveryLane) {
     const recoveredReceipt = await commitImageRecoveryMoveV3({
       coordinator,
       targetDraftId: targetId,

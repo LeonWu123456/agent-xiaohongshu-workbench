@@ -2683,6 +2683,7 @@ function App() {
             contentPackage: response.content_package,
             mediaDelta,
             forceRecovery: !mainAuthority.isCurrent(mainOperation),
+            forceRecoveryNow: () => !mainAuthority.isCurrent(mainOperation),
           });
           if (completionReceipt.action !== "COMPLETE" || !completionReceipt.workspace) throw imageResponseFailure({ status: "ERROR", error: { code: completionReceipt.code || "LOCAL_MEDIA_WRITE_FAILED" }, progress: completionReceipt });
           dispatchAuth({ type: "BUSINESS_SUCCESS", generation: authGeneration });
@@ -2742,6 +2743,7 @@ function App() {
           responseStatus: response.status,
           mediaDelta,
           forceRecovery: operationWasStaleAtCommit,
+          forceRecoveryNow: () => !mainAuthority.isCurrent(mainOperation),
         });
         if (progressReceipt.action === "CONTINUE") {
           activeImageOperationRef.current = {
