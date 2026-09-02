@@ -74,6 +74,8 @@ export async function buildPublishZip(content, pngPages, options = {}) {
     publicationAuthority: options.publicationAuthority,
   });
   manifest.files = [...names, "publish-copy.txt", "content.json", "media-assets.json", "manifest.json"];
+  manifest.file_count = manifest.files.length;
+  manifest.source_draft_id = portableContent.generation?.source_draft_id || null;
   manifest.content_media_contract = "canonical-refs-with-verified-backup-assets-v1";
   manifest.media_assets_file = "media-assets.json";
   manifest.media_asset_count = mediaAssets.length;

@@ -490,6 +490,24 @@ test("image responses expose only small manifests and COMPLETE alone may carry a
   assert.throws(() => parseImageGenerationResponse({ ...imageGenerationResponse("COMPLETE"), extra: true }), /IMAGE_GENERATION_RESPONSE_FIELDS_INVALID/);
 });
 
+test("one response can carry every illustration asset from a valid multi-panel draft", () => {
+  const assets = Array.from({ length: 9 }, (_, index) => {
+    const sha256 = String(index + 1).repeat(64);
+    return imageManifest({
+      sha256,
+      media_ref: `xiaoshimei-media://sha256/${sha256}`,
+      name: `page-unit-${index + 1}`,
+    });
+  });
+  const mediaDelta = assets.map((asset) => ({
+    ...asset,
+    asset_url: `/api/provider/assets/image-run-contract-0001/${asset.sha256}`,
+  }));
+  const parsed = parseImageGenerationResponse(imageGenerationResponse("PARTIAL", { assets, media_delta: mediaDelta }));
+  assert.equal(parsed.assets.length, 9);
+  assert.equal(parsed.media_delta.length, 9);
+});
+
 test("image media deltas are fetched from the same run and verified before local persistence", async () => {
   const bytes = Uint8Array.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9]);
   const sha256 = "1d4d47030772999b01d3d1ba14be0f13ce77efc2860086dfaefdb0e8bacf6b2b";

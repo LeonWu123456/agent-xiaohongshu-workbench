@@ -28,6 +28,8 @@ test("ZIP contains ordered PNGs, UTF-8 copy, reloadable content and matching man
   const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
   assert.equal(manifest.page_count, 2);
   assert.deepEqual(manifest.files, Object.keys(zip.files));
+  assert.equal(manifest.file_count, Object.keys(zip.files).length);
+  assert.equal(manifest.source_draft_id, content.generation.source_draft_id || null);
   assert.equal(manifest.content_media_contract, "canonical-refs-with-verified-backup-assets-v1");
   assert.equal(manifest.media_assets_file, "media-assets.json");
   assert.equal(manifest.media_asset_count, 0);
@@ -69,12 +71,14 @@ test("ZIP keeps canonical refs and embeds the exact verified media backup set", 
 
 test("ZIP manifest records the publication authority that unlocked this exact export", async () => {
   const content = generateContentPackage({ topic: "发布权威同稿回读" });
+  content.generation.source_draft_id = "same-draft-authority-1";
   const blob = await buildPublishZip(content, [pngHeader(1080, 1440), pngHeader(1080, 1440)], {
     publicationAuthority: "CONFIRMED_TEXT_AUTHORITY",
   });
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
   assert.equal(manifest.publication_authority, "CONFIRMED_TEXT_AUTHORITY");
+  assert.equal(manifest.source_draft_id, "same-draft-authority-1");
 });
 
 test("ZIP refuses runtime media and a canonical ref without its verified backup asset", async () => {

@@ -12,6 +12,8 @@ import { inspectMotherSheetTilePixels, inspectMotherSheetTileStats } from "../sr
 import { cleanupGeneratedGridArtifacts } from "../src/mother-sheet-artifact-cleanup.mjs";
 import { detectKvTemplateLeftColumnRegions } from "../src/mother-sheet-adaptive-regions.mjs";
 import { PAGE_CANDIDATE_RESPONSE_SCHEMA, TEXT_DRAFT_RESPONSE_SCHEMA, parseGenerationRequest, parseImageGenerationRequest, parsePageCandidateRequest, parseTextDraftRequest } from "../src/provider-contract.mjs";
+import { generateImages as generateTransactionalImages, recoverStoredD36UnknownStep } from "../api/provider.mjs";
+import { createLocalImageLedger } from "../src/local-image-ledger.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.ARK_PROVIDER_PORT || 4175);
@@ -59,6 +61,8 @@ const RECEIPT_ROOT = join(RUNTIME_ROOT, "artifacts", "provider-runs");
 const REFERENCE_PATH = join(ROOT, "public", "assets", "xiaoshimei-character-full.png");
 const IMAGE_PRICE_CNY = Number(process.env.ARK_IMAGE_PRICE_CNY || 0.22);
 const runtimeState = { status: configured() ? "CONFIGURED_UNVERIFIED" : "NOT_CONFIGURED", last_error: null, last_success_at: null };
+const LOCAL_IMAGE_SCOPE = "xiaoshimei-local-workbench";
+const localImageLedger = await createLocalImageLedger({ statePath: join(RUNTIME_ROOT, ".data", "local-image-ledger.json") });
 
 function configured() { return Boolean(API_KEY && TEXT_MODEL && IMAGE_MODEL && PROVIDER_BASE_URL); }
 
@@ -143,6 +147,18 @@ function resumableDetails(checkpoint) {
 }
 function responseHeaders() { return { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type", "cache-control": "no-store" }; }
 function send(response, status, value) { response.writeHead(status, responseHeaders()); response.end(JSON.stringify(value)); }
+function sendImageAsset(response, asset) {
+  response.writeHead(200, {
+    "content-type": asset.manifest.mime,
+    "content-length": String(asset.bytes.length),
+    "x-content-sha256": asset.manifest.sha256,
+    "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers": "content-type, content-length, x-content-sha256, x-content-type-options, cache-control",
+  });
+  response.end(asset.bytes);
+}
 
 async function writeRouteFailureReceipt(route, code, details) {
   const createdAt = new Date().toISOString();
@@ -674,6 +690,13 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/health") { send(response, 200, { status: runtimeState.status, ...publicProviderConfig(), last_error: runtimeState.last_error, last_success_at: runtimeState.last_success_at }); return; }
     if (request.method === "GET" && request.url === "/config") { send(response, 200, publicProviderConfig()); return; }
     if (request.headers.origin && !WEB_ORIGINS.has(request.headers.origin)) { send(response, 403, { error: "ORIGIN_REJECTED" }); return; }
+    const assetMatch = request.method === "GET" ? /^\/api\/provider\/assets\/([A-Za-z0-9._:-]{1,160})\/([0-9a-f]{64})$/.exec(request.url || "") : null;
+    if (assetMatch) {
+      const asset = await localImageLedger.readAsset({ runId: assetMatch[1], sha256: assetMatch[2], appScopeId: LOCAL_IMAGE_SCOPE });
+      if (asset.status !== "FOUND") { send(response, asset.status === "FORBIDDEN" ? 403 : 404, { error: `IMAGE_ASSET_${asset.status}` }); return; }
+      sendImageAsset(response, asset);
+      return;
+    }
     if (request.method === "POST" && request.url === "/config") { send(response, 200, await updateProviderConfig(await readJson(request))); return; }
     if (request.method !== "POST" || !new Set(["/generate", "/text-draft", "/generate-images", "/page-candidates", "/image-probe"]).has(request.url)) { send(response, 404, { error: "NOT_FOUND" }); return; }
     const body = await readJson(request);
@@ -681,7 +704,26 @@ const server = createServer(async (request, response) => {
     let result;
     if (request.url === "/generate") result = await generate(parseGenerationRequest(body));
     else if (request.url === "/text-draft") result = await generateTextDraft(parseTextDraftRequest(body));
-    else if (request.url === "/generate-images") result = await generateImages(parseImageGenerationRequest(body));
+    else if (request.url === "/generate-images") {
+      const input = parseImageGenerationRequest(body);
+      const settings = {
+        apiKey: API_KEY,
+        textModel: TEXT_MODEL,
+        imageModel: IMAGE_MODEL,
+        credentialMode: "SERVER_MANAGED",
+      };
+      result = input.mode === "DISCOVER"
+        ? await recoverStoredD36UnknownStep({ imageLedger: localImageLedger, bootstrapNonce: input.bootstrap_nonce, appScopeId: LOCAL_IMAGE_SCOPE, settings })
+        : null;
+      if (!result) {
+        result = await generateTransactionalImages(input, settings, {
+          imageLedger: localImageLedger,
+          nowMs: Date.now(),
+          accessExpiresAtMs: Date.now() + 24 * 60 * 60 * 1_000,
+          appScopeId: LOCAL_IMAGE_SCOPE,
+        });
+      }
+    }
     else if (request.url === "/image-probe") result = await generateImageProbe(body);
     else result = await generatePageCandidates(parsePageCandidateRequest(body));
     console.log(`[ark-provider] ${request.url} COMPLETE`);

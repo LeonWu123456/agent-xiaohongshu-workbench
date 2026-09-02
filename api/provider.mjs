@@ -2778,6 +2778,94 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
   return returnOrThrowD36Response(response);
 }
 
+export async function recoverStoredD36UnknownStep({ imageLedger, runId: suppliedRunId = "", bootstrapNonce = "", appScopeId, settings } = {}) {
+  if (!imageLedger || typeof imageLedger.listRunAssets !== "function" || typeof imageLedger.findUnknownStep !== "function") return null;
+  const runId = suppliedRunId || d36RunId(appScopeId, bootstrapNonce);
+  const state = await imageLedger.discoverByRun({ runId, appScopeId });
+  if (!state || state.status !== "UNKNOWN" || !state.compactRun) return null;
+  const compactBefore = state.compactRun;
+  const currentJob = compactBefore.jobs?.[compactBefore.next_job_index];
+  if (!currentJob) return null;
+  const unknownStep = await imageLedger.findUnknownStep({
+    runId,
+    checkpointPreimageSha256: state.checkpointPreimageSha256,
+    logicalStepId: state.logicalStepId,
+  });
+  if (unknownStep?.status !== "FOUND") return null;
+  const listed = await imageLedger.listRunAssets({ runId, appScopeId });
+  if (listed?.status !== "FOUND") return null;
+  const existing = new Set((compactBefore.assets || []).map((asset) => asset.sha256));
+  const unitById = new Map(currentJob.units.map((unit) => [unit.unit_id, unit]));
+  const recoverable = listed.assets.filter((asset) => !existing.has(asset.sha256) && unitById.has(asset.manifest?.name));
+  if (!recoverable.length) return null;
+
+  const hydrated = await hydrateCompactPublicImageRun(compactBefore, imageLedger, appScopeId);
+  const started = startPublicImageJob(hydrated);
+  const admitted = recoverable.map((stored) => {
+    const manifest = stored.manifest;
+    const unit = unitById.get(manifest.name);
+    return {
+      unit_id: unit.unit_id,
+      page_index: unit.page_index,
+      panel_index: unit.panel_index ?? null,
+      name: manifest.name,
+      src: `data:image/jpeg;base64,${Buffer.from(stored.bytes).toString("base64")}`,
+      sha256: manifest.sha256,
+      size_bytes: manifest.size_bytes,
+      width: manifest.width,
+      height: manifest.height,
+      media_role: unit.media_role,
+      preferred_aspect: unit.preferred_aspect,
+      fit_policy: unit.fit_policy,
+      edge_trim: { left: 0, right: 0, top: 0, bottom: 0 },
+      aspect_crop: { left: 0, top: 0, width: manifest.width, height: manifest.height },
+      recovered_from_stored_asset: true,
+    };
+  });
+  let advanced = admitPublicImageJob(started, { assets: admitted, attempt: { recovered_from_stored_assets: true } });
+  advanced = advancePublicImageRun(advanced);
+  const compactRun = compactPublicImageRun(advanced);
+  const mediaDelta = recoverable.map((stored) => d36ManifestFromAsset({ ...stored.manifest, unit_id: stored.manifest.name }, runId));
+  let contentPackage;
+  if (advanced.status === "COMPLETE") {
+    const references = await readAndVerifyD36ReferenceAssets(imageLedger, runId, appScopeId, state.referenceManifest || []);
+    const legacyInput = d36LegacyInput(state.snapshot, references);
+    const inlineContent = assemblePublicImageContent(advanced, legacyInput, settings);
+    const allManifests = compactRun.assets.map((asset) => stripAssetUrl(d36ManifestFromAsset(asset, runId)));
+    contentPackage = replaceInlineMediaWithRefs(inlineContent, allManifests);
+  }
+  const response = d36ResponseForCompactRun({
+    compactRun,
+    bootstrapNonce: state.bootstrapNonce,
+    inputSha256: state.inputSha256,
+    apiKey: settings.apiKey,
+    mediaDelta,
+    recoverableUntil: state.recoverableUntil,
+    upstreamCalls: 0,
+    status: advanced.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+    contentPackage,
+  });
+  const committed = await imageLedger.commitStep({
+    runId,
+    appScopeId,
+    checkpointPreimageSha256: state.checkpointPreimageSha256,
+    logicalStepId: state.logicalStepId,
+    attemptNonce: unknownStep.attemptNonce,
+    actionId: unknownStep.actionId,
+    ownerToken: unknownStep.ownerToken,
+    fence: unknownStep.fence,
+    compactRun,
+    checkpointPreimage: response.checkpoint_preimage,
+    nextCheckpointPreimageSha256: response.checkpoint_preimage_sha256,
+    nextLogicalStepId: response.logical_step_id,
+    response,
+    status: response.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+    runStatus: response.status === "COMPLETE" ? "COMPLETE" : "PARTIAL",
+  });
+  if (committed?.status !== "COMMITTED") return null;
+  return response;
+}
+
 export async function generateImages(input, settings, options = {}) {
   const { imageLedger = null, nowMs = Date.now(), ledgerReady = false } = options;
   if (input?.mode) return generateImagesTransaction(input, settings, options);

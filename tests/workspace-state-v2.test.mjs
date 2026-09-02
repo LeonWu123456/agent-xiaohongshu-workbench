@@ -2020,3 +2020,114 @@ test("v3 image completion never overwrites edited A and commits one final recove
   assert.equal(completed.workspace.active_draft_id, recordB.draft_id);
   assert.deepEqual(completed.active_draft, bBefore);
 });
+
+test("v3 image completion atomically clears the current image lane and saves a frozen-lineage result as a recovered sibling", async () => {
+  const frozenSession = { ...fullSession("frozen-image-text"), image_resume: null };
+  const currentDraft = {
+    ...textDraft("current-editor-text"),
+    source_input: "当前编辑器里的另一版原文",
+    titles: ["当前稿标题一", "当前稿标题二", "当前稿标题三"],
+    selected_title: "当前稿标题一",
+    body: "这是图片任务开始后继续修改的当前正文，必须完整保留，不能被迟到的图片结果覆盖。".repeat(12),
+    tags: ["当前稿", "继续编辑", "页面保留", "排版保留", "一稿到底"],
+  };
+  const currentSession = {
+    ...frozenSession,
+    topic: currentDraft.source_input,
+    pillar: currentDraft.pillar,
+    goal: currentDraft.goal,
+    text_draft: currentDraft,
+    assembled_draft_id: currentDraft.draft_id,
+  };
+  const pending = createPendingImageOperation({
+    operationNonce: "f".repeat(64),
+    operationSnapshot: imageOperationSnapshot("same-active-record", frozenSession.text_draft),
+    operationSnapshotHash: "1".repeat(64),
+    inputHash: "2".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "PARTIAL",
+    runId: "images-2026-09-02T02-37-24-284Z-abcdef12",
+    completedImageSteps: 4,
+    totalImageSteps: 4,
+  });
+  const currentContent = assembledContent(currentSession, "current-editor-content");
+  const currentRecord = createDraftRecordV3({
+    draftId: "same-active-record",
+    contentPackage: currentContent,
+    generationSession: currentSession,
+    pendingImageOperation: pending,
+    createdAt: T0,
+    updatedAt: T1,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T1,
+    profile: createProfileV2(),
+    active_draft_id: currentRecord.draft_id,
+    drafts: [currentRecord],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({
+    storage: memoryStorage(),
+    keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+    lockManager: exclusiveLocks(),
+  });
+  await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace });
+  const finalContent = assembledContent(frozenSession, "frozen-image-result");
+  finalContent.generation = {
+    ...finalContent.generation,
+    mode: "PROVIDER",
+    provider: "volcengine-ark",
+    source_draft_id: frozenSession.text_draft.draft_id,
+    strategy: "resumable_public_image_steps_v1",
+  };
+
+  const completed = await commitDraftImageCompletionV3({
+    coordinator,
+    mediaStore: null,
+    draftId: currentRecord.draft_id,
+    expectedDraftToken: draftRecordToken(currentRecord),
+    operationSnapshot: currentRecord,
+    recoveredDraftId: `image-recovery-${"f".repeat(32)}`,
+    contentPackage: finalContent,
+    mediaDelta: [],
+    updatedAt: "2026-09-02T03:00:00.000Z",
+  });
+
+  assert.equal(completed.action, "COMPLETE");
+  assert.equal(completed.disposition, "RECOVERED_SIBLING_COMMITTED");
+  assert.equal(completed.adopt_current_ui, false);
+  assert.equal(completed.workspace.active_draft_id, currentRecord.draft_id, "the active editor identity must not move");
+  assert.equal(completed.target_draft.content_package.body, currentContent.body, "current content must survive byte-for-byte");
+  assert.equal(completed.target_draft.generation_session.text_draft.body, currentDraft.body);
+  assert.equal(completed.target_draft.pending_image_operation, null, "only the finished image lane is released");
+  assert.equal(completed.target_draft.generation_session.image_resume, null);
+  assert.equal(completed.recovered_draft.content_package.body, frozenSession.text_draft.body);
+  assert.equal(completed.recovered_draft.generation_session.text_draft.draft_id, frozenSession.text_draft.draft_id);
+  assert.equal(completed.recovered_draft.pending_image_operation, null);
+  assert.equal(completed.workspace.drafts.length, 2);
+  assert.equal(
+    libraryContentsV3(completed.workspace)[0].draft_record_id,
+    completed.recovered_draft.draft_id,
+    "a result described as a recovered draft must be openable from the asset library",
+  );
+
+  const legacyRecovered = createDraftRecordV3({
+    draftId: completed.recovered_draft.draft_id,
+    contentPackage: { ...completed.recovered_draft.content_package, saved_at: undefined },
+    generationSession: completed.recovered_draft.generation_session,
+    pendingImageOperation: null,
+    createdAt: completed.recovered_draft.created_at,
+    updatedAt: completed.recovered_draft.updated_at,
+  });
+  const legacyWorkspace = parseWorkspaceEnvelopeV3({
+    ...completed.workspace,
+    drafts: [legacyRecovered, completed.target_draft],
+  });
+  assert.equal(
+    libraryContentsV3(legacyWorkspace)[0].draft_record_id,
+    legacyRecovered.draft_id,
+    "an already-committed recovered result from before the library marker fix remains consumer-visible",
+  );
+});

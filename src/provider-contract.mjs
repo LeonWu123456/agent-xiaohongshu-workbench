@@ -344,8 +344,8 @@ export function parseImageGenerationResponse(value) {
   assertExactFields(value, fields, "IMAGE_GENERATION_RESPONSE_FIELDS_INVALID");
   if (value.schema !== IMAGE_GENERATION_RESPONSE_SCHEMA || !IMAGE_RESPONSE_STATUSES.has(value.status)) throw new TypeError("IMAGE_GENERATION_RESPONSE_INVALID");
   const runId = safeId(value.run_id, "IMAGE_GENERATION_RESPONSE_RUN_ID_INVALID");
-  const assets = normalizeManifestArray(value.assets, "IMAGE_GENERATION_RESPONSE_ASSETS_INVALID", { maxItems: 8, response: true, runId });
-  const mediaDelta = normalizeManifestArray(value.media_delta, "IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_INVALID", { maxItems: 8, response: true, runId });
+  const assets = normalizeManifestArray(value.assets, "IMAGE_GENERATION_RESPONSE_ASSETS_INVALID", { maxItems: 32, response: true, runId });
+  const mediaDelta = normalizeManifestArray(value.media_delta, "IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_INVALID", { maxItems: 9, response: true, runId });
   if (mediaDelta.some((item) => !item.asset_url)) throw new TypeError("IMAGE_GENERATION_RESPONSE_MEDIA_DELTA_ASSET_URL_REQUIRED");
   const normalized = {
     schema: IMAGE_GENERATION_RESPONSE_SCHEMA,

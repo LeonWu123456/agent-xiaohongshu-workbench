@@ -61,8 +61,8 @@ const identitySource = namedFunctionSource(mainSource, "pageSemanticIdentity");
 const authoringLockSource = namedFunctionSource(mainSource, "authoringInputLockReason").replace(/^export\s+/, "");
 const imageLaneLockSource = namedFunctionSource(mainSource, "imageLaneLockReason").replace(/^export\s+/, "");
 const imageRecoveryModeSource = namedFunctionSource(mainSource, "imageRecoveryClickMode").replace(/^export\s+/, "");
-const libraryProjectionSource = namedFunctionSource(mainSource, "currentLibraryProjection").replace(/^export\s+/, "");
-const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${libraryProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentLibraryProjection };`).toString("base64")}`);
+const workbenchProjectionSource = namedFunctionSource(mainSource, "currentWorkbenchProjection").replace(/^export\s+/, "");
+const runtimeModule = await import(`data:text/javascript;base64,${Buffer.from(`${runtimeSource}\n${authRuntimeSource}\n${identitySource}\n${authoringLockSource}\n${imageLaneLockSource}\n${imageRecoveryModeSource}\n${workbenchProjectionSource}\nexport { pageSemanticIdentity, authoringInputLockReason, imageLaneLockReason, imageRecoveryClickMode, currentWorkbenchProjection };`).toString("base64")}`);
 const {
   createMainAuthorityRuntime,
   createMainAuthState,
@@ -75,7 +75,7 @@ const {
   authoringInputLockReason,
   imageLaneLockReason,
   imageRecoveryClickMode,
-  currentLibraryProjection,
+  currentWorkbenchProjection,
 } = runtimeModule;
 
 function makeUiState() {
@@ -410,7 +410,7 @@ test("every persisted pending recovery needs a fresh DISCOVER before a separate 
   assert.doesNotMatch(namedFunctionSource(mainSource, "downloadPreparedExport"), /draftMutationIsLocked\s*\(/);
 });
 
-test("asset library projects confirmed text honestly before a real canvas exists", () => {
+test("one current-workbench projection keeps the compose header and asset library on the same draft", () => {
   const input = {
     contentTitle: "忙碌之后，先别硬扛",
     confirmedTitle: "日常三步处暑调养做法",
@@ -421,29 +421,35 @@ test("asset library projects confirmed text honestly before a real canvas exists
     topic: "处暑调养原文",
   };
   const before = structuredClone(input);
-  assert.deepEqual(currentLibraryProjection(input), {
+  assert.deepEqual(currentWorkbenchProjection(input), {
     title: "日常三步处暑调养做法",
     pageCount: 0,
-    status: "文字已确认 · 等待配图",
+    headerStatus: "文字已确认 · 等待配图",
+    libraryStatus: "文字已确认 · 等待配图",
     saved: false,
   });
   assert.deepEqual(input, before, "the library projection must not mutate DraftRecord or authoring state");
 
-  assert.deepEqual(currentLibraryProjection({ topic: "一段新原文" }), {
+  assert.deepEqual(currentWorkbenchProjection({ topic: "一段新原文" }), {
     title: "未命名新稿",
     pageCount: 0,
-    status: "等待生成文字",
+    headerStatus: "等待生成文字",
+    libraryStatus: "等待生成文字",
     saved: false,
   });
-  assert.deepEqual(currentLibraryProjection({ contentTitle: "真实两页稿", hasConfirmedContent: true, visiblePageCount: 2, currentInLibrary: true }), {
+  assert.deepEqual(currentWorkbenchProjection({ contentTitle: "真实两页稿", hasConfirmedContent: true, visiblePageCount: 2, generatedImageCount: 2, currentInLibrary: true }), {
     title: "真实两页稿",
     pageCount: 2,
-    status: "已在资产库，可继续补现实反馈",
+    headerStatus: "2 页 · 2 张图",
+    libraryStatus: "已在资产库，可继续补现实反馈",
     saved: true,
   });
-  assert.match(mainSource, /libraryProjection\.pageCount/);
-  assert.match(mainSource, /libraryProjection\.title/);
-  assert.match(mainSource, /libraryProjection\.status/);
+  assert.equal((mainSource.match(/const workbenchProjection = currentWorkbenchProjection\s*\(/g) || []).length, 1, "one projection must derive the current draft for every visible consumer");
+  assert.match(mainSource, /workbenchProjection\.pageCount/);
+  assert.ok((mainSource.match(/workbenchProjection\.title/g) || []).length >= 2, "the compose header and library must share one title projection");
+  assert.match(mainSource, /workbenchProjection\.headerStatus/);
+  assert.match(mainSource, /workbenchProjection\.libraryStatus/);
+  assert.doesNotMatch(mainSource, /<div className="file-title"><strong>\{isDraftInputOnly/);
 });
 
 test("a visible-canvas lineage split has one explicit zero-provider repair that preserves pages and pending", () => {

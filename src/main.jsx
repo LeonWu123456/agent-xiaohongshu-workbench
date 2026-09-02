@@ -341,7 +341,12 @@ async function resolveLocalBlobMedia(url) {
 
 function libraryContentsFromWorkspaceView(workspace) {
   return (workspace?.drafts || [])
-    .filter((draft) => Boolean(draft?.content_package?.saved_at))
+    .filter((draft) => Boolean(draft?.content_package?.saved_at) || (
+      /^image-recovery-[0-9a-f]{32}$/.test(draft?.draft_id || "")
+      && draft?.pending_image_operation == null
+      && draft?.generation_session?.text_confirmed === true
+      && draft?.content_package?.generation?.source_draft_id === draft?.generation_session?.assembled_draft_id
+    ))
     .map((draft) => ({
       ...draft.content_package,
       draft_record_id: draft.draft_id,
@@ -671,28 +676,33 @@ export function imageRecoveryClickMode({ pendingImageOperation, requestedDiscove
     : "DISCOVER_ONLY";
 }
 
-export function currentLibraryProjection({ contentTitle, confirmedTitle, textConfirmed, hasConfirmedContent, visiblePageCount, currentInLibrary, topic } = {}) {
+export function currentWorkbenchProjection({ contentTitle, confirmedTitle, textConfirmed, hasConfirmedContent, visiblePageCount, generatedImageCount, currentInLibrary, topic } = {}) {
   const confirmed = Boolean(textConfirmed && String(confirmedTitle || "").trim());
   if (confirmed && !hasConfirmedContent) {
     return Object.freeze({
       title: String(confirmedTitle).trim(),
       pageCount: 0,
-      status: "文字已确认 · 等待配图",
+      headerStatus: "文字已确认 · 等待配图",
+      libraryStatus: "文字已确认 · 等待配图",
       saved: false,
     });
   }
   if (!hasConfirmedContent) {
+    const status = String(topic || "").trim() ? "等待生成文字" : "等待原文";
     return Object.freeze({
       title: "未命名新稿",
       pageCount: 0,
-      status: String(topic || "").trim() ? "等待生成文字" : "等待原文",
+      headerStatus: status,
+      libraryStatus: status,
       saved: false,
     });
   }
+  const pageCount = Math.max(0, Number(visiblePageCount) || 0);
   return Object.freeze({
     title: String(contentTitle || "未命名新稿"),
-    pageCount: Math.max(0, Number(visiblePageCount) || 0),
-    status: currentInLibrary ? "已在资产库，可继续补现实反馈" : "尚未进入资产库；回到工作台点击保存草稿",
+    pageCount,
+    headerStatus: `${pageCount} 页 · ${Math.max(0, Number(generatedImageCount) || 0)} 张图`,
+    libraryStatus: currentInLibrary ? "已在资产库，可继续补现实反馈" : "尚未进入资产库；回到工作台点击保存草稿",
     saved: Boolean(currentInLibrary),
   });
 }
@@ -1072,12 +1082,13 @@ function App() {
       : hasConfirmedContent ? generatedImageCount : 0;
   const creatorJourney = deriveCreatorJourney({ topic, textDraft, textConfirmed, hasConfirmedContent, generatedImageCount: generatedForCurrentDraft, requiredImageCount, layoutIssueCount: 0, exportState });
   const currentInLibrary = Boolean(library.some((item) => item.draft_record_id === workspaceEnvelope.active_draft_id && item.saved_at === content.saved_at));
-  const libraryProjection = currentLibraryProjection({
+  const workbenchProjection = currentWorkbenchProjection({
     contentTitle: content.selectedTitle,
     confirmedTitle: textDraft?.selected_title,
     textConfirmed,
     hasConfirmedContent,
     visiblePageCount: visiblePages.length,
+    generatedImageCount,
     currentInLibrary,
     topic,
   });
@@ -3392,7 +3403,7 @@ function App() {
 
       <main>
         <header className="topbar">
-          <div className="file-title"><strong>{isDraftInputOnly ? "未命名新稿" : content.selectedTitle}</strong><span>{isDraftInputOnly ? (String(topic || "").trim() ? "等待生成文字" : "等待原文") : `${visiblePages.length} 页 · ${generatedImageCount} 张图`}</span></div>
+          <div className="file-title"><strong>{workbenchProjection.title}</strong><span>{workbenchProjection.headerStatus}</span></div>
           {provider && <button type="button" className={`provider-health is-${providerHealth.toLowerCase()}`} aria-label="生成服务设置" onClick={openProviderSettings}><SlidersHorizontal />{providerMeta?.provider_label || "生成服务"} · {providerStatusLabel}</button>}
           {storageIssue && <span className="storage-alert" title={storageIssue}>存储未落盘</span>}
           {view === "compose" && <div className="topbar-actions">
@@ -3535,7 +3546,7 @@ function App() {
 
         {view === "library" && <section className="library-view">
           <header><div><span className="section-kicker">LOCAL ASSET LIBRARY</span><h1>资产库</h1><p>保存创作，也记录发布后的真实结果；没有的数据保持 UNKNOWN。</p></div><div className="library-actions"><button onClick={downloadWorkspaceBackup}><Download />备份工作台</button><button onClick={() => workspaceImportRef.current?.click()}><Upload />恢复备份</button><input ref={workspaceImportRef} hidden type="file" accept="application/json,.json" onChange={restoreWorkspaceBackup} /><button onClick={openCreator}><Plus />新创作</button></div></header>
-          <section className={`library-current ${libraryProjection.saved ? "is-saved" : "is-unsaved"}`} aria-label="当前工作台保存状态"><div><span>当前工作台 · {libraryProjection.pageCount} 页</span><strong>{libraryProjection.title}</strong><small>{libraryProjection.status}</small></div><button type="button" onClick={() => { setView("compose"); setCreatorOpen(false); }}>返回编辑</button></section>
+          <section className={`library-current ${workbenchProjection.saved ? "is-saved" : "is-unsaved"}`} aria-label="当前工作台保存状态"><div><span>当前工作台 · {workbenchProjection.pageCount} 页</span><strong>{workbenchProjection.title}</strong><small>{workbenchProjection.libraryStatus}</small></div><button type="button" onClick={() => { setView("compose"); setCreatorOpen(false); }}>返回编辑</button></section>
           {library.length === 0 ? <div className="empty-library"><Library /><strong>还没有保存的内容</strong><span>回到工作台保存后，会留在这台 Mac。</span></div> : <>
             {library.length >= 3 && <AssetPageRows library={library} />}
             {realityFeedbackItem && <RealityFeedbackEditor item={realityFeedbackItem} onSave={(feedback) => saveRealityFeedback(realityFeedbackItem.draft_record_id, feedback)} onClose={() => setRealityFeedbackId(null)} />}

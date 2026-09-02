@@ -233,7 +233,12 @@ export function activeDraftRecord(value) {
 
 function libraryContentsFromNormalized(workspace) {
   return workspace.drafts
-    .filter((draft) => Boolean(draft.content_package.saved_at))
+    .filter((draft) => Boolean(draft.content_package.saved_at) || (
+      /^image-recovery-[0-9a-f]{32}$/.test(draft.draft_id)
+      && draft.pending_image_operation == null
+      && draft.generation_session?.text_confirmed === true
+      && draft.content_package.generation?.source_draft_id === draft.generation_session?.assembled_draft_id
+    ))
     .map((draft) => ({
       ...draft.content_package,
       draft_record_id: draft.draft_id,
@@ -2913,10 +2918,50 @@ function exactStringList(left, right) {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
-function assertFinalImageContent(snapshotRecord, contentPackage) {
+function confirmedDraftFields(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    draft_id: value.draft_id,
+    source_input: value.source_input,
+    pillar: value.pillar,
+    goal: value.goal,
+    titles: value.titles,
+    selected_title: value.selected_title,
+    body: value.body,
+    tags: value.tags,
+    recommended_image_count: value.recommended_image_count,
+    facts: value.facts,
+    risks: value.risks,
+    content_type: value.content_type || "knowledge_card",
+    style_lock: value.style_lock || null,
+    prompt_context: value.prompt_context || {},
+  };
+}
+
+function sameConfirmedDraft(left, right) {
+  const normalizedLeft = confirmedDraftFields(left);
+  const normalizedRight = confirmedDraftFields(right);
+  return normalizedLeft != null
+    && normalizedRight != null
+    && JSON.stringify(normalizedLeft) === JSON.stringify(normalizedRight);
+}
+
+function frozenImageTextDraft(snapshotRecord) {
+  const currentTextDraft = snapshotRecord.generation_session?.text_draft;
+  const frozen = snapshotRecord.pending_image_operation?.operation_snapshot?.confirmed_draft;
+  if (!currentTextDraft || !frozen) throw new TypeError("IMAGE_TRANSACTION_TEXT_NOT_CONFIRMED");
+  return {
+    ...currentTextDraft,
+    ...confirmedDraftFields(frozen),
+    schema: currentTextDraft.schema,
+    text_requirements: currentTextDraft.text_requirements,
+  };
+}
+
+function assertFinalImageContent(textDraftValue, contentPackage) {
   const content = checkedContent(contentPackage, "content_package");
-  const textDraft = snapshotRecord.generation_session?.text_draft;
-  if (!textDraft || snapshotRecord.generation_session.text_confirmed !== true) throw new TypeError("IMAGE_TRANSACTION_TEXT_NOT_CONFIRMED");
+  const textDraft = textDraftValue;
+  if (!textDraft) throw new TypeError("IMAGE_TRANSACTION_TEXT_NOT_CONFIRMED");
   if (content.generation?.source_draft_id !== textDraft.draft_id) throw new TypeError("IMAGE_TRANSACTION_RESULT_LINEAGE_MISMATCH");
   if (
     content.source_input !== textDraft.source_input
@@ -2928,6 +2973,34 @@ function assertFinalImageContent(snapshotRecord, contentPackage) {
   ) throw new TypeError("IMAGE_TRANSACTION_RESULT_COPY_MISMATCH");
   assertPersistentRefOnly(content);
   return { content, textDraft };
+}
+
+function completedImageTransactionResult({
+  receipt,
+  targetDraft,
+  recoveredDraft,
+  snapshotRecord,
+  mediaManifest,
+  textDraft,
+}) {
+  const committed = recoveredDraft || targetDraft;
+  if (
+    !committed
+    || committed.pending_image_operation != null
+    || committed.generation_session?.image_resume != null
+    || committed.generation_session?.assembled_draft_id !== textDraft.draft_id
+  ) return imageTransactionStopped({ code: "IMAGE_OPERATION_FINAL_READBACK_MISMATCH", receipt, operationSnapshot: snapshotRecord, mediaManifest });
+  return {
+    ...receipt,
+    target_draft: targetDraft,
+    target_draft_token: targetDraft == null ? null : draftRecordToken(targetDraft),
+    recovered_draft: recoveredDraft,
+    action: "COMPLETE",
+    operation_snapshot: snapshotRecord,
+    media_manifest: mediaManifest,
+    recovered_draft_id: recoveredDraft?.draft_id || null,
+    adopt_current_ui: recoveredDraft == null && receipt.workspace?.active_draft_id === targetDraft?.draft_id,
+  };
 }
 
 export async function commitDraftImageCompletionV3({
@@ -2948,7 +3021,9 @@ export async function commitDraftImageCompletionV3({
   const recoveredId = requiredString(recoveredDraftId, "recoveredDraftId");
   if (recoveredId === targetId) throw new TypeError("recoveredDraftId must differ from draftId");
   const timestamp = requiredString(updatedAt, "updatedAt");
-  const { content, textDraft } = assertFinalImageContent(snapshotRecord, contentPackage);
+  const currentTextDraft = snapshotRecord.generation_session?.text_draft;
+  const frozenTextDraft = frozenImageTextDraft(snapshotRecord);
+  const { content, textDraft } = assertFinalImageContent(frozenTextDraft, contentPackage);
   let mediaManifest;
   try {
     mediaManifest = await stageImageTransactionMedia({ mediaStore, mediaDelta, persistentValue: content });
@@ -2963,20 +3038,103 @@ export async function commitDraftImageCompletionV3({
   }
   const finalSession = {
     ...snapshotRecord.generation_session,
+    topic: textDraft.source_input,
+    pillar: textDraft.pillar,
+    goal: textDraft.goal,
+    text_requirements: textDraft.text_requirements,
+    text_draft: textDraft,
     text_confirmed: true,
     assembled_draft_id: textDraft.draft_id,
     image_resume: null,
   };
-  const buildRecord = ({ draftId: nextId, createdAt }) => createDraftRecordV3({
+  const buildRecord = ({ draftId: nextId, createdAt, saveToLibrary = false }) => createDraftRecordV3({
     draftId: nextId,
-    contentPackage: content,
+    contentPackage: saveToLibrary
+      ? { ...content, id: nextId, saved_at: timestamp }
+      : content,
     generationSession: finalSession,
     pendingImageOperation: null,
     createdAt,
     updatedAt: timestamp,
   });
   const desiredTarget = buildRecord({ draftId: targetId, createdAt: snapshotRecord.created_at });
-  const recovered = buildRecord({ draftId: recoveredId, createdAt: timestamp });
+  const recovered = buildRecord({ draftId: recoveredId, createdAt: timestamp, saveToLibrary: true });
+
+  if (!sameConfirmedDraft(currentTextDraft, textDraft)) {
+    if (typeof coordinator.snapshot !== "function" || typeof coordinator.fullCas !== "function") {
+      return imageTransactionStopped({ code: "WORKSPACE_V3_COORDINATOR_ATOMIC_RECOVERY_UNAVAILABLE", operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    const latest = coordinator.snapshot();
+    if (!latest.ok || !latest.workspace) {
+      return imageTransactionStopped({ code: latest.code || "WORKSPACE_V3_READ_FAILED", operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    const latestTarget = latest.workspace.drafts.find((draft) => draft.draft_id === targetId) || null;
+    const existingRecovered = latest.workspace.drafts.find((draft) => draft.draft_id === recoveredId) || null;
+    if (
+      latestTarget?.pending_image_operation == null
+      && existingRecovered
+      && sameImageTransactionResult(existingRecovered, recovered, { ignoreCreatedAt: true })
+    ) {
+      return completedImageTransactionResult({
+        receipt: {
+          ok: true,
+          code: "WORKSPACE_RECOVERED_DRAFT_ALREADY_APPLIED",
+          disposition: "NOOP_ALREADY_APPLIED",
+          workspace: latest.workspace,
+          workspace_token: latest.workspace_token,
+          active_draft: latest.workspace.drafts.find((draft) => draft.draft_id === latest.workspace.active_draft_id) || null,
+        },
+        targetDraft: latestTarget,
+        recoveredDraft: existingRecovered,
+        snapshotRecord,
+        mediaManifest,
+        textDraft,
+      });
+    }
+    if (
+      !latestTarget
+      || latestTarget.pending_image_operation?.operation_nonce !== snapshotRecord.pending_image_operation.operation_nonce
+    ) return imageTransactionStopped({ code: "WORKSPACE_DRAFT_CAS_CONFLICT", operationSnapshot: snapshotRecord, mediaManifest });
+    if (existingRecovered) {
+      return imageTransactionStopped({ code: "WORKSPACE_RECOVERED_DRAFT_COLLISION", operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    if (latest.workspace.drafts.length >= MAX_DRAFT_RECORDS) {
+      return imageTransactionStopped({ code: "WORKSPACE_DRAFT_LIMIT_REACHED", operationSnapshot: snapshotRecord, mediaManifest });
+    }
+    const releasedTarget = createDraftRecordV3({
+      draftId: latestTarget.draft_id,
+      contentPackage: latestTarget.content_package,
+      generationSession: latestTarget.generation_session == null
+        ? null
+        : { ...latestTarget.generation_session, image_resume: null },
+      pendingImageOperation: null,
+      createdAt: latestTarget.created_at,
+      updatedAt: timestamp,
+    });
+    const drafts = latest.workspace.drafts.map((draft) => draft.draft_id === targetId ? releasedTarget : draft);
+    const nextWorkspace = v3WorkspaceFromNormalized({
+      workspace: latest.workspace,
+      drafts: [recovered, ...drafts],
+      updatedAt: timestamp,
+    });
+    const receipt = await coordinator.fullCas({
+      expectedWorkspaceToken: latest.workspace_token,
+      workspace: nextWorkspace,
+      reason: `IMAGE_COMPLETE_RECOVERED_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+    });
+    if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord, mediaManifest });
+    const committedTarget = receipt.workspace?.drafts.find((draft) => draft.draft_id === targetId) || null;
+    const committedRecovered = receipt.workspace?.drafts.find((draft) => draft.draft_id === recoveredId) || null;
+    return completedImageTransactionResult({
+      receipt: { ...receipt, disposition: "RECOVERED_SIBLING_COMMITTED" },
+      targetDraft: committedTarget,
+      recoveredDraft: committedRecovered,
+      snapshotRecord,
+      mediaManifest,
+      textDraft,
+    });
+  }
+
   const receipt = await coordinator.mergeDraftCas({
     draftId: targetId,
     expectedDraftToken,
@@ -2987,21 +3145,14 @@ export async function commitDraftImageCompletionV3({
     reason: `IMAGE_COMPLETE_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
   });
   if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord, mediaManifest });
-  const committed = receipt.recovered_draft || receipt.target_draft;
-  if (
-    !committed
-    || committed.pending_image_operation != null
-    || committed.generation_session?.image_resume != null
-    || committed.generation_session?.assembled_draft_id !== textDraft.draft_id
-  ) return imageTransactionStopped({ code: "IMAGE_OPERATION_FINAL_READBACK_MISMATCH", receipt, operationSnapshot: snapshotRecord, mediaManifest });
-  return {
-    ...receipt,
-    action: "COMPLETE",
-    operation_snapshot: snapshotRecord,
-    media_manifest: mediaManifest,
-    recovered_draft_id: receipt.recovered_draft?.draft_id || null,
-    adopt_current_ui: receipt.recovered_draft == null && receipt.workspace?.active_draft_id === targetId,
-  };
+  return completedImageTransactionResult({
+    receipt,
+    targetDraft: receipt.target_draft,
+    recoveredDraft: receipt.recovered_draft,
+    snapshotRecord,
+    mediaManifest,
+    textDraft,
+  });
 }
 
 async function backupMediaEntry(value, path = "media_asset") {
