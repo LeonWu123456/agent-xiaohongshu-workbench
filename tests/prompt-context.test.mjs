@@ -45,3 +45,11 @@ test("malformed prompt memory fails safe and provider context drops unknown fiel
   assert.equal(context.values.source_topic, undefined);
   assert.deepEqual(promptContextLines(normalizePromptContext(context), TEXT_CONTEXT_FIELDS).slice(0, 1), [["口吻与人物声音", "温和"].join("：")]);
 });
+
+
+test("derived Reality learning context is provider-visible but not editable prompt memory", () => {
+  const context = promptContextForProvider({ reality_learning: "历史表现事实，仅作参考" });
+  assert.equal(context.values.reality_learning, "历史表现事实，仅作参考");
+  const memory = rememberPromptValues(createPromptMemory(), { reality_learning: "不要持久化" }, { now: "2026-09-03T00:00:00.000Z", idFactory: () => "id" });
+  assert.equal(memory.defaults.reality_learning, undefined);
+});

@@ -1,5 +1,9 @@
 export const PROMPT_CONTEXT_SCHEMA = "xiaoshimei.prompt-context.v1";
 export const PROMPT_MEMORY_SCHEMA = "xiaoshimei.prompt-memory.v1";
+export const REALITY_CONTEXT_FIELD = Object.freeze({
+  id: "reality_learning",
+  label: "历史现实反馈（仅作参考）",
+});
 
 export const TEXT_CONTEXT_FIELDS = [
   {
@@ -100,7 +104,7 @@ export const ALL_PROMPT_FIELDS = [
 ];
 
 const FIELD_IDS = new Set(ALL_PROMPT_FIELDS.map((field) => field.id));
-const CONTEXT_FIELD_IDS = new Set([...TEXT_CONTEXT_FIELDS, ...IMAGE_CONTEXT_FIELDS].map((field) => field.id));
+const CONTEXT_FIELD_IDS = new Set([...TEXT_CONTEXT_FIELDS, ...IMAGE_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD].map((field) => field.id));
 const MAX_VALUE_LENGTH = 4000;
 const MAX_HISTORY_PER_FIELD = 20;
 

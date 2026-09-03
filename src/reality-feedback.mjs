@@ -62,9 +62,54 @@ export function updateRealityFeedback(value, patch, now = new Date().toISOString
 
 export function realityFeedbackStatus(value) {
   const feedback = normalizeRealityFeedback(value);
-  if (!feedback) return "UNPUBLISHED";
+  if (!feedback || (!feedback.published_at && !feedback.published_url)) return "UNPUBLISHED";
   const filledWindows = REALITY_WINDOWS.filter((window) => REALITY_METRICS.some((metric) => feedback.snapshots[window][metric] !== UNKNOWN));
   if (filledWindows.length === REALITY_WINDOWS.length) return "7D_COMPLETE";
   if (filledWindows.length) return "TRACKING";
-  return feedback.published_at || feedback.published_url ? "PUBLISHED" : "UNPUBLISHED";
+  return "PUBLISHED";
+}
+
+
+function latestObservedWindow(feedback) {
+  for (const window of ["7d", "72h", "24h"]) {
+    if (REALITY_METRICS.some((metric) => feedback.snapshots[window][metric] !== UNKNOWN)) return window;
+  }
+  return null;
+}
+
+function compactMetric(label, value) {
+  return value === UNKNOWN ? null : `${label} ${value}`;
+}
+
+export function buildRealityLearningContext(items, { maxItems = 3, maxChars = 2000 } = {}) {
+  if (!Array.isArray(items) || !Number.isInteger(maxItems) || maxItems < 1 || maxItems > 5 || !Number.isInteger(maxChars) || maxChars < 200 || maxChars > 4000) return "";
+  const rows = [];
+  for (const item of items) {
+    let feedback;
+    try { feedback = normalizeRealityFeedback(item?.reality_feedback); }
+    catch { continue; }
+    if (!feedback || (!feedback.published_at && !feedback.published_url)) continue;
+    const window = latestObservedWindow(feedback);
+    const reflection = String(feedback.reflection || "").trim();
+    if (!window && !reflection) continue;
+    const title = String(item?.selectedTitle || item?.title || "历史稿件").trim().slice(0, 80) || "历史稿件";
+    const metrics = window ? feedback.snapshots[window] : null;
+    const metricText = metrics ? [
+      compactMetric("浏览", metrics.views), compactMetric("赞", metrics.likes), compactMetric("评论", metrics.comments),
+      compactMetric("收藏", metrics.saves), compactMetric("分享", metrics.shares), compactMetric("涨粉", metrics.followers_gained),
+    ].filter(Boolean).join("、") : "";
+    const recipes = [...new Set((Array.isArray(item?.pages) ? item.pages : []).map((page) => String(page?.layout_recipe || "").trim()).filter(Boolean))].slice(0, 6);
+    const updatedAt = String(feedback.updated_at || "");
+    rows.push({ updatedAt, text: `《${title}》${window ? `｜${window === "7d" ? "7天" : window === "72h" ? "72小时" : "24小时"}：${metricText}` : ""}${recipes.length ? `｜已用版式 ${recipes.join("/")}` : ""}${reflection ? `｜人工复盘：${reflection.slice(0, 500)}` : ""}` });
+  }
+  rows.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  if (!rows.length) return "";
+  const header = "历史现实反馈，仅作参考；可用于下一轮内容与视觉策略判断，但不得绕过当前文字确认、版式 QA、发布来源或付费调用边界。";
+  let output = header;
+  for (const row of rows.slice(0, maxItems)) {
+    const next = `${output}\n- ${row.text}`;
+    if (next.length > maxChars) break;
+    output = next;
+  }
+  return output === header ? "" : output;
 }

@@ -5,7 +5,7 @@ import { generateContentPackage, parseContentPackage, visualContentSha256 } from
 import { buildPublishZip } from "../src/publish-package.mjs";
 import { createProfileV2 } from "../src/profile-v2.mjs";
 import { buildWorkspaceBackup, parseWorkspaceBackup } from "../src/workspace-state.mjs";
-import { createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "../src/reality-feedback.mjs";
+import { buildRealityLearningContext, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "../src/reality-feedback.mjs";
 
 function pngHeader(width = 1080, height = 1440) {
   const bytes = new Uint8Array(24);
@@ -55,4 +55,48 @@ test("workspace backup preserves reality feedback but publish ZIP excludes it", 
   const zip = await JSZip.loadAsync(await (await buildPublishZip(content, [pngHeader(), pngHeader()], { createdAt: content.created_at })).arrayBuffer());
   const portable = JSON.parse(await zip.file("content.json").async("string"));
   assert.equal(portable.reality_feedback, undefined);
+});
+
+test("saved Reality feedback becomes bounded advisory context for the next generation", () => {
+  const feedback = updateRealityFeedback(createRealityFeedback("2026-09-01T00:00:00.000Z"), {
+    published_at: "2026-09-01T08:00:00.000Z",
+    snapshots: {
+      "24h": { views: 1000, likes: 80, comments: 12, saves: 65, shares: 9, followers_gained: 3 },
+      "72h": { views: 2200, likes: 160, comments: 26, saves: 130, shares: 20, followers_gained: 8 },
+      "7d": { views: 4000, likes: 280, comments: 45, saves: 240, shares: 36, followers_gained: 16 },
+    },
+    reflection: "收藏高，读者更喜欢清晰步骤；下次减少大图占比。",
+  }, "2026-09-03T00:00:00.000Z");
+  const context = buildRealityLearningContext([{
+    id: "draft-1", selectedTitle: "三步恢复专注", reality_feedback: feedback,
+    pages: [{ layout_recipe: "editorial-cover" }, { layout_recipe: "editorial-steps" }],
+  }]);
+  assert.match(context, /三步恢复专注/);
+  assert.match(context, /7天/);
+  assert.match(context, /收藏 240/);
+  assert.match(context, /editorial-steps/);
+  assert.match(context, /仅作参考/);
+});
+
+test("Reality learning context ignores empty feedback and stays bounded", () => {
+  const empty = createRealityFeedback("2026-09-01T00:00:00.000Z");
+  assert.equal(buildRealityLearningContext([{ selectedTitle: "空", reality_feedback: empty }]), "");
+  const items = Array.from({ length: 8 }, (_, index) => ({
+    selectedTitle: `稿件${index}`,
+    reality_feedback: updateRealityFeedback(createRealityFeedback(), { published_url: `https://www.xiaohongshu.com/explore/${index}`, snapshots: { "24h": { views: 100 + index, likes: 1, comments: 0, saves: 1, shares: 0, followers_gained: 0 } } }),
+    pages: [{ layout_recipe: "editorial-scene" }],
+  }));
+  const context = buildRealityLearningContext(items);
+  assert.ok(context.length <= 2000);
+  assert.equal((context.match(/稿件/g) || []).length, 3);
+});
+
+
+test("unpublished manual metrics remain storable but never become Reality learning evidence", () => {
+  const feedback = updateRealityFeedback(createRealityFeedback(), {
+    snapshots: { "24h": { views: 9999, likes: 999, comments: 99, saves: 999, shares: 99, followers_gained: 99 } },
+    reflection: "这是发布前假设，不是真实结果",
+  });
+  assert.equal(realityFeedbackStatus(feedback), "UNPUBLISHED");
+  assert.equal(buildRealityLearningContext([{ selectedTitle: "未发布稿", reality_feedback: feedback }]), "");
 });

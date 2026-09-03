@@ -61,7 +61,7 @@ import { generationFailureFeedback, providerHealthState } from "./generation-fee
 import { buildHistoricalDraftAdoption, derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
-import { REALITY_METRICS, REALITY_WINDOWS, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
+import { REALITY_METRICS, REALITY_WINDOWS, buildRealityLearningContext, createRealityFeedback, normalizeRealityFeedback, realityFeedbackStatus, updateRealityFeedback } from "./reality-feedback.mjs";
 import {
   COMPOSITION_MODES, DESIGN_PRESETS, applyCompositionMode, applyDesignPreset,
   backgroundCss, backgroundStyleForPage, compositionModeForPage,
@@ -1021,6 +1021,8 @@ function App() {
   const [researchBusy, setResearchBusy] = useState(false);
   const [researchMessage, setResearchMessage] = useState("");
   const [library, setLibrary] = useState(() => libraryContents(initialWorkspace));
+  const realityLearningContext = useMemo(() => buildRealityLearningContext(library), [library]);
+  const providerPromptContext = useMemo(() => promptContextForProvider({ ...promptValues, reality_learning: realityLearningContext }), [promptValues, realityLearningContext]);
   const [realityFeedbackId, setRealityFeedbackId] = useState(null);
   const [profile, setProfile] = useState(initialWorkspace.profile);
   const [authorityAdmission, setAuthorityAdmission] = useState(null);
@@ -2344,7 +2346,7 @@ function App() {
       setGenerationState("TEXT_GENERATING");
       clearGenerationFailure();
       setToast("请求已收到：现在只生成文字，不会产生图片费用");
-      const draft = await provider.generateTextDraft({ topic, text_requirements: textRequirements, prompt_context: promptContextForProvider(promptValues), pillar, goal, profile_contract: buildGenerationContract(profile) });
+      const draft = await provider.generateTextDraft({ topic, text_requirements: textRequirements, prompt_context: providerPromptContext, pillar, goal, profile_contract: buildGenerationContract(profile) });
       dispatchAuth({ type: "BUSINESS_SUCCESS", generation: authGeneration });
       mainAuthority.commit(operation, () => {
         setTextDraft(draft);
@@ -2516,7 +2518,7 @@ function App() {
     const frozenContent = contentRef.current;
     const frozenSession = currentAuthoringSession(null);
     const frozenTextDraft = baseRecord.pending_image_operation?.operation_snapshot?.confirmed_draft || textDraft;
-    const frozenPromptContext = promptContextForProvider(promptValues);
+    const frozenPromptContext = providerPromptContext;
     const frozenActionReferences = [...actionReferences];
     const frozenActionReferenceNote = actionReferenceNote;
     draftMutationLockRef.current = { draft_id: sourceDraftId, operation_id: mainOperation.id };
@@ -3317,7 +3319,7 @@ function App() {
         visual_action: currentPage.visual_action || "",
         image_prompt: currentPage.image_prompt || "",
         style_lock: content.content_strategy?.style_lock || textDraft?.style_lock || null,
-        prompt_context: promptContextForProvider(promptValues),
+        prompt_context: providerPromptContext,
       });
       mainAuthority.commit(operation, () => {
         setImageCandidates(result.candidates); setCandidateLoadState(Object.fromEntries(result.candidates.map((candidate) => [candidate.sha256, "LOADING"]))); setCandidateRunId(result.run_id); setCandidateState("READY");

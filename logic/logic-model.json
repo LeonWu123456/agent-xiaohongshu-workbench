@@ -2,14 +2,18 @@
   "schema": "mesy.living-logic-model.v1",
   "object_id": "xiaoshimei-studio-v2",
   "object_root": "Products/Xiaoshimei-Studio-v2",
-  "version": "0.3.2",
+  "version": "2.0.0",
+  "model_kind": "CURRENT_RUNTIME_BOUND",
+  "baseline_commit": "e03d8b80ad15b3bda04652e0fc910f763d203721",
+  "entrypoint": "src/main.jsx",
+  "stable_entry": "https://xiaoshimei-full-workbench.vercel.app/",
   "nodes": [
     {
       "id": "CAP-CREATE",
       "type": "CAP",
-      "label": "小红书图文端到端生产",
+      "label": "小师妹小红书图文端到端生产",
       "spec": {
-        "goal": "从研究/写作/配图/排版到发布包与现实反馈闭环"
+        "goal": "从研究/原文到发布包，再把真实发布反馈带入下一轮生成；所有可见结果保持可编辑、可恢复、可追溯"
       },
       "source_refs": [
         {
@@ -19,69 +23,86 @@
       ]
     },
     {
-      "id": "BLOCK-IMAGE",
-      "type": "BLOCK",
-      "label": "插图生成与母版切片",
+      "id": "ENTRY-STABLE",
+      "type": "ENTRY",
+      "label": "唯一公网稳定入口",
       "spec": {
-        "role": "把逐页语义转为可安全裁切图像资产"
+        "url": "https://xiaoshimei-full-workbench.vercel.app/",
+        "rule": "只认 stable alias；Preview/旧 deployment 不形成第二入口"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/deployment/PRODUCTION_RUNBOOK.md",
+          "kind": "contract"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/shareable-delivery.test.mjs",
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AUTH-ACCESS",
+      "type": "AUTH",
+      "label": "Studio Access Session",
+      "spec": {
+        "rule": "Production 使用 server-managed Provider secret；浏览器只持短期访问会话，不持生产 Key"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
           "kind": "code"
         }
       ]
     },
     {
-      "id": "FLOW-MOTHER-SHEET",
-      "type": "FLOW",
-      "label": "母版切片与媒体角色适配",
+      "id": "PAGE-COMPOSE",
+      "type": "PAGE",
+      "label": "新创作 / 当前工作台",
       "spec": {
-        "invariant": "不得用固定大内缩补救主体裁断；媒体角色决定 fit policy"
+        "role": "唯一创作面，承载五阶段旅程与当前 DraftRecord"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/creator-journey.mjs",
           "kind": "code"
         }
       ]
     },
     {
-      "id": "BLOCK-EDITOR",
-      "type": "BLOCK",
-      "label": "HTML/Fabric 编辑与导出",
+      "id": "PAGE-RESEARCH",
+      "type": "PAGE",
+      "label": "研究选题",
       "spec": {
-        "invariant": "两个编辑面都必须拒绝 blank/flat/image-region invalid export"
+        "role": "形成研究候选并回填到新创作，不拥有发布 Authority"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
           "kind": "code"
         }
       ]
     },
     {
-      "id": "FLOW-EXPORT",
-      "type": "FLOW",
-      "label": "发布包导出验证",
+      "id": "PAGE-LIBRARY",
+      "type": "PAGE",
+      "label": "资产库",
       "spec": {
-        "invariant": "导出前验证页面与图片区域非空且有真实变化"
+        "role": "回载 DraftRecord、管理备份、登记 Reality Feedback"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/export-image-verification.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
           "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "STATE-REALITY",
-      "type": "STATE",
-      "label": "24h/72h/7d Reality Feedback",
-      "spec": {
-        "desired": "现实反馈进入后续 layout/crop fitness"
-      },
-      "source_refs": [
+        },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/reality-feedback.mjs",
           "kind": "code"
@@ -89,100 +110,17 @@
       ]
     },
     {
-      "id": "POL-REALITY",
-      "type": "POLICY",
-      "label": "Reality > actor narrative",
+      "id": "PAGE-PROFILE",
+      "type": "PAGE",
+      "label": "账号档案",
       "spec": {
-        "rule": "实际导出与发布后数据必须由测试/对象回读证明"
+        "role": "Profile v2 与生成合同；约束身份/内容组合，不直接授予发布 Authority"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
-          "kind": "contract"
-        }
-      ]
-    },
-    {
-      "id": "EVD-IMAGE-TEST",
-      "type": "EVIDENCE",
-      "label": "母版切片回归测试",
-      "spec": {
-        "suite": "tests/mother-sheet.test.mjs"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/mother-sheet.test.mjs",
-          "kind": "test"
-        }
-      ]
-    },
-    {
-      "id": "EVD-EXPORT-TEST",
-      "type": "EVIDENCE",
-      "label": "导出图片真实性测试",
-      "spec": {
-        "suite": "tests/export-image-verification.test.mjs"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/export-image-verification.test.mjs",
-          "kind": "test"
-        }
-      ]
-    },
-    {
-      "id": "EVD-REALITY-TEST",
-      "type": "EVIDENCE",
-      "label": "现实反馈持久化测试",
-      "spec": {
-        "suite": "tests/reality-feedback.test.mjs"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/reality-feedback.test.mjs",
-          "kind": "test"
-        }
-      ]
-    },
-    {
-      "id": "BLOCK-AUTHORING",
-      "type": "BLOCK",
-      "label": "完整草稿与发布权威",
-      "spec": {
-        "invariant": "content_package 与 generation_session 同属一个 DraftRecord；切稿和发布均不得跨血缘"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/PRODUCT_CONTRACT.md",
-          "kind": "contract"
-        }
-      ]
-    },
-    {
-      "id": "STORE-WORKSPACE-ENVELOPE",
-      "type": "STORE",
-      "label": "草稿工作区唯一持久化权威",
-      "spec": {
-        "schema": "xiaoshimei.workspace-envelope.v2",
-        "invariant": "任一投影写入失败必须完整回滚，旧 split keys 只作兼容投影"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/profile-v2.mjs",
           "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "ACT-NEW-DRAFT",
-      "type": "ACT",
-      "label": "新创作原子切换并可返回",
-      "spec": {
-        "precondition": "当前 DraftRecord 可完整序列化并持久化",
-        "postcondition": "旧稿仍可回载；新稿为空白；上一稿入口可见",
-        "failure": "页面保持原稿，不清空任一 authoring 字段"
-      },
-      "source_refs": [
+        },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
           "kind": "code"
@@ -190,116 +128,41 @@
       ]
     },
     {
-      "id": "ACT-FOCUS-SOURCE",
-      "type": "ACT",
-      "label": "填写原文获得真实输入焦点",
+      "id": "FLOW-JOURNEY",
+      "type": "FLOW",
+      "label": "五阶段 Creator Journey",
       "spec": {
-        "postcondition": "document.activeElement 为 creator-source-input 且输入值可变"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-          "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "RULE-PUBLICATION-LINEAGE",
-      "type": "RULE",
-      "label": "当前确认文字是唯一发布权威",
-      "spec": {
-        "rule": "展示、复制、ZIP 与已准备链接共用同一 lineage token；任一字段漂移 fail closed，保存不受阻"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/publication-authority.mjs",
-          "kind": "code"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/publication-action-guard.mjs",
-          "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
-      "type": "RULE",
-      "label": "阻断的发布动作不得产生副作用",
-      "spec": {
-        "rule": "阻断态使用浏览器原生 disabled 与执行函数内 lineage 二次校验；复制、ZIP 和旧下载链接副作用调用数为 0，保存仍可用；允许态恰好执行 1 次"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-          "kind": "code"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/publication-action-guard.mjs",
-          "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "EVD-DRAFT-AUTHORITY-TEST",
-      "type": "EVIDENCE",
-      "label": "草稿保全与跨稿隔离消费者测试",
-      "spec": {
-        "suite": "tests/workspace-state-v2.test.mjs + browser new/create/return/reload/focus journey"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/workspace-state-v2.test.mjs",
-          "kind": "test"
-        }
-      ]
-    },
-    {
-      "id": "EVD-PUBLICATION-AUTHORITY-TEST",
-      "type": "EVIDENCE",
-      "label": "发布血缘阻断测试",
-      "spec": {
-        "suite": "tests/publication-authority.test.mjs + tests/publication-action-guard.test.mjs + tests/sol-workbench-contract.test.mjs + browser copy/export fail-closed journey"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/publication-authority.test.mjs",
-          "kind": "test"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/publication-action-guard.test.mjs",
-          "kind": "test"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/sol-workbench-contract.test.mjs",
-          "kind": "test"
-        }
-      ]
-    },
-    {
-      "id": "UI-PUBLISH-PACKAGE-SUMMARY",
-      "type": "UI",
-      "label": "发布包只读摘要",
-      "spec": {
-        "invariant": "新文字流程全程只有一份可编辑标题、正文与标签；第五步只投影已确认文字并提供复制、下载，不得出现第二套编辑表单"
-      },
-      "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-          "kind": "code"
-        }
-      ]
-    },
-    {
-      "id": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
-      "type": "RULE",
-      "label": "未组装草稿不得显露占位画布",
-      "spec": {
-        "rule": "authoring-only DraftRecord 即使为了可恢复而带 saved_at，也不能把 DEMO_TEMPLATE 占位页判成真实成稿；只有 Provider 内容或显式打开的 CONTENT_ONLY 历史成稿可显示画布与发布区"
+        "states": [
+          "原文",
+          "文字",
+          "配图",
+          "排版",
+          "发布包"
+        ],
+        "invariant": "状态由当前事实推导，不由 UI 标签自报"
       },
       "source_refs": [
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/creator-journey.mjs",
           "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "FLOW-TEXT",
+      "type": "FLOW",
+      "label": "文字草稿与人工确认",
+      "spec": {
+        "rule": "Provider 先产结构化 text draft；人工确认后才允许付费配图与发布血缘继续"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-contract.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/text-draft-policy.mjs",
+          "kind": "code"
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
@@ -308,19 +171,120 @@
       ]
     },
     {
-      "id": "FLOW-PUBLIC-IMAGE-STEPS",
+      "id": "FLOW-IMAGE",
       "type": "FLOW",
-      "label": "公网配图逐步生成与恢复",
+      "label": "Draft-bound 付费图片事务",
       "spec": {
-        "preflight": "确认文字后先规划，图片调用数为 0",
-        "invariant": "每个公网请求最多发起 1 次付费图片调用；已验收资产和下一步作业写入签名 checkpoint 后才继续",
-        "failure": "保留已完成资产与当前作业；只重试当前步，并明确提示当前失败步可能被 Provider 重复计费"
+        "protocol": [
+          "START",
+          "DISCOVER",
+          "STEP",
+          "COMPLETE"
+        ],
+        "max_paid_calls": 6,
+        "invariant": "同一 DraftRecord/confirmed copy 绑定；失败可续跑；冲突写 recovered sibling，不覆盖用户新编辑"
       },
       "source_refs": [
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
           "kind": "code"
         },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-contract.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "FLOW-EDITOR",
+      "type": "FLOW",
+      "label": "同一 Page Contract 的 HTML/Fabric 编辑",
+      "spec": {
+        "rule": "HTML smart flow 与 Fabric precision 共享 content/page state；不存在第二份作品 Authority"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/html-layout.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/smart-layout.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "FLOW-EXPORT",
+      "type": "FLOW",
+      "label": "发布包导出",
+      "spec": {
+        "rule": "导出前验证 visible canvas / image region / publication lineage；ZIP 是结果，不是 Authority"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/export-image-verification.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publication-action-guard.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "FLOW-REALITY",
+      "type": "FLOW",
+      "label": "Reality Feedback → 下一轮学习",
+      "spec": {
+        "rule": "只有带 published_at 或 published_url 的已发布稿件，才把 24h/72h/7d 指标与人工复盘蒸馏为最多3条/2000字符 advisory context；只能影响下一轮内容/视觉建议，不能绕过任何 deterministic gate"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/reality-feedback.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/prompt-context.mjs",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/ark-provider-core.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "API-PROVIDER",
+      "type": "API",
+      "label": "同源 Provider API",
+      "spec": {
+        "routes": [
+          "access-session",
+          "config",
+          "health",
+          "text-draft",
+          "generate-images",
+          "assets/:run/:sha"
+        ],
+        "production_credential": "SERVER_MANAGED"
+      },
+      "source_refs": [
         {
           "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
           "kind": "code"
@@ -332,18 +296,14 @@
       ]
     },
     {
-      "id": "STORE-IMAGE-RUN-CHECKPOINT",
+      "id": "STORE-WORKSPACE",
       "type": "STORE",
-      "label": "配图断点随 DraftRecord 持久化",
+      "label": "Workspace v3 唯一稿件权威",
       "spec": {
-        "schema": "xiaoshimei.public-image-run.v1",
-        "invariant": "checkpoint 绑定 draft hash、模式、页数与 run id；服务端 HMAC 验签；API Key 永不进入 DraftRecord、备份或浏览器持久化"
+        "schema": "xiaoshimei.workspace-envelope.v3",
+        "rule": "Web Locks + CAS；DraftRecord 同时携带 content package 与 generation session；投影失败整笔回滚"
       },
       "source_refs": [
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
-          "kind": "code"
-        },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
           "kind": "code"
@@ -351,11 +311,26 @@
       ]
     },
     {
-      "id": "RULE-SERVER-MANAGED-CREDENTIAL",
-      "type": "RULE",
-      "label": "生产 Provider 凭据只在服务端",
+      "id": "STORE-MEDIA",
+      "type": "STORE",
+      "label": "IndexedDB 内容寻址媒体库",
       "spec": {
-        "rule": "稳定域名优先使用 Vercel Sensitive Environment Variable；浏览器不接收、不发送、不持久化 Key，也不要求每个标签页重填；BYOK 只保留为兼容模式"
+        "schema": "xiaoshimei-media-v1",
+        "rule": "持久结构只保存 xiaoshimei-media://sha256 refs；bytes/hash/MIME exact readback"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "STORE-LEDGER",
+      "type": "STORE",
+      "label": "Server image ledger",
+      "spec": {
+        "role": "跨实例保护 paid image side effect 与 7d recovery；不替代浏览器稿件/媒体长期权威"
       },
       "source_refs": [
         {
@@ -363,318 +338,320 @@
           "kind": "code"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/scripts/attest-upstash-image-ledger.mjs",
           "kind": "code"
         }
       ]
     },
     {
-      "id": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
-      "type": "EVIDENCE",
-      "label": "唯一文案、服务端凭据与断点恢复闭环证据",
+      "id": "RULE-PUBLICATION",
+      "type": "RULE",
+      "label": "Confirmed Text 是唯一 Publication Authority",
       "spec": {
-        "suite": "tests/public-image-run.test.mjs + tests/cloud-provider.test.mjs + tests/foundation.test.mjs + tests/generation-feedback.test.mjs + tests/sol-workbench-contract.test.mjs + same-deployment browser journey",
-        "release_rule": "本地测试与构建只证明 mechanism/package；Preview 与稳定域名同 identity 浏览器旅程未通过时，不得判 production/reality PASS"
+        "rule": "content source draft、confirmed copy、active/assembled lineage 任一漂移即 BLOCK；pending recovery 不得绕过"
       },
       "source_refs": [
         {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/public-image-run.test.mjs",
-          "kind": "test"
+          "path": "Products/Xiaoshimei-Studio-v2/src/publication-authority.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-REALITY",
+      "type": "RULE",
+      "label": "Reality 只提供证据，不直接授予布局/发布 Authority",
+      "spec": {
+        "rule": "历史表现是 advisory evidence；最终输出仍过 current content contract、layout QA、export QA、publication lineage"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/reality-feedback.mjs",
+          "kind": "code"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/cloud-provider.test.mjs",
-          "kind": "test"
+          "path": "Products/Xiaoshimei-Studio-v2/src/layout-qa.mjs",
+          "kind": "code"
+        }
+      ]
+    },
+    {
+      "id": "RULE-DELIVERY",
+      "type": "RULE",
+      "label": "交付状态分层",
+      "spec": {
+        "states": [
+          "LOCAL_ONLY",
+          "BLOCKED",
+          "HANDOFF_READY",
+          "CONSUMER_VALIDATED"
+        ],
+        "rule": "工具最多签发 HANDOFF_READY；CONSUMER_VALIDATED 只能由独立真实使用者证明"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/scripts/verify-shareable-delivery.mjs",
+          "kind": "code"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/sol-workbench-contract.test.mjs",
-          "kind": "test"
+          "path": "Products/Xiaoshimei-Studio-v2/deployment/PRODUCTION_RUNBOOK.md",
+          "kind": "contract"
+        }
+      ]
+    },
+    {
+      "id": "DEPLOY-VERCEL",
+      "type": "DEPLOY",
+      "label": "GitHub main → Vercel Production → stable alias",
+      "spec": {
+        "source_authority": "LeonWu123456/agent-xiaohongshu-workbench main",
+        "project": "xiaoshimei-full-workbench",
+        "rule": "exact committed build + health/readiness + rollback readback"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/.github/workflows/quality.yml",
+          "kind": "code"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/deployment/PRODUCTION_RUNBOOK.md",
+          "kind": "contract"
+        }
+      ]
+    },
+    {
+      "id": "EVD-REGRESSION",
+      "type": "EVIDENCE",
+      "label": "完整代码回归与生产构建",
+      "spec": {
+        "required": [
+          "npm test",
+          "npm run build"
+        ]
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/package.json",
+          "kind": "contract"
+        }
+      ]
+    },
+    {
+      "id": "EVD-DELIVERY",
+      "type": "EVIDENCE",
+      "label": "稳定入口、Provider health 与 exact artifact readback",
+      "spec": {
+        "required": [
+          "stable HTTP 200",
+          "exact JS/CSS",
+          "SERVER_MANAGED",
+          "STUDIO_ACCESS_SESSION",
+          "image ledger attested candidate commit"
+        ]
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/scripts/verify-shareable-delivery.mjs",
+          "kind": "code"
         }
       ]
     }
   ],
   "relations": [
     {
-      "from": "CAP-CREATE",
-      "to": "BLOCK-IMAGE",
-      "type": "contains"
+      "from": "ENTRY-STABLE",
+      "to": "AUTH-ACCESS",
+      "type": "gates"
+    },
+    {
+      "from": "AUTH-ACCESS",
+      "to": "PAGE-COMPOSE",
+      "type": "opens"
     },
     {
       "from": "CAP-CREATE",
-      "to": "BLOCK-EDITOR",
+      "to": "PAGE-COMPOSE",
       "type": "contains"
     },
     {
       "from": "CAP-CREATE",
-      "to": "STATE-REALITY",
+      "to": "PAGE-RESEARCH",
       "type": "contains"
     },
     {
       "from": "CAP-CREATE",
-      "to": "BLOCK-AUTHORING",
+      "to": "PAGE-LIBRARY",
       "type": "contains"
     },
     {
-      "from": "BLOCK-AUTHORING",
-      "to": "STORE-WORKSPACE-ENVELOPE",
+      "from": "CAP-CREATE",
+      "to": "PAGE-PROFILE",
       "type": "contains"
     },
     {
-      "from": "BLOCK-AUTHORING",
-      "to": "ACT-NEW-DRAFT",
-      "type": "contains"
+      "from": "PAGE-RESEARCH",
+      "to": "PAGE-COMPOSE",
+      "type": "feeds"
     },
     {
-      "from": "BLOCK-AUTHORING",
-      "to": "ACT-FOCUS-SOURCE",
-      "type": "contains"
+      "from": "PAGE-COMPOSE",
+      "to": "FLOW-JOURNEY",
+      "type": "runs"
     },
     {
-      "from": "BLOCK-AUTHORING",
-      "to": "RULE-PUBLICATION-LINEAGE",
-      "type": "constrained_by"
+      "from": "FLOW-JOURNEY",
+      "to": "FLOW-TEXT",
+      "type": "step"
     },
     {
-      "from": "BLOCK-IMAGE",
-      "to": "FLOW-MOTHER-SHEET",
-      "type": "contains"
+      "from": "FLOW-TEXT",
+      "to": "FLOW-IMAGE",
+      "type": "confirmed_then"
     },
     {
-      "from": "BLOCK-EDITOR",
+      "from": "FLOW-IMAGE",
+      "to": "FLOW-EDITOR",
+      "type": "complete_then"
+    },
+    {
+      "from": "FLOW-EDITOR",
       "to": "FLOW-EXPORT",
-      "type": "contains"
+      "type": "verified_then"
     },
     {
-      "from": "FLOW-MOTHER-SHEET",
-      "to": "POL-REALITY",
-      "type": "constrained_by"
+      "from": "FLOW-TEXT",
+      "to": "API-PROVIDER",
+      "type": "calls"
     },
     {
-      "from": "FLOW-EXPORT",
-      "to": "POL-REALITY",
-      "type": "constrained_by"
+      "from": "FLOW-IMAGE",
+      "to": "API-PROVIDER",
+      "type": "calls"
     },
     {
-      "from": "STATE-REALITY",
-      "to": "POL-REALITY",
-      "type": "constrained_by"
+      "from": "FLOW-IMAGE",
+      "to": "STORE-LEDGER",
+      "type": "protected_by"
     },
     {
-      "from": "FLOW-MOTHER-SHEET",
-      "to": "EVD-IMAGE-TEST",
-      "type": "verified_by"
+      "from": "FLOW-IMAGE",
+      "to": "STORE-MEDIA",
+      "type": "materializes_to"
     },
     {
-      "from": "FLOW-EXPORT",
-      "to": "EVD-EXPORT-TEST",
-      "type": "verified_by"
+      "from": "PAGE-COMPOSE",
+      "to": "STORE-WORKSPACE",
+      "type": "reads_writes"
     },
     {
-      "from": "STATE-REALITY",
-      "to": "EVD-REALITY-TEST",
-      "type": "verified_by"
+      "from": "PAGE-LIBRARY",
+      "to": "STORE-WORKSPACE",
+      "type": "reads_writes"
     },
     {
-      "from": "STORE-WORKSPACE-ENVELOPE",
-      "to": "EVD-DRAFT-AUTHORITY-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "ACT-NEW-DRAFT",
-      "to": "EVD-DRAFT-AUTHORITY-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "ACT-FOCUS-SOURCE",
-      "to": "EVD-DRAFT-AUTHORITY-TEST",
-      "type": "verified_by"
+      "from": "STORE-WORKSPACE",
+      "to": "STORE-MEDIA",
+      "type": "references"
     },
     {
       "from": "FLOW-EXPORT",
-      "to": "RULE-PUBLICATION-LINEAGE",
+      "to": "RULE-PUBLICATION",
+      "type": "gated_by"
+    },
+    {
+      "from": "PAGE-LIBRARY",
+      "to": "FLOW-REALITY",
+      "type": "records"
+    },
+    {
+      "from": "FLOW-REALITY",
+      "to": "FLOW-TEXT",
+      "type": "advises_next"
+    },
+    {
+      "from": "FLOW-REALITY",
+      "to": "FLOW-IMAGE",
+      "type": "advises_next"
+    },
+    {
+      "from": "FLOW-REALITY",
+      "to": "RULE-REALITY",
       "type": "constrained_by"
     },
     {
-      "from": "RULE-PUBLICATION-LINEAGE",
-      "to": "EVD-PUBLICATION-AUTHORITY-TEST",
+      "from": "DEPLOY-VERCEL",
+      "to": "ENTRY-STABLE",
+      "type": "serves"
+    },
+    {
+      "from": "DEPLOY-VERCEL",
+      "to": "EVD-REGRESSION",
+      "type": "requires"
+    },
+    {
+      "from": "ENTRY-STABLE",
+      "to": "EVD-DELIVERY",
       "type": "verified_by"
     },
     {
-      "from": "RULE-PUBLICATION-LINEAGE",
-      "to": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
-      "type": "constrained_by"
-    },
-    {
-      "from": "RULE-PUBLICATION-ZERO-SIDE-EFFECT",
-      "to": "EVD-PUBLICATION-AUTHORITY-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "BLOCK-AUTHORING",
-      "to": "UI-PUBLISH-PACKAGE-SUMMARY",
-      "type": "contains"
-    },
-    {
-      "from": "UI-PUBLISH-PACKAGE-SUMMARY",
-      "to": "RULE-PUBLICATION-LINEAGE",
-      "type": "constrained_by"
-    },
-    {
-      "from": "UI-PUBLISH-PACKAGE-SUMMARY",
-      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "BLOCK-AUTHORING",
-      "to": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
-      "type": "constrained_by"
-    },
-    {
-      "from": "RULE-AUTHORING-SNAPSHOT-NO-CANVAS",
-      "to": "EVD-DRAFT-AUTHORITY-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "BLOCK-IMAGE",
-      "to": "FLOW-PUBLIC-IMAGE-STEPS",
-      "type": "contains"
-    },
-    {
-      "from": "FLOW-PUBLIC-IMAGE-STEPS",
-      "to": "STORE-IMAGE-RUN-CHECKPOINT",
-      "type": "writes"
-    },
-    {
-      "from": "FLOW-PUBLIC-IMAGE-STEPS",
-      "to": "RULE-SERVER-MANAGED-CREDENTIAL",
-      "type": "constrained_by"
-    },
-    {
-      "from": "FLOW-PUBLIC-IMAGE-STEPS",
-      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "STORE-IMAGE-RUN-CHECKPOINT",
-      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
-      "type": "verified_by"
-    },
-    {
-      "from": "RULE-SERVER-MANAGED-CREDENTIAL",
-      "to": "EVD-PUBLIC-PRODUCTION-CLOSURE-TEST",
-      "type": "verified_by"
+      "from": "EVD-DELIVERY",
+      "to": "RULE-DELIVERY",
+      "type": "feeds"
     }
   ],
   "problems": [
     {
       "id": "D08",
       "state": "RESOLVED",
-      "claim": "固定 2% 内缩不识别真实网格线和背景",
-      "target_nodes": [
-        "FLOW-MOTHER-SHEET"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/mother-sheet.mjs",
-        "pattern": "MOTHER_SHEET_TILE_INSET_RATIO = 0.02",
-        "claim_true_when": "present"
-      },
-      "solution_ref": "TSK-260827-1640/Evidence/xiaoshimei-targeted-tests.log"
+      "claim": "固定内缩无法识别真实网格与背景",
+      "solution_ref": "tests/mother-sheet.test.mjs"
     },
     {
       "id": "D13",
       "state": "RESOLVED",
-      "claim": "Fabric 导出缺 blank/flat/image-region QA",
-      "target_nodes": [
-        "FLOW-EXPORT"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
-        "pattern": "verifyExportDataUrl",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": "TSK-260827-1640/Evidence/xiaoshimei-targeted-tests.log"
+      "claim": "编辑器导出缺 blank/flat/image-region QA",
+      "solution_ref": "tests/export-image-verification.test.mjs"
     },
     {
       "id": "D20",
-      "state": "OPEN",
-      "claim": "Reality feedback 已有但未进入 layout/crop fitness",
-      "target_nodes": [
-        "STATE-REALITY"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/layout-qa.mjs",
-        "pattern": "reality_feedback",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": null
+      "state": "RESOLVED",
+      "claim": "Reality feedback 保存后没有进入下一轮判断",
+      "solution_ref": "src/reality-feedback.mjs::buildRealityLearningContext + tests/reality-feedback.test.mjs"
+    },
+    {
+      "id": "D32",
+      "state": "RESOLVED",
+      "claim": "旧 src/App.jsx 是未被 Vite entry 引用的第二工作台影子",
+      "solution_ref": "src/App.jsx removed; src/main.jsx is unique App entry"
     },
     {
       "id": "D33",
-      "state": "REPAIR_IN_PROGRESS",
-      "claim": "新创作会丢未组装文字稿，恢复 authoring-only 稿会把占位画布误判成成稿，旧 content 与 generation session 可跨稿串联，填写原文无真实焦点后置条件",
-      "target_nodes": [
-        "STORE-WORKSPACE-ENVELOPE",
-        "ACT-NEW-DRAFT",
-        "ACT-FOCUS-SOURCE",
-        "RULE-PUBLICATION-LINEAGE",
-        "RULE-AUTHORING-SNAPSHOT-NO-CANVAS"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-        "pattern": "derivePublicationAuthority",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": "tests/workspace-state-v2.test.mjs + tests/creator-journey.test.mjs + tests/publication-authority.test.mjs + stable-domain browser readback"
+      "state": "RESOLVED",
+      "claim": "跨稿 authoring/session 串联与新稿恢复边界不安全",
+      "solution_ref": "src/workspace-state.mjs + tests/workspace-state-v3.test.mjs + tests/main-authority.test.mjs"
     },
     {
       "id": "D34",
-      "state": "REPAIR_IN_PROGRESS",
-      "claim": "文字草稿与发布文案同时提供独立编辑面，导致同一作品存在两份内容权威",
-      "target_nodes": [
-        "RULE-PUBLICATION-LINEAGE",
-        "UI-PUBLISH-PACKAGE-SUMMARY"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-        "pattern": "confirmed authoring exposes one editable copy",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": "tests/sol-workbench-contract.test.mjs + same-deployment browser journey"
+      "state": "RESOLVED",
+      "claim": "文字草稿与发布文案曾形成双编辑 Authority",
+      "solution_ref": "src/publication-authority.mjs + tests/sol-workbench-contract.test.mjs"
     },
     {
       "id": "D35",
-      "state": "REPAIR_IN_PROGRESS",
-      "claim": "公网配图单请求可能运行到 300 秒超时，浏览器显示可恢复但 API 不接受恢复 checkpoint，已完成图片无法安全续跑",
-      "target_nodes": [
-        "FLOW-PUBLIC-IMAGE-STEPS",
-        "STORE-IMAGE-RUN-CHECKPOINT"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/src/provider-contract.mjs",
-        "pattern": "resume_checkpoint",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": "tests/public-image-run.test.mjs + tests/cloud-provider.test.mjs + stable-domain interrupted-generation readback"
+      "state": "RESOLVED",
+      "claim": "公网付费图片调用缺跨请求可恢复协议",
+      "solution_ref": "src/public-image-run.mjs + tests/public-image-run.test.mjs + tests/cloud-provider.test.mjs"
     },
     {
       "id": "D36",
-      "state": "REPAIR_IN_PROGRESS",
-      "claim": "稳定入口把生产 Key 放在标签页内存，刷新或换标签页就要求重新填写，浏览器承担了不该拥有的生产凭据",
-      "target_nodes": [
-        "RULE-SERVER-MANAGED-CREDENTIAL"
-      ],
-      "probe": {
-        "kind": "literal",
-        "path": "Products/Xiaoshimei-Studio-v2/api/provider.mjs",
-        "pattern": "process.env.ARK_API_KEY",
-        "claim_true_when": "absent"
-      },
-      "solution_ref": "tests/cloud-provider.test.mjs + tests/foundation.test.mjs + stable-domain fresh-tab health/readback"
+      "state": "RESOLVED",
+      "claim": "Production 凭据曾落在浏览器标签页",
+      "solution_ref": "api/provider.mjs + tests/cloud-provider.test.mjs + stable /api/provider/health runtime readback"
     }
+  ],
+  "known_boundaries": [
+    "CONSUMER_VALIDATED requires an independent real-user/device journey and cannot be minted by the product verifier.",
+    "Reality feedback is advisory input only; deterministic layout/export/publication gates retain authority.",
+    "Third-party Node DEP0169 url.parse deprecation warning observed in Vercel health logs is dependency-owned and does not alter HTTP/provider readiness; upgrade only under a separately verified dependency change."
   ]
 }

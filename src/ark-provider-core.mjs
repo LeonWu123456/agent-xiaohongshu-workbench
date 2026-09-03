@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { generateContentPackage, parseContentPackage } from "./content-engine.mjs";
 import { fitGeneratedPage } from "./layout-qa.mjs";
-import { IMAGE_CONTEXT_FIELDS, TEXT_CONTEXT_FIELDS, promptContextLines } from "./prompt-context.mjs";
+import { IMAGE_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD, TEXT_CONTEXT_FIELDS, promptContextLines } from "./prompt-context.mjs";
 import { PANEL_CONTENT_ROLES, SHOT_ROLES, XHS_CONTENT_TYPES, XHS_PAGE_ROLES, buildContentStrategy, normalizeHighlightPhrases, normalizePanelContentRole, normalizeShotRole, normalizeXhsContentType, normalizeXhsPageRole } from "./content-strategy.mjs";
 import { applyCompositionMode } from "./design-presets.mjs";
 import { INFO_PANEL_SURFACE_COLOR, createInfoPanelsFromPlan } from "./infographic-panels.mjs";
@@ -499,7 +499,7 @@ export function buildArkDraftTextRequest(input, model) {
     `读者动作：${nonEmptyString(input.goal, "input.goal")}`,
     `主题或原文：${topic}`,
     `用户对文本的额外要求（可能为空）：${String(input.text_requirements || "").trim() || "无"}`,
-    `用户填写的文字上下文：\n${promptContextLines(input.prompt_context, TEXT_CONTEXT_FIELDS).join("\n") || "无"}`,
+    `用户填写的文字上下文：\n${promptContextLines(input.prompt_context, [...TEXT_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD]).join("\n") || "无"}`,
     `上一次质量检查反馈（首次为空）：${String(input.quality_feedback || "").trim() || "无"}`,
     `相关Profile合同：${JSON.stringify(scoped)}`,
   ].join("\n\n");
@@ -547,7 +547,7 @@ export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback
     `确认正文：${draft.body}`,
     `确认标签：${draft.tags.join("、")}`,
     `原始主题：${draft.source_input}`,
-    `用户填写的图片上下文：\n${promptContextLines(draft.prompt_context, IMAGE_CONTEXT_FIELDS).join("\n") || "无"}`,
+    `用户填写的图片上下文：\n${promptContextLines(draft.prompt_context, [...IMAGE_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD]).join("\n") || "无"}`,
     `用户补充的动作参考说明（只约束动作，不改变人物身份与发布文字）：${String(referenceNote || "").trim().slice(0, 500) || "无"}`,
     `上一次质量检查反馈（首次为空）：${String(qualityFeedback || "").trim() || "无"}`,
   ].join("\n\n");
@@ -749,7 +749,7 @@ export function deriveArkVisualActionContract(page) {
 }
 
 export function composeArkPageImagePrompt(page, promptContext, strategy = {}) {
-  const contextLines = promptContextLines(promptContext, IMAGE_CONTEXT_FIELDS);
+  const contextLines = promptContextLines(promptContext, [...IMAGE_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD]);
   const panels = Array.isArray(page?.panels) ? page.panels : [];
   const panelContract = panels.length ? [
     `信息分镜合同：本页包含${panels.length}组插图，工作台会按以下顺序裁切并配置原生文字。`,
