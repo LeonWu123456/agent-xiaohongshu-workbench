@@ -49,6 +49,7 @@ import {
   materializePersistentMediaRefsV3,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
+  parkStalePendingImageOperationV3,
   reconcilePersistentLibraryView,
   rebuildPendingImageStartV3,
   readWorkspaceSnapshot,
@@ -710,10 +711,18 @@ export function authoringInputLockReason({ workspaceReady, workspaceReadOnly } =
   return null;
 }
 
-export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, activeDraftId, imageOperationDraftId } = {}) {
+export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, pendingLocation = null, pendingTextDraftId = null, currentTextDraftId = null, activeDraftId, imageOperationDraftId } = {}) {
   const workspaceReason = authoringInputLockReason({ workspaceReady, workspaceReadOnly });
   if (workspaceReason) return workspaceReason;
-  if (pendingImageOperation || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
+  const pendingTargetsCurrentText = Boolean(pendingImageOperation) && (
+    pendingLocation == null
+    || (pendingLocation === "ACTIVE" && (
+      !pendingTextDraftId
+      || !currentTextDraftId
+      || pendingTextDraftId === currentTextDraftId
+    ))
+  );
+  if (pendingTargetsCurrentText || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
   return null;
 }
 
@@ -1109,12 +1118,21 @@ function App() {
     : null;
   const imageOperationRecord = imageOperationAuthority?.record || (workspaceReady ? activeDraftRecordV3(workspaceEnvelopeRef.current) : null);
   const pendingImageOperation = imageOperationRecord?.pending_image_operation || null;
-  const effectiveImageResume = pendingImageOperation == null ? imageResume : imageOperationRecord?.generation_session?.image_resume || imageResume;
-  const imageAuthorityTextDraft = pendingImageOperation?.operation_snapshot?.confirmed_draft || textDraft;
+  const pendingTextDraftId = pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || null;
+  const currentTextDraftId = textDraft?.draft_id || null;
+  const pendingTargetsCurrentText = Boolean(pendingImageOperation)
+    && imageOperationAuthority?.location === "ACTIVE"
+    && (!pendingTextDraftId || !currentTextDraftId || pendingTextDraftId === currentTextDraftId);
+  const currentPendingImageOperation = pendingTargetsCurrentText ? pendingImageOperation : null;
+  const stalePendingImageOperation = pendingImageOperation && !pendingTargetsCurrentText ? pendingImageOperation : null;
+  const stalePendingNeedsParking = Boolean(stalePendingImageOperation && imageOperationAuthority?.location === "ACTIVE");
+  const effectiveImageResume = currentPendingImageOperation == null ? imageResume : imageOperationRecord?.generation_session?.image_resume || imageResume;
+  const recoveryImageResume = stalePendingImageOperation ? imageOperationRecord?.generation_session?.image_resume || null : null;
+  const imageAuthorityTextDraft = currentPendingImageOperation?.operation_snapshot?.confirmed_draft || textDraft;
   const workspaceReadOnly = !workspaceReady || workspaceWriteBlocked;
   const authoringInputLocked = workspaceReadOnly || workspaceTransitioning;
   const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
-  const imageLaneLocked = authoringInputLocked || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
+  const imageLaneLocked = authoringInputLocked || Boolean(currentPendingImageOperation) || generationState === "IMAGE_GENERATING";
   const draftEditingLocked = workspaceReadOnly || workspaceTransitioning || generationState === "IMAGE_GENERATING";
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
     && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
@@ -1178,7 +1196,7 @@ function App() {
     activeDraftId: workspaceEnvelope.active_draft_id,
     pendingImageOperation,
   }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly, workspaceEnvelope.active_draft_id, pendingImageOperation]);
-  const pendingRecoveryDiscoveryOnly = Boolean(pendingImageOperation);
+  const pendingRecoveryDiscoveryOnly = Boolean(currentPendingImageOperation);
   const paidRecoveryContinuationReady = Boolean(pendingImageOperation
     && recoveryDiscoveryReceipt?.active_draft_id === imageOperationAuthority?.source_draft_id
     && recoveryDiscoveryReceipt?.operation_nonce === pendingImageOperation.operation_nonce
@@ -1338,12 +1356,15 @@ function App() {
       workspaceReady: workspaceReadyRef.current,
       workspaceReadOnly: workspaceWriteBlockedRef.current,
       pendingImageOperation: durablePending,
+      pendingLocation: durableAuthority?.location || null,
+      pendingTextDraftId: durablePending?.operation_snapshot?.confirmed_draft?.draft_id || null,
+      currentTextDraftId: textDraft?.draft_id || null,
       activeDraftId,
       imageOperationDraftId: draftMutationLockRef.current?.draft_id,
     });
     if (!reason) return false;
     setToast(reason === "PENDING_IMAGE_OPERATION_INPUT_FROZEN"
-      ? "同一次配图仍在恢复；图片参数暂时锁定，文字、排版、保存与导出可继续"
+      ? "当前文字的同一次配图仍在恢复；图片参数暂时锁定，文字、排版、保存与导出可继续"
       : "工作台当前为只读；不能修改图片输入");
     return true;
   }
@@ -2453,6 +2474,67 @@ function App() {
     return true;
   }
 
+  async function parkOldImageRecovery() {
+    if (!stalePendingImageOperation) { setToast("没有需要分离的旧配图任务"); return; }
+    if (!stalePendingNeedsParking) { setToast("旧配图任务已经独立保存在资产库，不再锁定当前稿"); return; }
+    if (workspaceMutationIsLocked()) return;
+    const operation = mainAuthority.capture("PARK_STALE_IMAGE_RECOVERY", { envelopeScoped: true });
+    if (!workspaceTransitionLock.acquire(operation, workspaceEnvelopeRef.current.active_draft_id)) {
+      setToast("工作台正在保存；旧任务没有改变，请稍候再试");
+      return;
+    }
+    setWorkspaceTransitioning(true);
+    try {
+      const baseWorkspace = workspaceEnvelopeRef.current;
+      const draftId = baseWorkspace.active_draft_id;
+      const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      if (!baseRecord?.pending_image_operation) throw new TypeError("STALE_IMAGE_RECOVERY_MISSING");
+      const snapshotted = await workspaceWithCurrentSnapshot(baseWorkspace, contentRef.current, currentAuthoringSession());
+      if (!mainAuthority.isCurrent(operation)) return;
+      const replacement = snapshotted.drafts.find((draft) => draft.draft_id === draftId);
+      const saveReceipt = await workspaceCoordinator.mergeDraftCas({
+        draftId,
+        expectedDraftToken: draftRecordToken(baseRecord),
+        buildDraft: (target) => mainAuthority.isCurrent(operation) ? createDraftRecordV3({
+          draftId: target.draft_id,
+          contentPackage: draftContentWithPreservedBookkeepingV3({ contentPackage: replacement.content_package, draftRecord: target }),
+          generationSession: replacement.generation_session,
+          pendingImageOperation: target.pending_image_operation,
+          createdAt: target.created_at,
+          updatedAt: replacement.updated_at,
+        }) : target,
+        reason: "PARK_STALE_IMAGE_RECOVERY_SNAPSHOT_V3",
+      });
+      if (!saveReceipt.ok || !saveReceipt.target_draft) {
+        handleWorkspaceConflict(saveReceipt, "当前稿保存时发生冲突；旧配图任务没有移动");
+        return;
+      }
+      const parkReceipt = await parkStalePendingImageOperationV3({
+        coordinator: workspaceCoordinator,
+        draftId,
+        expectedDraftToken: draftRecordToken(saveReceipt.target_draft),
+        operationSnapshot: saveReceipt.target_draft,
+      });
+      if (!parkReceipt.ok || !parkReceipt.workspace) {
+        handleWorkspaceConflict(parkReceipt, "旧配图任务未能独立保存；当前稿没有丢失");
+        return;
+      }
+      const committed = mainAuthority.commit(operation, () => {
+        adoptWorkspaceState(parkReceipt.workspace);
+        setRecoveryDiscoveryReceipt(null);
+        setToast("旧配图任务已保留到资产库；当前稿的配图设置已解锁（0 次模型调用）");
+      });
+      if (!committed.applied) {
+        reconcileStaleDraftWrite(parkReceipt, { dirtyDraftId: draftId, issueLabel: "旧配图任务分离" });
+      }
+    } catch (error) {
+      console.warn(error);
+      mainAuthority.commit(operation, () => setToast("旧配图任务没有移动；当前稿和旧任务都仍保留"));
+    } finally {
+      if (workspaceTransitionLock.release(operation)) setWorkspaceTransitioning(false);
+    }
+  }
+
   async function addActionReferences(event) {
     const operation = mainAuthority.capture("action-reference-reader", { pageScoped: true });
     const files = [...event.target.files]; event.target.value = "";
@@ -2489,20 +2571,24 @@ function App() {
 
   async function generateImageNode(options = {}) {
     if (!mediaWorkspaceIsUsable()) return;
-    if (!textConfirmed && !pendingImageOperation) { setToast("请先确认文字，再进入配图"); return; }
+    const recoveryOperation = options?.recoveryOperation === true;
+    if (recoveryOperation && !pendingImageOperation) { setToast("旧配图任务已经结束或不存在"); return; }
+    if (!recoveryOperation && !textConfirmed) { setToast("请先确认文字，再进入配图"); return; }
+    if (!recoveryOperation && stalePendingNeedsParking) { setToast("请先保留旧任务并解锁当前配图；该动作不会调用模型"); return; }
     if (!provider?.generateImages) {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "文字草稿和当前画布已经保留。请在模型设置中连接自己的火山方舟，再重试图片。" : "文字草稿和当前画布已经保留。请确认本机生成服务正在运行，然后重试图片。", stage: "image" });
       return;
     }
     if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
     if (activeImageOperationRef.current || draftMutationLockRef.current) { setToast("已有图片步骤正在固定或保存，请等待同一次操作收束"); return; }
-    if (!pendingImageOperation && !textDraftIsReady()) return;
+    if (!recoveryOperation && !currentPendingImageOperation && !textDraftIsReady()) return;
     const mainOperation = mainAuthority.capture("image-generation");
     const authGeneration = authStateRef.current.generation;
     const baseWorkspace = workspaceEnvelopeRef.current;
     const sourceDraftId = baseWorkspace.active_draft_id;
     const operationAuthority = imageOperationAuthorityV3(baseWorkspace, { activeDraftId: sourceDraftId });
-    const targetDraftId = operationAuthority?.holder_draft_id || sourceDraftId;
+    const useRecoveryAuthority = recoveryOperation || Boolean(currentPendingImageOperation);
+    const targetDraftId = useRecoveryAuthority ? operationAuthority?.holder_draft_id || sourceDraftId : sourceDraftId;
     const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
     if (!baseRecord) { setToast("当前稿件身份缺失，配图没有开始"); return; }
     const recoveryCheck = imageRecoveryClickMode({
@@ -3620,7 +3706,15 @@ function App() {
       </section>}
 
       {textDraft && (textConfirmed || pendingImageOperation) && <section id="creator-images" className="workbench-section workbench-images" data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
-        <header><div><strong>{pendingImageOperation && !textConfirmed ? "旧文字的配图恢复" : "配图生成"}</strong><small>{pendingImageOperation && !textConfirmed ? "当前文字修改不影响已保存的配图任务；先查询已有结果" : "文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖"}</small></div><span className="text-gate is-confirmed">{pendingImageOperation && !textConfirmed ? "可恢复" : "文字已确认"}</span></header>
+        <header><div><strong>配图生成</strong><small>{textConfirmed ? "当前文字是本轮输入 · AI 建议 1–8 页，你可以覆盖" : "当前文字仍可修改；旧任务恢复不会锁住这份稿"}</small></div><span className={`text-gate ${textConfirmed ? "is-confirmed" : ""}`}>{textConfirmed ? "文字已确认" : "当前文字待确认"}</span></header>
+        {stalePendingImageOperation && <aside className="image-recovery-card" aria-label="旧配图任务">
+          <div><strong>旧配图任务</strong><small>它属于“{stalePendingImageOperation.operation_snapshot?.confirmed_draft?.selected_title || "上一版文字"}”，不会再和当前文字混成一次操作。</small></div>
+          <div className="image-recovery-card__actions">
+            {stalePendingNeedsParking && <button type="button" onClick={parkOldImageRecovery} disabled={isGenerating || workspaceTransitioning}>保留旧任务并解锁当前配图</button>}
+            <button type="button" onClick={() => generateImageNode({ recoveryOperation: true, discoveryOnly: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>检查旧任务（不生成图片）</button>
+          </div>
+          {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ recoveryOperation: true, paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续旧任务图片步骤 {Number(recoveryImageResume?.completed_image_steps || 0) + 1}/{Number(recoveryImageResume?.total_image_steps || 1)}</button>}
+        </aside>}
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
           <div className="production-mode-options">{PRODUCTION_MODES.map((mode) => <label key={mode.id} className={productionMode === mode.id ? "is-selected" : ""}>
@@ -3642,9 +3736,9 @@ function App() {
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "RECOVERY_CHECK" ? "先读取已有账本；记录缺失时会调用文字模型重建配图计划" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
         {providerServerManaged && !imageLedgerAttested && <p className="generation-service-note" role="status">文字生成仍可使用；配图服务正在恢复，本次不会发起图片调用。</p>}
-        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "检查恢复状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
-        {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
-        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={stalePendingNeedsParking || isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : stalePendingNeedsParking ? "先保留旧任务，再生成当前稿" : pendingRecoveryDiscoveryOnly ? "检查当前任务状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {!stalePendingImageOperation && paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
+        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ recoveryOperation: Boolean(stalePendingImageOperation), discoveryOnly: Boolean(stalePendingImageOperation) || pendingRecoveryDiscoveryOnly })} />}
       </section>}
     </>;
   }

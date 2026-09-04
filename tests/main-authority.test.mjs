@@ -359,6 +359,30 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: true, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), null);
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "ACTIVE",
+    pendingTextDraftId: "text-old",
+    currentTextDraftId: "text-current",
+  }), null, "a recovery for old text must not freeze the current text's image controls");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "RECOVERY",
+    pendingTextDraftId: "text-current",
+    currentTextDraftId: "text-current",
+  }), null, "a detached recovery holder must not freeze the active draft");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "ACTIVE",
+    pendingTextDraftId: "text-current",
+    currentTextDraftId: "text-current",
+  }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-A", imageOperationDraftId: "draft-A" }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-B", imageOperationDraftId: "draft-A" }), null);
 
@@ -730,16 +754,21 @@ test("confirmed text without real pages is presented as text-ready, never as a t
 
 test("editing text never hides a durable paid image recovery task", () => {
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
-  assert.match(imageSource, /if \(!textConfirmed && !pendingImageOperation\)/, "an existing durable recovery must remain callable after text is edited");
+  assert.match(imageSource, /if \(recoveryOperation && !pendingImageOperation\)/, "an existing durable recovery must remain callable after text is edited");
+  assert.match(imageSource, /if \(!recoveryOperation && !textConfirmed\)/, "only a new current-text operation requires current confirmation");
   assert.match(imageSource, /baseRecord\.pending_image_operation\?\.operation_snapshot\?\.confirmed_draft \|\| textDraft/, "recovery must use the frozen confirmed text rather than the newly edited text");
   assert.match(mainSource, /textDraft && \(textConfirmed \|\| pendingImageOperation\)/, "the recovery panel cannot disappear merely because the current text is unconfirmed");
-  assert.match(mainSource, /旧文字的配图恢复/);
+  assert.match(mainSource, /旧配图任务/);
   assert.match(mainSource, /imageOperationAuthorityV3\(workspaceEnvelopeRef\.current/,
     "refresh must rediscover a moved recovery holder from the canonical workspace");
   assert.match(imageSource, /operationAuthority\?\.holder_draft_id \|\| sourceDraftId/);
   assert.match(imageSource, /operationAuthority\?\.location\?\.startsWith\("RECOVERY"\) \? targetDraftId/,
     "a recovery holder must advance in place rather than fork a second recovery draft");
   assert.match(mainSource, /effectiveImageResume/, "the recovery panel must render its durable cursor rather than a cleared React cursor");
+  assert.match(mainSource, /parkStalePendingImageOperationV3/, "old paid work must be detached atomically before the current draft starts a new operation");
+  assert.match(mainSource, /旧配图任务/, "old recovery must have a separate, user-visible control surface");
+  assert.match(mainSource, /保留旧任务并解锁当前配图/, "the zero-provider detach action must say exactly what it changes");
+  assert.match(mainSource, /recoveryOperation:\s*true/, "recovery checks must explicitly target the recovery authority instead of hijacking the current CTA");
 });
 
 test("deferred workspace transition blocks edits and stale NOOP preserves dirty UI with zero apply", async () => {

@@ -3303,6 +3303,55 @@ function frozenImageTextDraft(snapshotRecord) {
   };
 }
 
+export async function parkStalePendingImageOperationV3({
+  coordinator: coordinatorValue,
+  draftId,
+  expectedDraftToken,
+  operationSnapshot,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const coordinator = imageTransactionCoordinator(coordinatorValue);
+  const targetId = requiredString(draftId, "draftId");
+  if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
+  const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
+  const frozenTextDraft = frozenImageTextDraft(snapshotRecord);
+  if (sameConfirmedDraft(snapshotRecord.generation_session?.text_draft, frozenTextDraft)) {
+    return imageTransactionStopped({
+      code: "IMAGE_OPERATION_STILL_MATCHES_CURRENT_TEXT",
+      operationSnapshot: snapshotRecord,
+    });
+  }
+  const timestamp = requiredString(updatedAt, "updatedAt");
+  const recoveredId = imageRecoveryDraftIdV3(snapshotRecord.pending_image_operation.operation_nonce);
+  const recoverySession = {
+    ...snapshotRecord.generation_session,
+    topic: frozenTextDraft.source_input,
+    pillar: frozenTextDraft.pillar,
+    goal: frozenTextDraft.goal,
+    text_requirements: frozenTextDraft.text_requirements,
+    text_draft: frozenTextDraft,
+    text_confirmed: true,
+    assembled_draft_id: null,
+  };
+  return commitImageRecoveryMoveV3({
+    coordinator,
+    targetDraftId: targetId,
+    recoveredDraftId: recoveredId,
+    operationSnapshot: snapshotRecord,
+    buildRecoveredDraft: (existingRecovered) => createDraftRecordV3({
+      draftId: recoveredId,
+      contentPackage: existingRecovered?.content_package || snapshotRecord.content_package,
+      generationSession: existingRecovered?.generation_session || recoverySession,
+      pendingImageOperation: existingRecovered?.pending_image_operation || snapshotRecord.pending_image_operation,
+      createdAt: existingRecovered?.created_at || timestamp,
+      updatedAt: existingRecovered?.updated_at || timestamp,
+    }),
+    mediaManifest: [],
+    updatedAt: timestamp,
+    reason: `IMAGE_STALE_PENDING_PARK_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+  });
+}
+
 function assertFinalImageContent(textDraftValue, contentPackage) {
   const content = checkedContent(contentPackage, "content_package");
   const textDraft = textDraftValue;

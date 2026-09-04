@@ -55,6 +55,7 @@ import {
   imageBootstrapRebaseAllowedV3,
   imageOperationAuthorityV3,
   materializePersistentMediaRefsV3,
+  parkStalePendingImageOperationV3,
   persistWorkspaceEnvelope,
   persistDraftRecordWithReadback,
   putAndReadbackMediaDelta,
@@ -2580,6 +2581,73 @@ test("an edited source moves PARTIAL into one recovery authority that refresh ca
   assert.equal(replay.action, "COMPLETE");
   assert.equal(replay.disposition, "NOOP_ALREADY_APPLIED");
   assert.equal(replay.workspace.drafts.filter((draft) => draft.draft_id === recoveryId).length, 1);
+});
+
+test("parking a stale READY operation is zero-provider, atomic, and releases the current draft without losing recovery", async () => {
+  const operationNonce = "9".repeat(64);
+  const oldSession = { ...fullSession("park-old-text"), image_resume: null };
+  const pending = createPendingImageOperation({
+    operationNonce,
+    operationSnapshot: imageOperationSnapshot("park-source", oldSession.text_draft),
+    operationSnapshotHash: "8".repeat(64),
+    inputHash: "7".repeat(64),
+    orderedReferenceManifest: [],
+    protocolState: "READY",
+    runId: "images-park-old-ready",
+    completedImageSteps: 0,
+    totalImageSteps: 3,
+  });
+  const original = createDraftRecordV3({
+    draftId: "park-source",
+    contentPackage: assembledContent(oldSession, "park-source"),
+    generationSession: oldSession,
+    pendingImageOperation: pending,
+    createdAt: T0,
+  });
+  const currentText = { ...oldSession.text_draft, draft_id: "park-current-text", titles: ["当前新文字", ...oldSession.text_draft.titles.slice(1)], selected_title: "当前新文字", body: `${oldSession.text_draft.body}\n当前用户已经重写。` };
+  const edited = createDraftRecordV3({
+    draftId: original.draft_id,
+    contentPackage: original.content_package,
+    generationSession: { ...oldSession, text_draft: currentText, text_confirmed: true, assembled_draft_id: null, image_resume: null },
+    pendingImageOperation: pending,
+    createdAt: original.created_at,
+    updatedAt: T1,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA,
+    authority_effect: "LOCAL_EDITING_ONLY",
+    updated_at: T1,
+    profile: createProfileV2(),
+    active_draft_id: edited.draft_id,
+    drafts: [edited],
+    legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({
+    storage: memoryStorage(),
+    keys: { envelope: "workspace-v2", envelopeV3: "workspace-v3" },
+    lockManager: exclusiveLocks(),
+  });
+  assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace })).ok, true);
+
+  const result = await parkStalePendingImageOperationV3({
+    coordinator,
+    draftId: edited.draft_id,
+    expectedDraftToken: draftRecordToken(edited),
+    operationSnapshot: edited,
+    updatedAt: "2026-09-04T12:00:00.000Z",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, "STOP");
+  assert.equal(result.disposition, "RECOVERED_SIBLING_COMMITTED");
+  assert.equal(result.workspace.active_draft_id, edited.draft_id);
+  assert.equal(result.target_draft.pending_image_operation, null);
+  assert.equal(result.target_draft.generation_session.text_draft.draft_id, currentText.draft_id);
+  assert.equal(result.recovered_draft.pending_image_operation.operation_nonce, operationNonce);
+  assert.equal(result.recovered_draft.pending_image_operation.protocol_state, "READY");
+  assert.equal(result.recovered_draft.generation_session.text_draft.draft_id, oldSession.text_draft.draft_id);
+  assert.equal(libraryContentsV3(result.workspace).find((item) => item.draft_record_id === result.recovered_draft_id)?.pending_image_recovery, true);
+  assert.equal(imageOperationAuthorityV3(result.workspace).location, "RECOVERY");
 });
 
 test("v3 image completion never overwrites edited A and commits one final recovered sibling without changing active B", async () => {
