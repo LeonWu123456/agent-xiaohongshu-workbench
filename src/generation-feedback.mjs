@@ -79,6 +79,24 @@ const IMAGE_RECOVERY_STATES = Object.freeze({
   },
 });
 
+const IMAGE_RECOVERY_CODE_ALIASES = Object.freeze({
+  IMAGE_STEP_UNKNOWN: "UNKNOWN",
+  IMAGE_STEP_IN_FLIGHT: "IN_FLIGHT",
+});
+
+const IMAGE_RECOVERY_ACTION_LABELS = Object.freeze({
+  DISCOVER_EXISTING_OPERATION: "检查当前任务状态（不生成图片）",
+  WAIT_AND_DISCOVER_EXISTING_OPERATION: "检查当前任务状态（不生成图片）",
+  READ_CACHED_RESULT: "读取已有结果（不生成图片）",
+  REAUTHENTICATE_THEN_DISCOVER: "重新登录后检查状态",
+  WAIT_FOR_CAPACITY_THEN_DISCOVER: "稍后检查现有任务",
+  CONFIRM_NOT_FOUND_BEFORE_NEW_OPERATION: "确认服务器记录状态",
+  RESTORE_LOCAL_MEDIA_FROM_CACHED_MANIFEST: "恢复本机媒体",
+  RESTORE_LOCAL_MEDIA_OR_BACKUP: "从备份恢复媒体",
+  REDUCE_REFERENCES_BEFORE_START: "调整参考图",
+  RESUME_REFERENCE_MATERIALIZATION: "继续补齐参考媒体",
+});
+
 function imageRecoveryFeedback(code, meta) {
   const state = IMAGE_RECOVERY_STATES[code];
   if (!state) return null;
@@ -89,6 +107,7 @@ function imageRecoveryFeedback(code, meta) {
     title: state.title,
     detail: state.detail,
     recovery_action: state.recovery_action,
+    retry_label: IMAGE_RECOVERY_ACTION_LABELS[state.recovery_action],
     expected_upstream_calls: 0,
     server_recoverable_within_7d: state.server_recoverable_within_7d,
     direct_paid_retry_allowed: false,
@@ -114,7 +133,10 @@ export function generationFailureFeedback(error) {
       retry_label: "调整后重新规划并生成",
     };
   }
-  const exactRecoveryCode = Object.keys(IMAGE_RECOVERY_STATES).find((code) => technicalCode === code || technicalCode.startsWith(`${code}:`));
+  const aliasedRecoveryCode = Object.entries(IMAGE_RECOVERY_CODE_ALIASES)
+    .find(([code]) => technicalCode === code || technicalCode.startsWith(`${code}:`))?.[1];
+  const exactRecoveryCode = aliasedRecoveryCode || Object.keys(IMAGE_RECOVERY_STATES)
+    .find((code) => technicalCode === code || technicalCode.startsWith(`${code}:`));
   const exactRecovery = imageRecoveryFeedback(exactRecoveryCode, meta);
   if (exactRecovery) return exactRecovery;
   if (/^IMAGE_MEDIA_(?:FETCH|HEADER|BODY)_/.test(technicalCode)) return imageRecoveryFeedback("READY_RESPONSE_LOST", meta);
@@ -149,4 +171,86 @@ export function generationFailureFeedback(error) {
   if (/production layout budget|TEXT_QUALITY_GATE_FAILED/i.test(message)) return { ...meta, code: "QUALITY_GATE_REJECTED", title: "内容没有通过质量校验", detail: "文字密度、主题相关性或表达边界仍有明确问题。旧稿已保留，重试只修当前文字节点。" };
   if (/AbortError|aborted|timeout/i.test(message)) return { ...meta, code: "GENERATION_TIMEOUT", title: "生成等待超时", detail: "旧稿没有改变。服务恢复后可从当前节点重试。" };
   return { ...meta, code: "GENERATION_FAILED", title: "生成请求没有完成", detail: "旧稿和当前画布均已保留。下方保留了技术码，可从当前节点重试。" };
+}
+
+export function generationFailureActionLabel(feedback) {
+  if (feedback?.retry_label) return feedback.retry_label;
+  if (feedback?.stage === "image" && feedback?.direct_paid_retry_allowed === false) {
+    return "检查当前任务状态（不生成图片）";
+  }
+  if (feedback?.stage === "image") return "再次生成图片（可能产生图片调用）";
+  return "重试文字";
+}
+
+export function generationFailureBelongsToDraft(feedback, draftRecord) {
+  if (!feedback || !draftRecord?.draft_id) return false;
+  const failureDraftId = String(feedback.draft_record_id || "");
+  if (failureDraftId) return failureDraftId === draftRecord.draft_id;
+  return false;
+}
+
+export function restoreGenerationFailure(value) {
+  if (!value || typeof value !== "object" || typeof value.title !== "string") return null;
+  if (!value.technical_code) return value;
+  const normalized = generationFailureFeedback({
+    providerCode: value.technical_code, providerStage: value.stage, failureId: value.failure_id,
+  });
+  // A reload can tighten recovery, but cannot erase a persisted no-paid-retry decision.
+  return {
+    ...normalized,
+    draft_record_id: value.draft_record_id || null,
+    failed_at: value.failed_at || normalized.failed_at,
+    ...(value.direct_paid_retry_allowed === false ? {
+      direct_paid_retry_allowed: false,
+      recovery_action: IMAGE_RECOVERY_ACTION_LABELS[value.recovery_action]
+        ? value.recovery_action : "DISCOVER_EXISTING_OPERATION",
+    } : {}),
+  };
+}
+
+// One descriptor owns both the visible promise and the invoked action.
+export function generationFailureAction({ feedback, hasPendingOperation = false } = {}) {
+  if (feedback?.stage !== "image") return { handler: "generateText", label: "重试文字" };
+  const action = feedback.recovery_action;
+  if (action === "REAUTHENTICATE_THEN_DISCOVER") return { handler: "openAccessSettings", label: "打开访问验证" };
+  if (action === "RESTORE_LOCAL_MEDIA_OR_BACKUP") return { handler: "openBackupRestore", label: "前往资产库恢复备份" };
+  if (["REDUCE_REFERENCES_BEFORE_START", "EDIT_VISUAL_INPUTS_THEN_RESTART"].includes(action)) {
+    return { handler: "openReferenceSettings", label: "调整参考图与画面设置" };
+  }
+  if (hasPendingOperation) return { handler: "discover", label: "检查当前任务状态（不生成图片）" };
+  if (feedback.direct_paid_retry_allowed === false) return { handler: "openRecoveryLibrary", label: "前往资产库找回原任务" };
+  return { handler: "generateImages", label: "再次生成图片（可能产生图片调用）" };
+}
+
+export function runGenerationFailureAction(context, handlers) {
+  const action = generationFailureAction(context);
+  if (typeof handlers?.[action.handler] !== "function") throw new TypeError("GENERATION_RECOVERY_HANDLER_MISSING");
+  return handlers[action.handler]();
+}
+
+export function workbenchImageFailureFeedback({
+  feedback,
+  pendingRecoveryDiscoveryOnly = false,
+  publicationAuthorityCode = "",
+  visiblePageCount = 0,
+} = {}) {
+  if (feedback?.stage !== "image" || !pendingRecoveryDiscoveryOnly) return feedback;
+  const action = generationFailureAction({ feedback, hasPendingOperation: true });
+  const checkDetail = action.handler === "discover"
+    ? "检查会先读取现有账本；记录缺失时可能调用文字模型重建分镜，不会调用图片模型。"
+    : feedback.detail;
+  let canvasDetail;
+  if (publicationAuthorityCode === "CONTENT_LINEAGE_MISMATCH") {
+    canvasDetail = `配图任务属于当前文字，但当前 ${visiblePageCount} 页画布仍属于另一稿。发布区保持锁定；若要使用现有画布，可在那里恢复对应文案。`;
+  } else if (visiblePageCount > 0 && ["CONFIRMED_TEXT_AUTHORITY", "CONFIRMED_TEXT_AUTHORITY_WITH_PENDING_RECOVERY"].includes(publicationAuthorityCode)) {
+    canvasDetail = `当前 ${visiblePageCount} 页画布与文字来源已对齐，下载仍以发布区和媒体校验结果为准。`;
+  } else {
+    canvasDetail = "发布区仍保持锁定，请先处理其中的文案或画布校验提示。";
+  }
+  return {
+    ...feedback,
+    detail: `${checkDetail}${canvasDetail}`,
+    retry_label: action.label,
+    direct_paid_retry_allowed: false,
+  };
 }

@@ -2,14 +2,14 @@
   "schema": "mesy.living-logic-model.v1",
   "object_id": "xiaoshimei-studio-v2",
   "object_root": "Products/Xiaoshimei-Studio-v2",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "entrypoint": "src/main.jsx",
   "scope": "current Vite product entry and its user-visible creation, editing, persistence, replay-safe paid generation, export and feedback journey",
   "nodes": [
     {
       "id": "CAP-001",
       "type": "CAP",
-      "label": "完成一套可编辑的小红书图文",
+      "label": "完成一套可编辑、可发布的小红书图文",
       "spec": {
         "purpose": "原文到真实发布包与反馈"
       },
@@ -1357,9 +1357,9 @@
     {
       "id": "FLOW-006",
       "type": "FLOW",
-      "label": "当前稿与旧恢复稿血缘分流",
+      "label": "当前任务状态与旧恢复稿血缘分流",
       "spec": {
-        "purpose": "用 current text draft id、pending frozen text draft id 与 pending location 判定锁定范围；迁移采用 snapshot/token CAS，一次提交 source release + recovery insert"
+        "purpose": "用 current text draft id、pending frozen text draft id 与 pending location 判定当前查询还是旧稿分流；迁移采用 snapshot/token CAS。恢复检查零图片调用，缺记录时可能调用文字模型重建分镜"
       },
       "source_refs": [
         {
@@ -1427,6 +1427,98 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/current-logic-map.test.mjs",
           "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "UI-010",
+      "type": "UI",
+      "label": "检查当前图片任务状态",
+      "spec": {
+        "purpose": "把同一图片操作的零图片调用发现动作与付费续步分开显示"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/logic/nodes/UI-010.md",
+          "kind": "spec"
+        }
+      ],
+      "implementation_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/generation-feedback.mjs",
+          "kind": "implementation"
+        }
+      ]
+    },
+    {
+      "id": "UI-011",
+      "type": "UI",
+      "label": "明确付费继续图片步骤",
+      "spec": {
+        "purpose": "只有状态发现证明存在可续步结果后，才提供独立的明确付费按钮"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/logic/nodes/UI-011.md",
+          "kind": "spec"
+        }
+      ],
+      "implementation_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        }
+      ]
+    },
+    {
+      "id": "ACT-010",
+      "type": "ACT",
+      "label": "检查现有图片操作",
+      "spec": {
+        "purpose": "查询同一 operation nonce 的账本、checkpoint 与缓存，图片上游调用数必须为 0"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/logic/nodes/ACT-010.md",
+          "kind": "spec"
+        }
+      ],
+      "implementation_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
+          "kind": "implementation"
+        }
+      ]
+    },
+    {
+      "id": "ACT-011",
+      "type": "ACT",
+      "label": "明确继续下一个付费图片步骤",
+      "spec": {
+        "purpose": "仅在发现回执为 READY 或 PARTIAL 且身份仍匹配时继续一个付费图片步骤"
+      },
+      "source_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/logic/nodes/ACT-011.md",
+          "kind": "spec"
+        }
+      ],
+      "implementation_refs": [
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
+          "kind": "implementation"
         }
       ]
     }
@@ -1749,7 +1841,7 @@
     },
     {
       "from": "RULE-001",
-      "to": "UI-001",
+      "to": "UI-003",
       "type": "constrains"
     },
     {
@@ -1826,6 +1918,66 @@
       "from": "TEST-004",
       "to": "PAGE-002",
       "type": "covers"
+    },
+    {
+      "from": "PAGE-001",
+      "to": "UI-010",
+      "type": "exposes"
+    },
+    {
+      "from": "PAGE-001",
+      "to": "UI-011",
+      "type": "exposes"
+    },
+    {
+      "from": "UI-010",
+      "to": "ACT-010",
+      "type": "triggers"
+    },
+    {
+      "from": "UI-011",
+      "to": "ACT-011",
+      "type": "triggers"
+    },
+    {
+      "from": "ACT-010",
+      "to": "FLOW-006",
+      "type": "routes_to"
+    },
+    {
+      "from": "ACT-011",
+      "to": "FLOW-002",
+      "type": "routes_to"
+    },
+    {
+      "from": "FLOW-006",
+      "to": "API-001",
+      "type": "depends_on"
+    },
+    {
+      "from": "FLOW-006",
+      "to": "STORE-005",
+      "type": "writes"
+    },
+    {
+      "from": "FLOW-006",
+      "to": "RULE-001",
+      "type": "constrained_by"
+    },
+    {
+      "from": "RULE-001",
+      "to": "UI-010",
+      "type": "constrains"
+    },
+    {
+      "from": "RULE-001",
+      "to": "UI-011",
+      "type": "constrains"
+    },
+    {
+      "from": "FLOW-006",
+      "to": "TEST-001",
+      "type": "verified_by"
     }
   ],
   "feedback_loop": {
@@ -1910,6 +2062,21 @@
         "TEST-005"
       ],
       "solution_ref": "logic/logic-model.json v3 + tests/current-logic-map.test.mjs"
+    },
+    {
+      "id": "D38",
+      "state": "PASS_LOCAL_REALITY_PRODUCTION_NOT_APPLIED",
+      "claim": "同稿图片任务待恢复且当前画布属于另一稿时，错误卡把零图片调用检查显示成重试图片，并把两个同时成立的身份事实拆成互相矛盾的提示",
+      "target_nodes": [
+        "UI-010",
+        "UI-011",
+        "ACT-010",
+        "ACT-011",
+        "FLOW-006",
+        "RULE-001",
+        "TEST-001"
+      ],
+      "solution_ref": "src/generation-feedback.mjs + src/main.jsx + tests/generation-feedback.test.mjs + tests/main-authority.test.mjs"
     }
   ],
   "model_kind": "CURRENT_RUNTIME_BOUND",
@@ -1945,6 +2112,18 @@
       "store": "STORE-001",
       "rule": "RULE-005",
       "test": "TEST-005"
+    },
+    {
+      "id": "JOURNEY-CURRENT-RECOVERY-DISCOVERY",
+      "cap": "CAP-001",
+      "page": "PAGE-001",
+      "ui": "UI-010",
+      "act": "ACT-010",
+      "flow": "FLOW-006",
+      "api": "API-001",
+      "store": "STORE-005",
+      "rule": "RULE-001",
+      "test": "TEST-001"
     },
     {
       "id": "JOURNEY-EXPORT",

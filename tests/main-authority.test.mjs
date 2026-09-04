@@ -597,11 +597,18 @@ test("a visible-canvas lineage split has one explicit zero-provider repair that 
   assert.match(repairSource, /JSON\.stringify\(nextRecord\.content_package\.pages\) !== frozenPages/);
   assert.match(repairSource, /JSON\.stringify\(nextRecord\.pending_image_operation\) !== frozenPending/);
   assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
+  assert.doesNotMatch(repairSource, /!sourceRecord\.pending_image_operation/, "canvas lineage repair cannot disappear merely because no image operation is pending");
   assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
-  assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
   assert.match(mainSource, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
   assert.match(mainSource, /data-last-image-response-status=\{imageOperationReadback\?\.response_status \|\| ""\}/);
   assert.match(mainSource, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
+});
+
+test("a persisted generation failure restores the visible FAILED state after reload", () => {
+  assert.match(mainSource, /const \[generationError, setGenerationError\] = useState\(loadGenerationFailure\);/);
+  assert.match(mainSource, /const \[generationState, setGenerationState\] = useState\(generationError \? "FAILED" : "IDLE"\);/);
+  assert.match(mainSource, /preserveGenerationFailure: generationFailureBelongsToDraft\(generationError, finalRecord\)/);
+  assert.match(mainSource, /draft_record_id: workspaceEnvelopeRef\.current\?\.active_draft_id/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {

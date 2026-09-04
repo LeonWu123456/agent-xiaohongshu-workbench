@@ -58,7 +58,15 @@ import {
   saveWorkspaceProfileV3,
   workspaceEnvelopeV3Token,
 } from "./workspace-state.mjs";
-import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
+import {
+  generationFailureAction,
+  generationFailureBelongsToDraft,
+  generationFailureFeedback,
+  providerHealthState,
+  restoreGenerationFailure,
+  runGenerationFailureAction,
+  workbenchImageFailureFeedback,
+} from "./generation-feedback.mjs";
 import { buildHistoricalDraftAdoption, derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
@@ -380,12 +388,7 @@ function loadPromptMemory() {
 
 function loadGenerationFailure() {
   try {
-    const value = JSON.parse(localStorage.getItem(GENERATION_FAILURE_KEY));
-    if (!value || typeof value !== "object" || typeof value.title !== "string") return null;
-    if (value.technical_code) {
-      return generationFailureFeedback({ message: value.technical_code, providerCode: value.technical_code, providerStage: value.stage, failureId: value.failure_id });
-    }
-    return value;
+    return restoreGenerationFailure(JSON.parse(localStorage.getItem(GENERATION_FAILURE_KEY)));
   } catch { return null; }
 }
 
@@ -819,11 +822,11 @@ function panelSelectionIndex(value) {
 }
 
 
-function FailureNotice({ feedback, onRetry }) {
+function FailureNotice({ feedback, onRetry, actionLabel, disabled = false }) {
   if (!feedback) return null;
   return <div className="generation-error" role="alert" data-error-code={feedback.code}>
     <div><strong>{feedback.title}</strong><span>{feedback.detail}</span></div>
-    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" onClick={onRetry}>{feedback.retry_label || `重试${feedback.stage === "image" ? "图片" : "文字"}`}</button></footer>
+    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" disabled={disabled} onClick={onRetry}>{actionLabel || "重试文字"}</button></footer>
   </div>;
 }
 
@@ -1041,9 +1044,9 @@ function App() {
     : initialWorkspaceLoad.persistence.ok ? "" : "旧工作台已读入，但 v2 草稿权威尚未可靠落盘；请立即备份工作台。");
   const [exportState, setExportState] = useState("IDLE");
   const [preparedExport, setPreparedExport] = useState(null);
-  const [generationState, setGenerationState] = useState("IDLE");
-  const [activeImageIntent, setActiveImageIntent] = useState(null);
   const [generationError, setGenerationError] = useState(loadGenerationFailure);
+  const [generationState, setGenerationState] = useState(generationError ? "FAILED" : "IDLE");
+  const [activeImageIntent, setActiveImageIntent] = useState(null);
   const [textDraft, setTextDraft] = useState(initialGenerationSession?.text_draft || null);
   const [textConfirmed, setTextConfirmed] = useState(Boolean(initialGenerationSession?.text_confirmed));
   const [assembledDraftId, setAssembledDraftId] = useState(initialGenerationSession?.assembled_draft_id || null);
@@ -1203,14 +1206,17 @@ function App() {
     && recoveryDiscoveryReceipt?.run_id === pendingImageOperation.run_id
     && ["READY", "PARTIAL"].includes(recoveryDiscoveryReceipt?.status));
   const publicationExportLocked = workspaceReadOnly || workspaceTransitioning || !publicationAuthority.allowed;
-  const imageFailureFeedback = generationError?.stage === "image" && pendingRecoveryDiscoveryOnly && publicationAuthority.allowed
-    ? {
-      ...generationError,
-      title: "另一条配图还在恢复窗内",
-      detail: `当前 ${visiblePages.length} 页成品仍可复制和下载。恢复检查会先读账本；若记录缺失，可能调用文字模型重建配图计划，但不会调用图片模型。`,
-      retry_label: "检查恢复状态（不生成图片）",
-    }
-    : generationError;
+  const imageFailureFeedback = workbenchImageFailureFeedback({
+    feedback: generationError,
+    pendingRecoveryDiscoveryOnly,
+    publicationAuthorityCode: publicationAuthority.code,
+    visiblePageCount: visiblePages.length,
+  });
+  const imageFailureActionContext = {
+    feedback: imageFailureFeedback,
+    hasPendingOperation: Boolean(pendingImageOperation),
+  };
+  const imageFailureAction = generationFailureAction(imageFailureActionContext);
   authorityTargetRef.current = {
     draftId: workspaceEnvelopeRef.current.active_draft_id,
     pageId: pageSemanticIdentity(currentPage, pageIndex),
@@ -1278,7 +1284,7 @@ function App() {
     return true;
   }
 
-  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false, workspaceView = null } = {}) {
+  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false, workspaceView = null, preserveGenerationFailure = false } = {}) {
     workspaceEnvelopeRef.current = nextWorkspace;
     authorityTargetRef.current = {
       ...authorityTargetRef.current,
@@ -1305,7 +1311,7 @@ function App() {
       const recordId = record?.draft_id || nextWorkspace.active_draft_id;
       const sourceWorkspace = workspaceView?.workspace || nextWorkspace;
       const visibleRecord = sourceWorkspace.drafts.find((draft) => draft.draft_id === recordId);
-      if (visibleRecord) applyDraftRecord(visibleRecord);
+      if (visibleRecord) applyDraftRecord(visibleRecord, { preserveGenerationFailure });
     }
     workspaceReadyRef.current = true;
     setWorkspaceReady(true);
@@ -1450,7 +1456,11 @@ function App() {
       } catch (error) {
         console.warn(error);
         if (!active) return;
-        adoptWorkspaceState(receipt.workspace, { record: finalRecord, applyRecord: true });
+        adoptWorkspaceState(receipt.workspace, {
+          record: finalRecord,
+          applyRecord: true,
+          preserveGenerationFailure: generationFailureBelongsToDraft(generationError, finalRecord),
+        });
         setWorkspaceBlocked(true);
         const missing = error.mediaHydration?.missing_refs?.length || 0;
         const corrupt = error.mediaHydration?.corrupt_refs?.length || 0;
@@ -1465,6 +1475,7 @@ function App() {
         record: finalRecord,
         applyRecord: true,
         workspaceView,
+        preserveGenerationFailure: generationFailureBelongsToDraft(generationError, finalRecord),
       });
       setWorkspaceBlocked(bootstrapReadOnly);
       setStorageIssue(bootstrapReadOnly ? "已读回现有 v3 稿件，但检测到旧写入漂移；当前以只读方式打开，未采用旧 v2 覆盖。" : "");
@@ -1935,7 +1946,7 @@ function App() {
     mutatePage((page) => ({ ...page, layer_state: moveLayer(page.layer_state, key, direction) }));
   }
 
-  function applyDraftRecord(record) {
+  function applyDraftRecord(record, { preserveGenerationFailure = false } = {}) {
     mainAuthority.markSemanticMutation();
     const nextContent = record.content_package;
     const session = record.generation_session;
@@ -1971,9 +1982,11 @@ function App() {
     setCandidatePageIndex(null);
     setCandidatePageIdentity(null);
     setCandidateRunId(null);
-    setGenerationState("IDLE");
-    setGenerationError(null);
-    try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
+    if (!preserveGenerationFailure) {
+      setGenerationState("IDLE");
+      setGenerationError(null);
+      try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
+    }
     setPreparedExport((current) => {
       if (current?.revoke) URL.revokeObjectURL(current.url);
       return null;
@@ -2251,7 +2264,7 @@ function App() {
 
   async function repairVisibleCanvasLineage() {
     if (workspaceMutationIsLocked()) return;
-    if (publicationAuthorityRef.current?.code !== "CONTENT_LINEAGE_MISMATCH" || historicalAdoptionRef.current) return;
+    if (!["CONTENT_LINEAGE_MISMATCH", "PUBLICATION_COPY_MISMATCH"].includes(publicationAuthorityRef.current?.code) || historicalAdoptionRef.current) return;
     const operation = mainAuthority.capture("visible-canvas-lineage-repair", { envelopeScoped: true });
     historicalAdoptionRef.current = true;
     setHistoricalAdoptionBusy(true);
@@ -2260,7 +2273,7 @@ function App() {
       const draftId = baseWorkspace.active_draft_id;
       const sourceRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
       const sourceLineageId = String(sourceRecord?.content_package?.generation?.source_draft_id || "");
-      if (!sourceRecord || !sourceLineageId || !sourceRecord.pending_image_operation) throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRECONDITION_FAILED");
+      if (!sourceRecord || !sourceLineageId) throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRECONDITION_FAILED");
       const frozenPages = JSON.stringify(sourceRecord.content_package.pages);
       const frozenPending = JSON.stringify(sourceRecord.pending_image_operation);
       const adoption = buildHistoricalDraftAdoption({
@@ -2288,10 +2301,10 @@ function App() {
         operation,
       })) return;
       setRecoveryDiscoveryReceipt(null);
-      setToast("当前两页对应文案已恢复为唯一确认文字；图片与待恢复操作均未改变");
+      setToast(`当前 ${sourceRecord.content_package.pages.length} 页对应文案已恢复为唯一确认文字；图片与待恢复操作均未改变`);
     } catch (error) {
       console.warn(error);
-      mainAuthority.commit(operation, () => setToast("当前两页对应文案未能恢复，原稿和待恢复操作都没有改变"));
+      mainAuthority.commit(operation, () => setToast("当前画布对应文案未能恢复，原稿和待恢复操作都没有改变"));
     } finally {
       historicalAdoptionRef.current = false;
       setHistoricalAdoptionBusy(false);
@@ -2333,10 +2346,14 @@ function App() {
   }
 
   function failGeneration(feedback) {
+    const scopedFeedback = {
+      ...feedback,
+      draft_record_id: workspaceEnvelopeRef.current?.active_draft_id || null,
+    };
     setGenerationState("FAILED");
-    setGenerationError(feedback);
-    try { localStorage.setItem(GENERATION_FAILURE_KEY, JSON.stringify(feedback)); } catch {}
-    setToast(feedback.title);
+    setGenerationError(scopedFeedback);
+    try { localStorage.setItem(GENERATION_FAILURE_KEY, JSON.stringify(scopedFeedback)); } catch {}
+    setToast(scopedFeedback.title);
   }
 
   function clearGenerationFailure() {
@@ -3723,7 +3740,7 @@ function App() {
           </label>)}</div>
         </fieldset>
         <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("AUTO")} /><span><strong>智能判断</strong><small>建议 {imageAuthorityTextDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("CUSTOM")} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={imageLaneLocked || isGenerating} onChange={(event) => changeCustomImageCountValue(event.target.value)}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{effectiveImageResume?.completed_image_steps != null ? `已保存图片步骤 ${effectiveImageResume.completed_image_steps}/${effectiveImageResume.total_image_steps}${Number.isInteger(effectiveImageResume.max_image_calls) ? `；本轮已调用 ${effectiveImageResume.actual_image_calls}/${effectiveImageResume.max_image_calls} 次，剩余 ${effectiveImageResume.remaining_image_calls} 次${effectiveImageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : effectiveImageResume?.completed_mother_sheets != null ? `已保留 ${effectiveImageResume.completed_mother_sheets}/${effectiveImageResume.total_mother_sheets} 张母图，从第 ${effectiveImageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
-        <section className="action-reference-panel">
+        <section className="action-reference-panel" id="creator-action-references">
           <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={imageLaneLocked || isGenerating || actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
           {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.media_ref}><img src={actionReferencePreviewUrls[item.media_ref] || ""} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" disabled={imageLaneLocked || isGenerating} onClick={() => removeActionReference(item.media_ref)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
@@ -3738,7 +3755,19 @@ function App() {
         {providerServerManaged && !imageLedgerAttested && <p className="generation-service-note" role="status">文字生成仍可使用；配图服务正在恢复，本次不会发起图片调用。</p>}
         <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={stalePendingNeedsParking || isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : stalePendingNeedsParking ? "先保留旧任务，再生成当前稿" : pendingRecoveryDiscoveryOnly ? "检查当前任务状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
         {!stalePendingImageOperation && paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
-        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ recoveryOperation: Boolean(stalePendingImageOperation), discoveryOnly: Boolean(stalePendingImageOperation) || pendingRecoveryDiscoveryOnly })} />}
+        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice
+          feedback={imageFailureFeedback}
+          actionLabel={imageFailureAction.label}
+          disabled={isGenerating || workspaceTransitioning}
+          onRetry={() => runGenerationFailureAction(imageFailureActionContext, {
+            discover: () => generateImageNode({ recoveryOperation: Boolean(stalePendingImageOperation), discoveryOnly: true }),
+            openRecoveryLibrary: () => { setView("library"); setToast("请在资产库找回原配图任务或恢复备份；本次没有生成图片"); },
+            openBackupRestore: () => { setView("library"); setToast("请点击恢复备份，选择已有工作台备份；本次没有生成图片"); },
+            openReferenceSettings: () => scrollCreatorStage("creator-action-references"),
+            openAccessSettings: openProviderSettings,
+            generateImages: () => generateImageNode(),
+          })}
+        />}
       </section>}
     </>;
   }
@@ -3868,7 +3897,7 @@ function App() {
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
                   {["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"].includes(publicationAuthority.code) && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
-                  {publicationAuthority.code === "CONTENT_LINEAGE_MISMATCH" && pendingImageOperation && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : "恢复当前两页对应文案（0 次图片调用）"}</button>}
+                  {["CONTENT_LINEAGE_MISMATCH", "PUBLICATION_COPY_MISMATCH"].includes(publicationAuthority.code) && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : `恢复当前 ${visiblePages.length} 页对应文案（0 次图片调用）`}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>

@@ -8,9 +8,13 @@ const PRODUCT_PREFIX = "Products/Xiaoshimei-Studio-v2/";
 const REQUIRED_TYPES = new Set(["CAP", "PAGE", "UI", "ACT", "FLOW", "API", "STORE", "RULE", "TEST"]);
 const RELATION_TYPES = new Set(["contains", "exposes", "triggers", "routes_to", "reads", "writes", "depends_on", "constrained_by", "constrains", "verified_by", "covers", "feedback_to_node", "consumer_readback"]);
 
+async function readHumanMap() {
+  return fs.readFile(path.join(ROOT, "XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md"), "utf8");
+}
+
 test("Current logic map is runtime-bound, has one real App entry, and no planned implementation refs", async () => {
   const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
-  assert.equal(model.version, "3.0.0");
+  assert.equal(model.version, "3.1.0");
   assert.equal(model.model_kind, "CURRENT_RUNTIME_BOUND");
   assert.equal(model.entrypoint, "src/main.jsx");
   await fs.access(path.join(ROOT, model.entrypoint));
@@ -62,13 +66,59 @@ test("Current logic map is a Guo-style nine-question graph, not an architecture 
   }
 });
 
-test("Current logic map has no open historical defect and binds the Reality advisory boundary", async () => {
+test("Current logic map binds the Reality advisory boundary without treating problem labels as runtime proof", async () => {
   const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
-  assert.equal(model.problems.some((problem) => problem.state !== "RESOLVED"), false);
+  assert.ok(Array.isArray(model.problems) && model.problems.length > 0);
+  assert.ok(model.problems.every((problem) => typeof problem.state === "string" && problem.state.length > 0));
   const reality = model.nodes.find((node) => node.id === "FLOW-005");
   assert.match(reality.spec.purpose, /advisory context/);
   assert.match(reality.spec.purpose, /不能绕过/);
   const rule = model.nodes.find((node) => node.id === "RULE-003");
   assert.match(rule.spec.purpose, /advisory evidence/);
   assert.match(rule.spec.purpose, /layout QA/);
+});
+
+test("the human Mermaid and machine map expose the same stable node IDs", async () => {
+  const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
+  const markdown = await readHumanMap();
+  const humanIds = [...markdown.matchAll(/\["((?:CAP|PAGE|UI|ACT|FLOW|API|STORE|RULE|TEST)-\d+)\b/g)].map((match) => match[1]);
+  assert.deepEqual(new Set(humanIds), new Set(model.nodes.map((node) => node.id)));
+  assert.equal(humanIds.length, new Set(humanIds).size, "a stable node ID may appear only once in the canonical Mermaid");
+});
+
+test("stable node IDs keep the same meaning in the human and machine projections", async () => {
+  const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
+  const markdown = await readHumanMap();
+  const humanLabels = new Map([...markdown.matchAll(/\["((?:CAP|PAGE|UI|ACT|FLOW|API|STORE|RULE|TEST)-\d+)<br\/>((?:.(?!"\]))+.)"\]/g)]
+    .map((match) => [match[1], match[2].split("<br/>")[0]]));
+  for (const node of model.nodes) {
+    assert.equal(humanLabels.get(node.id), node.label, `${node.id} changed meaning between projections`);
+  }
+});
+
+test("legacy views redirect to the canonical map instead of publishing conflicting states", async () => {
+  for (const relative of ["logic/task.md", "logic/impact.md", "logic/reality.md"]) {
+    const document = await fs.readFile(path.join(ROOT, relative), "utf8");
+    assert.match(document, /XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP\.md/);
+    assert.doesNotMatch(document, /```mermaid|RESOLVED_CONFIRMED|OPEN_CONFIRMED|PASS_LOCAL/);
+  }
+  const realityRedirect = JSON.parse(await fs.readFile(path.join(ROOT, "logic/reality-status.json"), "utf8"));
+  assert.equal(realityRedirect.status, "SEE_CANONICAL_MAP");
+  assert.equal(realityRedirect.canonical, "../XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md");
+});
+
+test("the screenshot-reopened problem stays open until target Reality proves the fixed UI", async () => {
+  const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
+  const problem = model.problems.find((item) => item.id === "D38");
+  assert.ok(problem);
+  assert.notEqual(problem.state, "RESOLVED");
+  assert.deepEqual(new Set(problem.target_nodes), new Set(["UI-010", "UI-011", "ACT-010", "ACT-011", "FLOW-006", "RULE-001", "TEST-001"]));
+});
+
+test("paid-image rules constrain image actions, never the raw source input", async () => {
+  const model = JSON.parse(await fs.readFile(path.join(ROOT, "logic/logic-model.json"), "utf8"));
+  const constrained = model.relations
+    .filter((relation) => relation.from === "RULE-001" && relation.type === "constrains")
+    .map((relation) => relation.to);
+  assert.deepEqual(new Set(constrained), new Set(["UI-003", "UI-010", "UI-011"]));
 });
