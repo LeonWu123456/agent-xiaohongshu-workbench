@@ -3584,3 +3584,14 @@ test('capacity inventory diagnosis reads numeric metadata only and never changes
  const result=await inspectCapacityMetadata({redis});assert.equal(result.physical_bytes,200);assert.equal(result.runs.length,1);assert.equal(result.runs[0].status,'PLANNER_FAILED');assert.equal(result.runs[0].recovery_expired,true);
  assert.ok(commands.every(a=>['TIME','SCAN','MEMORY','HGETALL','HMGET'].includes(a[0])));assert.ok(!JSON.stringify(result).includes(keys[1]));
 });
+
+
+test('failed planner preallocation release is atomic, preserves cached data, and cannot accept arbitrary roots',async()=>{
+ const commands=[];const root='xiaoshimei:image-d37:{xiaoshimei-studio-v2}:scope:'+('a'.repeat(32));
+ const ledger=createUpstashImageLedger({url:'https://example.invalid',token:'01234567890123456789',fetchImpl:async(_url,options)=>{const body=JSON.parse(options.body);commands.push(body);return {ok:true,json:async()=>({result:['RELEASED','100']})};}});
+ assert.equal(typeof ledger.releaseFailedPlannerPreallocation,'function');
+ const result=await ledger.releaseFailedPlannerPreallocation({metaKey:root+':run:images-123-deadbeef:meta',capacityGeneration:'b'.repeat(64)});assert.equal(result.status,'RELEASED');
+ const lua=commands[0][1];assert.match(lua,/PLANNER_FAILED/);assert.match(lua,/IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS/);assert.match(lua,/image_upstream_calls/);assert.match(lua,/reservation_count/);assert.match(lua,/ALREADY_RELEASED/);assert.match(lua,/ZSCORE/);assert.match(lua,/ZREM/);assert.match(lua,/capacity_generation/);
+ assert.ok(!/redis\.call\(['"](?:DEL|UNLINK|EXPIRE|PEXPIRE|SET)['"]/.test(lua),'release must not delete or replace data or TTLs');
+ const before=commands.length;await assert.rejects(()=>ledger.releaseFailedPlannerPreallocation({metaKey:'unrelated:meta',capacityGeneration:'b'.repeat(64)}),/INVALID/);assert.equal(commands.length,before);
+});
