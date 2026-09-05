@@ -1480,6 +1480,13 @@ function normalizeDraftRecordV3(value, path, { importContent = false } = {}) {
   if (record.generation_session?.image_resume != null && record.pending_image_operation == null) {
     throw new TypeError("WORKSPACE_V3_PENDING_OPERATION_REQUIRED");
   }
+  // Optional library metadata stays in the same v3 record, never in content or generation inputs.
+  if (value.display_name != null) {
+    if (typeof value.display_name !== "string" || !value.display_name.trim() || value.display_name.trim().length > 120) {
+      throw new TypeError(`${path}.display_name must contain 1-120 characters`);
+    }
+    record.display_name = value.display_name.trim();
+  }
   assertPersistentRefOnly(record);
   return record;
 }
@@ -1487,6 +1494,7 @@ function normalizeDraftRecordV3(value, path, { importContent = false } = {}) {
 export function createDraftRecordV3({
   draftId,
   contentPackage,
+  displayName = null,
   generationSession = null,
   pendingImageOperation = null,
   createdAt = new Date().toISOString(),
@@ -1495,6 +1503,7 @@ export function createDraftRecordV3({
   return normalizeDraftRecordV3({
     schema: DRAFT_RECORD_V3_SCHEMA,
     draft_id: draftId,
+    ...(displayName == null ? {} : { display_name: displayName }),
     created_at: createdAt,
     updated_at: updatedAt,
     content_package: contentPackage,
@@ -1681,6 +1690,7 @@ export function saveDraftRecordV3(value, options = {}) {
   const updatedAt = options.updatedAt || new Date().toISOString();
   const replacement = createDraftRecordV3({
     draftId: targetId,
+    displayName: options.displayName === undefined ? previous.display_name : options.displayName,
     contentPackage: options.contentPackage === undefined ? previous.content_package : options.contentPackage,
     generationSession: options.generationSession === undefined ? previous.generation_session : options.generationSession,
     pendingImageOperation: Object.prototype.hasOwnProperty.call(options, "pendingImageOperation")
@@ -1763,6 +1773,7 @@ export function forkDraftForReferenceEditV3(value, { newDraftId, currentContent,
   });
   const nextWorkspace = saveDraftRecordV3(created.workspace, {
     draftId: created.activeDraft.draft_id,
+    displayName: current.display_name,
     generationSession: session ? { ...session, image_resume: null } : null,
     updatedAt: created.activeDraft.updated_at,
   });

@@ -355,6 +355,15 @@ function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAs
       if (interactionMode === "move") onObjectPointerCancel?.(event, objectId);
       dragRef.current = null;
     }}
+    onWheel={renderOnly ? undefined : (event) => {
+      if (interactionMode !== "direct") return;
+      event.stopPropagation();
+      event.preventDefault();
+      onSelect?.(id);
+      onSelectObject?.(objectId);
+      const delta=event.deltaY < 0 ? 0.05 : -0.05;
+      onEdit?.(id,{zoom:Math.min(1.8,Math.max(1,edit.zoom+delta))});
+    }}
     style={{
       ...objectStyle,
       "--image-focal-x": `${edit.focalX}%`,
@@ -452,7 +461,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     } else if (drag.next) onObjectEdit?.(objectId, drag.next);
     drag.captureTarget?.releasePointerCapture?.(event.pointerId);
   };
-  const beginObjectResize = (event, objectId) => {
+  const beginObjectResize = (event, objectId, corner = "se") => {
     event.stopPropagation();
     onSelectObject?.(objectId);
     if (Number.isFinite(event.button) && event.button !== 0) return;
@@ -461,13 +470,14 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     if (!target || !pageRect) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    directResizeRef.current = { objectId, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY, pageWidth:pageRect.width, pageHeight:pageRect.height, start:objectEditFor(state, objectId), target, next:null, captureTarget:event.currentTarget };
+    const [signX,signY]=({nw:[-1,-1],ne:[1,-1],sw:[-1,1],se:[1,1]})[corner]||[1,1];
+    directResizeRef.current = { objectId, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY, pageWidth:pageRect.width, pageHeight:pageRect.height, signX, signY, start:objectEditFor(state, objectId), target, next:null, captureTarget:event.currentTarget };
   };
   const continueObjectResize = (event, objectId) => {
     const drag = directResizeRef.current;
     if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const normalized = ((event.clientX-drag.startX)/Math.max(1,drag.pageWidth) + (event.clientY-drag.startY)/Math.max(1,drag.pageHeight));
+    const normalized = (((event.clientX-drag.startX)/Math.max(1,drag.pageWidth))*drag.signX + ((event.clientY-drag.startY)/Math.max(1,drag.pageHeight))*drag.signY);
     let scale = Math.min(1.4, Math.max(.72, drag.start.scale + normalized * 1.25));
     drag.target.style.setProperty("--object-scale", scale);
     const pageRect = drag.target.closest?.(".html-page")?.getBoundingClientRect();
@@ -490,8 +500,8 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     drag.captureTarget?.releasePointerCapture?.(event.pointerId);
   };
   const directControls = (objectId) => renderOnly || interactionMode !== "direct" || selectedObject !== objectId ? null : <span className="html-editor-direct-controls" aria-label="对象直接调整">
-    <button type="button" className="html-editor-direct-handle is-move" aria-label="拖动模块" title="拖动模块" onPointerDown={(event)=>beginObjectMove(event,objectId,true)} onPointerMove={(event)=>continueObjectMove(event,objectId)} onPointerUp={(event)=>finishObjectMove(event,objectId)} onPointerCancel={(event)=>finishObjectMove(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectMove(event,objectId,false)}>↕</button>
-    <button type="button" className="html-editor-direct-handle is-resize" aria-label="缩放模块" title="缩放模块" onPointerDown={(event)=>beginObjectResize(event,objectId)} onPointerMove={(event)=>continueObjectResize(event,objectId)} onPointerUp={(event)=>finishObjectResize(event,objectId)} onPointerCancel={(event)=>finishObjectResize(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectResize(event,objectId,false)}>↘</button>
+    {["top","right","bottom","left"].map(edge=><button key={edge} type="button" className={`html-editor-direct-handle is-move is-${edge}`} aria-label="拖动模块" title="拖动边缘移动模块" onPointerDown={(event)=>beginObjectMove(event,objectId,true)} onPointerMove={(event)=>continueObjectMove(event,objectId)} onPointerUp={(event)=>finishObjectMove(event,objectId)} onPointerCancel={(event)=>finishObjectMove(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectMove(event,objectId,false)}/>)}
+    {["nw","ne","se","sw"].map(corner=><button key={corner} type="button" className={`html-editor-direct-handle is-resize is-${corner}`} aria-label="缩放模块" title="拖动角点缩放模块" onPointerDown={(event)=>beginObjectResize(event,objectId,corner)} onPointerMove={(event)=>continueObjectResize(event,objectId)} onPointerUp={(event)=>finishObjectResize(event,objectId)} onPointerCancel={(event)=>finishObjectResize(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectResize(event,objectId,false)}/>)}
   </span>;
   const objectMoveHandlers = (objectId) => renderOnly ? {} : interactionMode === "direct" ? {
     onClick: (event) => { event.stopPropagation(); onSelectObject?.(objectId); },

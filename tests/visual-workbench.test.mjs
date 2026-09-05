@@ -130,6 +130,7 @@ test('v3 backup restores the display name and old nameless records still load',a
  const backup=await a.backup(),b=adapter(memoryStorage());await b.load();await b.importFile(JSON.stringify(backup));
  assert.equal(b.activeRecord().display_name,'备份中的作品名');assert.equal(b.activeRecord().content_package.selectedTitle,'未命名作品');
  a.dispose();b.dispose();
+});
 
 test('direct gesture cancellation restores transient DOM and empty edits commit visible fallbacks',async()=>{
  const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');
@@ -141,4 +142,23 @@ test('direct gesture cancellation restores transient DOM and empty edits commit 
  assert.match(editor,/emptyFallback="点击输入标题"/);
  assert.match(editor,/emptyFallback="点击输入正文"/);
  assert.doesNotMatch(editor,/if \(next && next !== String\(value \|\| ""\)\.trim\(\)\) onCommit\(next\)/);
+});
+
+
+test('direct edges move modules, corners resize and image wheel zoom is local',async()=>{
+ const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');
+ assert.match(editor,/\["top","right","bottom","left"\]\.map\(edge/);
+ assert.match(editor,/\["nw","ne","se","sw"\]\.map\(corner/);
+ assert.match(editor,/onWheel=\{renderOnly \? undefined : \(event\) => \{/);
+ assert.match(editor,/onEdit\?\.\(id,\{zoom:Math\.min\(1\.8,Math\.max\(1,edit\.zoom\+delta\)\)\}\)/);
+ assert.match(editor,/signX, signY/);
+});
+
+test('narrow workbench exposes the selected library or page panel without hiding the rail',async()=>{
+ const [source,css]=await Promise.all([readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'),readFile(new URL('../src/visual-workbench/workbench.css',import.meta.url),'utf8')]);
+ assert.match(source,/narrowPanelOpen/);
+ assert.match(source,/vw-panel-open/);
+ assert.match(source,/className="vw-panel-close"/);
+ assert.match(css,/\.vw-body\.vw-panel-open \.vw-left\{display:flex/);
+ assert.match(css,/\.vw-body\.vw-panel-open \.vw-workspace,\.vw-body\.vw-panel-open \.vw-inspector\{display:none\}/);
 });
