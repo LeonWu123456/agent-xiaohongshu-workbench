@@ -100,6 +100,44 @@ function makeUiState() {
   };
 }
 
+test("reference recovery navigates only after durable copy adoption and never invokes generation", async () => {
+  const handlerSource = `async ${namedFunctionSource(mainSource, "openReferenceSettings")}`;
+  for (const scenario of ["success", "no-pending", "locked", "stale", "cas-failed", "media-failed", "unconfirmed"]) {
+    const events = [];
+    const dependency = {
+      draftMutationIsLocked: () => scenario === "locked",
+      workspaceEnvelopeRef: { current: { active_draft_id: "original" } },
+      activeDraftRecordV3: () => ({ pending_image_operation: scenario === "no-pending" ? null : { operation_nonce: "original-nonce" } }),
+      scrollCreatorStage: target => events.push(target),
+      mainAuthority: { capture: () => ({}), isCurrent: () => scenario !== "stale" },
+      workspaceEnvelopeV3Token: () => "captured-token",
+      contentRef: { current: { pages: ["original-canvas"] } },
+      currentAuthoringSession: () => ({ text_confirmed: scenario !== "unconfirmed" }),
+      materializeForWorkspace: async value => { if (scenario === "media-failed") throw Error("missing media"); return { value }; },
+      forkDraftForReferenceEditV3: () => { events.push("fork"); return { workspace: {}, activeDraft: { generation_session: { text_confirmed: scenario !== "unconfirmed" } }, previousDraftId: "original" }; },
+      crypto: { randomUUID: () => "copy" },
+      persistAndAdoptWorkspace: async (_workspace, options) => { assert.equal(options.expectedWorkspaceToken, "captured-token"); events.push("persist"); return scenario !== "cas-failed"; },
+      setView: () => {}, setToast: () => {}, console: { warn: () => {} },
+    };
+    const run = new Function(...Object.keys(dependency), `${handlerSource}; return openReferenceSettings;`)(...Object.values(dependency));
+    await run();
+    const expected = scenario === "success" ? ["fork", "persist", "creator-action-references"]
+      : scenario === "unconfirmed" ? ["fork", "persist", "creator-text"]
+      : scenario === "no-pending" ? ["creator-action-references"]
+      : scenario === "cas-failed" ? ["fork", "persist"] : [];
+    assert.deepEqual(events, expected, scenario);
+  }
+  assert.doesNotMatch(handlerSource, /provider\.|generateImageNode|generateTextNode/);
+  assert.match(mainSource, /openReferenceSettings:\s*openReferenceSettings/);
+  assert.doesNotMatch(handlerSource, /可用返回上一稿/);
+});
+
+test("hydrated asset library consumes the same recovery projection as persistent records", () => {
+  assert.match(mainSource, /libraryContentsFromNormalized as libraryContentsFromWorkspaceView/);
+  assert.doesNotMatch(mainSource, /function libraryContentsFromWorkspaceView\(/);
+  assert.ok(!mainSource.includes("文字、画布与发布来源同步恢复"), "activation must not promise publication alignment when the publication gate can still fail");
+});
+
 test("same-draft semantic edit invalidates text/autosave work before the 400ms save", () => {
   const target = { draftId: "draft-A", pageId: "page-A-1" };
   const authority = createMainAuthorityRuntime(() => target);

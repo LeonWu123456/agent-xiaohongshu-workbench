@@ -291,7 +291,8 @@ export function activeDraftRecord(value) {
   return workspace.drafts.find((draft) => draft.draft_id === workspace.active_draft_id);
 }
 
-function libraryContentsFromNormalized(workspace) {
+// Shared read-only projection for normalized persistence and hydrated UI views.
+export function libraryContentsFromNormalized(workspace) {
   return workspace.drafts
     .filter((draft) => {
       const recoveryDraft = /^image-recovery-[0-9a-f]{32}$/.test(draft.draft_id);
@@ -1747,6 +1748,25 @@ export function beginNewDraftV3(value, {
     updatedAt: timestamp,
   });
   return { workspace: nextWorkspace, previousDraftId: workspace.active_draft_id, activeDraft: fresh };
+}
+
+// Frozen pending inputs belong to the original record. Editing uses a new record
+// without reusing either its operation nonce or its paid-generation resume.
+export function forkDraftForReferenceEditV3(value, { newDraftId, currentContent, currentSession, savedAt } = {}) {
+  const workspace = parseWorkspaceEnvelopeV3(value);
+  const current = activeDraftRecordV3(workspace);
+  const content = currentContent === undefined ? current.content_package : currentContent;
+  const session = currentSession === undefined ? current.generation_session : currentSession;
+  const created = beginNewDraftV3(workspace, {
+    newDraftId, currentContent: content, currentSession: session, savedAt,
+    contentPackage: { ...content, id: newDraftId },
+  });
+  const nextWorkspace = saveDraftRecordV3(created.workspace, {
+    draftId: created.activeDraft.draft_id,
+    generationSession: session ? { ...session, image_resume: null } : null,
+    updatedAt: created.activeDraft.updated_at,
+  });
+  return { ...created, workspace: nextWorkspace, activeDraft: activeDraftRecordV3(nextWorkspace) };
 }
 
 export function activateDraftRecordV3(value, draftId, { activatedAt = new Date().toISOString() } = {}) {

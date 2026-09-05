@@ -238,6 +238,8 @@ test("recovery actions invoke only the promised handler, even without a pending 
     ["IMAGE_STEP_UNKNOWN", false, "openRecoveryLibrary"],
     ["LOCAL_MEDIA_MISSING", true, "openBackupRestore"],
     ["REFERENCE_PAYLOAD_TOO_LARGE", false, "openReferenceSettings"],
+    ["REFERENCE_PAYLOAD_TOO_LARGE", true, "openReferenceSettings"],
+    ["IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS", true, "openReferenceSettings"],
     ["EXPIRY_WINDOW_TOO_SHORT", true, "openAccessSettings"],
     ["UNCLASSIFIED_IMAGE_FAILURE", true, "discover"],
     ["UNCLASSIFIED_IMAGE_FAILURE", false, "generateImages"],
@@ -249,6 +251,13 @@ test("recovery actions invoke only the promised handler, even without a pending 
     await runGenerationFailureAction({ feedback: generationFailureFeedback({ providerCode, providerStage: "image" }), hasPendingOperation }, handlers);
     assert.deepEqual(calls, [expected], `${providerCode}: pending=${hasPendingOperation}`);
   }
+});
+
+test("reference recovery with pending work promises preservation instead of a locked destination", async () => {
+  const { generationFailureAction } = await import("../src/generation-feedback.mjs");
+  const feedback = generationFailureFeedback({ providerCode: "REFERENCE_PAYLOAD_TOO_LARGE", providerStage: "image" });
+  assert.match(generationFailureAction({ feedback, hasPendingOperation: true }).label, /保留原任务/);
+  assert.equal(generationFailureAction({ feedback, hasPendingOperation: false }).label, "调整参考图与画面设置");
 });
 
 test("reload never upgrades a saved zero-image recovery to a paid retry", async () => {

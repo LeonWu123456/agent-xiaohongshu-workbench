@@ -215,7 +215,7 @@ export function generationFailureAction({ feedback, hasPendingOperation = false 
   if (action === "REAUTHENTICATE_THEN_DISCOVER") return { handler: "openAccessSettings", label: "打开访问验证" };
   if (action === "RESTORE_LOCAL_MEDIA_OR_BACKUP") return { handler: "openBackupRestore", label: "前往资产库恢复备份" };
   if (["REDUCE_REFERENCES_BEFORE_START", "EDIT_VISUAL_INPUTS_THEN_RESTART"].includes(action)) {
-    return { handler: "openReferenceSettings", label: "调整参考图与画面设置" };
+    return { handler: "openReferenceSettings", label: hasPendingOperation ? "保留原任务并调整参考图" : "调整参考图与画面设置" };
   }
   if (hasPendingOperation) return { handler: "discover", label: "检查当前任务状态（不生成图片）" };
   if (feedback.direct_paid_retry_allowed === false) return { handler: "openRecoveryLibrary", label: "前往资产库找回原任务" };

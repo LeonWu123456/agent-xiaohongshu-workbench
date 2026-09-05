@@ -30,6 +30,8 @@ import {
   activeDraftRecordV3,
   authoringSessionForDraftSnapshotV3,
   beginNewDraftV3,
+  forkDraftForReferenceEditV3,
+  libraryContentsFromNormalized as libraryContentsFromWorkspaceView,
   buildWorkspaceBackupV3,
   commitDraftImageCompletionV3,
   commitDraftImagePlannerFailureV3,
@@ -364,22 +366,6 @@ async function resolveLocalBlobMedia(url) {
   if (!response.ok) throw new TypeError("WORKSPACE_BLOB_MEDIA_READ_FAILED");
   const blob = await response.blob();
   return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type };
-}
-
-function libraryContentsFromWorkspaceView(workspace) {
-  return (workspace?.drafts || [])
-    .filter((draft) => Boolean(draft?.content_package?.saved_at) || (
-      /^image-recovery-[0-9a-f]{32}$/.test(draft?.draft_id || "")
-      && draft?.pending_image_operation == null
-      && draft?.generation_session?.text_confirmed === true
-      && draft?.content_package?.generation?.source_draft_id === draft?.generation_session?.assembled_draft_id
-    ))
-    .map((draft) => ({
-      ...draft.content_package,
-      draft_record_id: draft.draft_id,
-      id: draft.content_package.id || draft.draft_id,
-      saved_at: draft.content_package.saved_at || draft.updated_at,
-    }));
 }
 
 function loadPromptMemory() {
@@ -2144,6 +2130,40 @@ function App() {
     }
   }
 
+  async function openReferenceSettings() {
+    if (draftMutationIsLocked()) return false;
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    if (!activeDraftRecordV3(baseWorkspace).pending_image_operation) {
+      scrollCreatorStage("creator-action-references");
+      return true;
+    }
+    const operation = mainAuthority.capture("FORK_REFERENCE_EDIT", { envelopeScoped: true });
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
+    try {
+      const materialized = await materializeForWorkspace({ current_content: currentContent, current_session: currentSession });
+      if (!mainAuthority.isCurrent(operation)) return false;
+      const created = forkDraftForReferenceEditV3(baseWorkspace, {
+        newDraftId: crypto.randomUUID(),
+        currentContent: materialized.value.current_content,
+        currentSession: materialized.value.current_session,
+      });
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, operation, reason: "FORK_REFERENCE_EDIT" })) return false;
+      setView("compose");
+      const confirmed = created.activeDraft.generation_session?.text_confirmed;
+      scrollCreatorStage(confirmed ? "creator-action-references" : "creator-text");
+      setToast(confirmed
+        ? "原任务已完整保留；现在可在副本调整参考图，未调用生成服务。原任务在资产库标为待恢复配图"
+        : "原任务已完整保留；请先确认副本文字，再调整参考图。本次未调用生成服务");
+      return true;
+    } catch (error) {
+      console.warn(error);
+      setToast("编辑副本未建立，原任务和画布未改变；请先检查本机存储或恢复备份");
+      return false;
+    }
+  }
+
   async function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
     if (workspaceMutationIsLocked()) return false;
     const operation = mainAuthority.capture("CREATE_AUTHORING_DRAFT", { envelopeScoped: true });
@@ -2213,7 +2233,7 @@ function App() {
       setRealityFeedbackId(null);
       setView("compose");
       setCreatorOpen(Boolean(activated.activeDraft.generation_session));
-      setToast("已切回完整稿件；文字、画布与发布来源同步恢复");
+      setToast("已切回完整稿件；能否发布仍以当前文字与画布校验结果为准");
       return true;
     } catch (error) {
       console.warn(error);
@@ -3763,7 +3783,7 @@ function App() {
             discover: () => generateImageNode({ recoveryOperation: Boolean(stalePendingImageOperation), discoveryOnly: true }),
             openRecoveryLibrary: () => { setView("library"); setToast("请在资产库找回原配图任务或恢复备份；本次没有生成图片"); },
             openBackupRestore: () => { setView("library"); setToast("请点击恢复备份，选择已有工作台备份；本次没有生成图片"); },
-            openReferenceSettings: () => scrollCreatorStage("creator-action-references"),
+            openReferenceSettings: openReferenceSettings,
             openAccessSettings: openProviderSettings,
             generateImages: () => generateImageNode(),
           })}

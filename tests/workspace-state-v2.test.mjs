@@ -25,6 +25,7 @@ import {
   authoringSessionForDraftSnapshotV3,
   beginNewDraft,
   beginNewDraftV3,
+  forkDraftForReferenceEditV3,
   buildWorkspaceBackup,
   buildWorkspaceEnvelope,
   buildWorkspaceBackupV2,
@@ -1585,6 +1586,40 @@ test("v3 main mutation helpers preserve pending image authority across autosave,
   assert.equal(profiled.profile.account_owner, "小师妹本人");
   assert.deepEqual(activeDraftRecordV3(profiled).pending_image_operation, pending);
   assert.match(workspaceEnvelopeV3Token(profiled), /workspace-envelope\.v3/);
+});
+
+test("reference edit forks current inputs without cloning or changing pending operation authority", () => {
+  const session = { ...fullSession("reference-text"), action_reference_note: "原始说明" };
+  const pending = createPendingImageOperation({
+    operationNonce: "1".repeat(64),
+    operationSnapshot: imageOperationSnapshot("reference-a", session.text_draft),
+    operationSnapshotHash: "2".repeat(64), inputHash: "3".repeat(64),
+    orderedReferenceManifest: [], protocolState: "UNKNOWN",
+  });
+  const record = createDraftRecordV3({ draftId: "reference-a", contentPackage: assembledContent(session, "reference-a"), generationSession: session, pendingImageOperation: pending, createdAt: T0 });
+  const workspace = parseWorkspaceEnvelopeV3({ schema: WORKSPACE_ENVELOPE_V3_SCHEMA, authority_effect: "LOCAL_EDITING_ONLY", updated_at: T0, profile: createProfileV2(), active_draft_id: record.draft_id, drafts: [record], legacy_v2_source: null });
+  const before = JSON.stringify(workspace);
+  const forked = forkDraftForReferenceEditV3(workspace, { newDraftId: "reference-b", savedAt: T1 });
+  assert.equal(JSON.stringify(workspace), before, "pure helper never mutates the source");
+  assert.equal(forked.previousDraftId, record.draft_id);
+  assert.equal(forked.activeDraft.draft_id, "reference-b");
+  assert.equal(forked.activeDraft.content_package.id, "reference-b");
+  assert.equal(forked.activeDraft.pending_image_operation, null);
+  assert.equal(forked.activeDraft.generation_session.image_resume, null);
+  assert.deepEqual(forked.activeDraft.generation_session.text_draft, record.generation_session.text_draft);
+  assert.equal(forked.activeDraft.generation_session.text_confirmed, true);
+  assert.deepEqual(forked.activeDraft.content_package.pages, record.content_package.pages);
+  assert.deepEqual(forked.workspace.drafts.find(draft => draft.draft_id === record.draft_id).pending_image_operation, record.pending_image_operation);
+  const edited = saveDraftRecordV3(forked.workspace, { generationSession: { ...forked.activeDraft.generation_session, action_reference_note: "只参考动作" } });
+  const reloaded = parseWorkspaceEnvelopeV3(JSON.parse(JSON.stringify(edited)));
+  assert.equal(activeDraftRecordV3(reloaded).generation_session.action_reference_note, "只参考动作");
+  const original = activeDraftRecordV3(activateDraftRecordV3(reloaded, record.draft_id).workspace);
+  assert.deepEqual(original.pending_image_operation, record.pending_image_operation);
+  assert.deepEqual(original.generation_session, record.generation_session);
+  assert.deepEqual(original.content_package.pages, record.content_package.pages);
+  assert.throws(() => forkDraftForReferenceEditV3(workspace, { newDraftId: record.draft_id }), /already exists/);
+  const unconfirmed = forkDraftForReferenceEditV3(workspace, { newDraftId: "unconfirmed-copy", currentSession: { ...session, text_confirmed: false } });
+  assert.equal(unconfirmed.activeDraft.generation_session.text_confirmed, false, "forking never grants text confirmation");
 });
 
 test("autosave derives image resume from the same DraftRecord snapshot", () => {
