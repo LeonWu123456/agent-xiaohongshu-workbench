@@ -3595,3 +3595,40 @@ test('failed planner preallocation release is atomic, preserves cached data, and
  assert.ok(!/redis\.call\(['"](?:DEL|UNLINK|EXPIRE|PEXPIRE|SET)['"]/.test(lua),'release must not delete or replace data or TTLs');
  const before=commands.length;await assert.rejects(()=>ledger.releaseFailedPlannerPreallocation({metaKey:'unrelated:meta',capacityGeneration:'b'.repeat(64)}),/INVALID/);assert.equal(commands.length,before);
 });
+
+
+test('native Redis Lua never partially decrements malformed counters and releases a terminal budget exactly once', {skip:!process.env.XSM_NATIVE_REDIS_ROOT,timeout:60000},async()=>{
+ const {spawn,execFile}=await import('node:child_process');const {promisify}=await import('node:util');const {mkdtemp,rm}=await import('node:fs/promises');
+ const exec=promisify(execFile),dir=await mkdtemp('/tmp/xsm-quota-'),socket=dir+'/redis.sock',bin=process.env.XSM_NATIVE_REDIS_ROOT+'/src/';
+ const server=spawn(bin+'redis-server',['--port','0','--unixsocket',socket,'--save','','--appendonly','no','--dir',dir],{stdio:'ignore'});
+ const cli=async(...args)=>JSON.parse((await exec(bin+'redis-cli',['-s',socket,'--json','-e',...args.map(String)],{maxBuffer:2000000})).stdout);
+ const root='xiaoshimei:image-d37:{xiaoshimei-studio-v2}',scope=root+':scope:'+('a'.repeat(32)),cap=root+':capacity',meta=scope+':run:images-123-deadbeef:meta',expiry=scope+':expiry',asset=scope+':run:images-123-deadbeef:asset:fixture',generation='b'.repeat(64);
+ const cached=JSON.stringify({status:'ERROR',error:{code:'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS'},progress:{image_upstream_calls:0},original_copy:'exact cached failure retained'});
+ const dict=value=>Array.isArray(value)?Object.fromEntries(Array.from({length:value.length/2},(_,i)=>[value[i*2],value[i*2+1]])):value;
+ const snapshot=async()=>({capacity:dict(await cli('HGETALL',cap)),cache:await cli('HGET',meta,'cached_response_json'),asset:await cli('GET',asset),ttl:await cli('PEXPIRETIME',meta),assetTTL:await cli('PEXPIRETIME',asset),expiry:await cli('ZRANGE',expiry,0,-1)});
+ const seed=async(capPatch={},metaPatch={})=>{
+  await cli('FLUSHDB');const capacity={schema:'xiaoshimei.image-ledger-capacity.v2',capacity_generation:generation,reserved_bytes:'300',live_reservations:'3',unfinalized_inventory:'3',...capPatch};
+  const record={status:'PLANNER_FAILED',capacity_generation:generation,capacity_released:'0',reservation_count:'0',capacity_reservation_bytes:'100',cached_response_json:cached,...metaPatch};
+  await cli('HSET',cap,...Object.entries(capacity).flat());await cli('HSET',meta,...Object.entries(record).flat());await cli('SET',asset,'preserve-image-bytes');
+  const deadline=Date.now()+600000;await cli('PEXPIREAT',meta,deadline);await cli('PEXPIREAT',asset,deadline);await cli('ZADD',expiry,deadline,meta+'|'+generation+'|'+record.capacity_reservation_bytes);
+ };
+ const ledger=createUpstashImageLedger({url:'https://native-test.invalid',token:'isolated-native-redis-fixture',fetchImpl:async(_url,options)=>{
+  try{const result=await cli(...JSON.parse(options.body));return {ok:true,json:async()=>({result})};}
+  catch(error){return {ok:true,json:async()=>({error:String(error.stderr||error.message).slice(0,300)})};}
+ }});
+ const release=()=>ledger.releaseFailedPlannerPreallocation({metaKey:meta,capacityGeneration:generation});
+ try{
+  let ready=false;for(let i=0;i<100&&!ready;i++){try{ready=await cli('PING')==='PONG';}catch{await new Promise(r=>setTimeout(r,30));}}assert.ok(ready,'isolated Unix-socket Redis started');
+  // Reject every corrupt integer BEFORE the first HINCRBY. Lua errors do not roll back.
+  for(const field of ['live_reservations','unfinalized_inventory','reserved_bytes'])for(const value of ['1.5','3e2','03','-1','9007199254740992','']){
+   await seed({[field]:value});const before=await snapshot();for(let retry=0;retry<2;retry++){const result=await release().catch(()=>({status:'THROWN'}));assert.notEqual(result.status,'RELEASED');assert.deepEqual(await snapshot(),before,field+'='+value+' retry '+retry);}
+  }
+  for(const value of ['1.5','1e2','0100','-1','9007199254740992','']){await seed({},{capacity_reservation_bytes:value});const before=await snapshot();await release().catch(()=>{});assert.deepEqual(await snapshot(),before,'invalid amount '+value);}
+  for(const state of ['READY','PARTIAL','COMPLETE','UNKNOWN','PLANNING','MATERIALIZING']){await seed({},{status:state});const before=await snapshot();assert.equal((await release()).status,'NOT_ELIGIBLE');assert.deepEqual(await snapshot(),before);}
+  for(const patch of [{reservation_count:'1'},{run_json:'{}'},{checkpoint_sha:'x'},{cached_response_json:'broken'},{cached_response_json:JSON.stringify({status:'ERROR',error:{code:'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS'},progress:{image_upstream_calls:1}})}]){await seed({},patch);const before=await snapshot();assert.equal((await release()).status,'NOT_ELIGIBLE');assert.deepEqual(await snapshot(),before);}
+  await seed();const before=await snapshot();const replies=await Promise.all([release(),release()]);assert.deepEqual(replies.map(r=>r.status).sort(),['ALREADY_RELEASED','RELEASED']);const after=await snapshot();
+  assert.equal(after.capacity.reserved_bytes,'200');assert.equal(after.capacity.live_reservations,'2');assert.equal(after.capacity.unfinalized_inventory,'2');
+  assert.equal(after.cache,before.cache);assert.equal(after.asset,before.asset);assert.equal(after.ttl,before.ttl);assert.equal(after.assetTTL,before.assetTTL);assert.deepEqual(after.expiry,[]);
+  assert.equal(await cli('HGET',meta,'capacity_released'),'1');
+ }finally{server.kill('SIGTERM');await new Promise(r=>{if(server.exitCode!==null)return r();server.once('exit',r);setTimeout(r,2000).unref();});await rm(dir,{recursive:true,force:true});}
+});

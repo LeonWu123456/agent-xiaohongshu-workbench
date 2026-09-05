@@ -1507,12 +1507,20 @@ return reply
 // its cached response, references and original TTL; release only unused growth
 // reservation. Other states (including COMPLETE) retain their original budget.
 const D37_RELEASE_FAILED_PLANNER_PREALLOCATION_LUA = `
+-- Redis Lua errors do not roll back earlier writes. Validate every integer's
+-- canonical stored representation and JS-safe range before any mutation.
+local function exact_uint(value)
+  if type(value) ~= 'string' or (value ~= '0' and not string.match(value, '^[1-9][0-9]*$')) then return nil end
+  local number = tonumber(value)
+  if not number or number < 0 or number > 9007199254740991 or math.floor(number) ~= number then return nil end
+  return number
+end
 if redis.call('HGET', KEYS[1], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v2'
   or redis.call('HGET', KEYS[1], 'capacity_generation') ~= ARGV[1] then return {'CAPACITY_GENERATION_DRIFT'} end
 if redis.call('HGET', KEYS[2], 'status') ~= 'PLANNER_FAILED' then return {'NOT_ELIGIBLE'} end
 if redis.call('HGET', KEYS[2], 'capacity_released') == '1' then return {'ALREADY_RELEASED'} end
 if redis.call('HGET', KEYS[2], 'capacity_generation') ~= ARGV[1]
-  or tonumber(redis.call('HGET', KEYS[2], 'reservation_count') or '-1') ~= 0
+  or redis.call('HGET', KEYS[2], 'reservation_count') ~= '0'
   or redis.call('HEXISTS', KEYS[2], 'run_json') ~= 0
   or redis.call('HEXISTS', KEYS[2], 'checkpoint_sha') ~= 0 then return {'NOT_ELIGIBLE'} end
 local raw = redis.call('HGET', KEYS[2], 'cached_response_json')
@@ -1522,14 +1530,14 @@ if not ok or type(response) ~= 'table' or response.status ~= 'ERROR'
   or type(response.error) ~= 'table' or response.error.code ~= 'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS'
   or type(response.progress) ~= 'table' or response.progress.image_upstream_calls ~= 0 then return {'NOT_ELIGIBLE'} end
 local amount_text = redis.call('HGET', KEYS[2], 'capacity_reservation_bytes') or ''
-local amount = tonumber(amount_text)
+local amount = exact_uint(amount_text)
 if not amount or amount <= 0 then return {'CAPACITY_ACCOUNTING_INVALID'} end
 local member = KEYS[2] .. '|' .. ARGV[1] .. '|' .. amount_text
 if redis.call('ZSCORE', KEYS[3], member) == false then return {'CAPACITY_ACCOUNTING_INVALID'} end
-local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_bytes') or '-1')
-local live = tonumber(redis.call('HGET', KEYS[1], 'live_reservations') or '-1')
-local inventory = tonumber(redis.call('HGET', KEYS[1], 'unfinalized_inventory') or '-1')
-if reserved < amount or live < 1 or inventory < 1 then return {'CAPACITY_ACCOUNTING_INVALID'} end
+local reserved = exact_uint(redis.call('HGET', KEYS[1], 'reserved_bytes'))
+local live = exact_uint(redis.call('HGET', KEYS[1], 'live_reservations'))
+local inventory = exact_uint(redis.call('HGET', KEYS[1], 'unfinalized_inventory'))
+if not reserved or not live or not inventory or reserved < amount or live < 1 or inventory < 1 then return {'CAPACITY_ACCOUNTING_INVALID'} end
 redis.call('HINCRBY', KEYS[1], 'reserved_bytes', -amount)
 redis.call('HINCRBY', KEYS[1], 'live_reservations', -1)
 redis.call('HINCRBY', KEYS[1], 'unfinalized_inventory', -1)
