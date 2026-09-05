@@ -606,6 +606,22 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
   };
 }
 
+
+// Read-only operational evidence. No source text, asset bytes, credentials or
+// recovery tokens are emitted. Keep signature readiness separate from capacity.
+export async function inspectCapacityMetadata({env=process.env,fetchImpl=globalThis.fetch,redis=null}={}) {
+ const store=redis||{command:args=>redisCommand(required(env,'UPSTASH_REDIS_REST_URL'),required(env,'UPSTASH_REDIS_REST_TOKEN'),args,fetchImpl)};
+ const now=await redisTimeMs(store),keys=new Set();let cursor='0',pages=0;
+ do{const reply=await store.command(['SCAN',cursor,'MATCH','xiaoshimei:image-*','COUNT','500']);if(!Array.isArray(reply)||!Array.isArray(reply[1]))throw new Error('CAPACITY_DIAGNOSTIC_SCAN_INVALID');cursor=String(reply[0]);reply[1].forEach(k=>keys.add(String(k)));if(++pages>30||keys.size>2000)throw new Error('CAPACITY_DIAGNOSTIC_BOUNDED_LIMIT');}while(cursor!=='0');
+ let physicalBytes=0;const runs=[],capacity=hashObject(await store.command(['HGETALL',productCapacityKey()]));
+ for(const key of keys){const bytes=Number(await store.command(['MEMORY','USAGE',key]));if(!Number.isSafeInteger(bytes)||bytes<0)throw new Error('CAPACITY_DIAGNOSTIC_USAGE_INVALID');physicalBytes+=bytes;
+  if(!/:run:images-[^:]+:meta$/.test(key))continue;
+  const v=await store.command(['HMGET',key,'status','recoverable_until_ms','physical_expire_at_ms','capacity_reservation_bytes','capacity_released','reservation_count']);
+  runs.push({key_sha256:sha256(Buffer.from(key)),status:v[0],recoverable_until_ms:Number(v[1]),physical_expire_at_ms:Number(v[2]),reservation_bytes:Number(v[3]),released:Number(v[4]),image_reservations:Number(v[5]),recovery_expired:Number(v[1])>0&&Number(v[1])<now,own_scope:key.startsWith(appRoot(env.XIAOSHIMEI_APP_SCOPE||'xiaoshimei-test-scope')+':')});
+ }
+ return {observed_at_ms:now,physical_bytes:physicalBytes,key_count:keys.size,capacity:Object.fromEntries(['reserved_bytes','live_reservations','unfinalized_inventory','headroom_bytes','capacity_limit_bytes','worst_case_run_bytes'].map(k=>[k,Number(capacity[k])])),runs};
+}
+
 async function main() {
   if (enabledEnv(process.env, "XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE")) {
     process.stdout.write(`${JSON.stringify(await recoverZeroProviderFalseUnknown(), null, 2)}\n`);
@@ -616,6 +632,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
+  const capacityMetadata = process.env.VERCEL_ENV === "preview" ? await inspectCapacityMetadata() : null;
   process.stdout.write(`${JSON.stringify({
     status: "ATTESTATION_INSTALLED",
     public_key_spki_base64: result.public_key_spki_base64,
@@ -625,6 +642,7 @@ async function main() {
     relevant_audit_set_hash: result.relevant_audit_set_hash,
     audit_entry_count: result.audit_entry_count,
     capacity_snapshot: result.capacity_snapshot,
+    ...(capacityMetadata ? {capacity_metadata: capacityMetadata} : {}),
     attestation_generation: result.envelope.payload.attestation_generation,
     capacity_generation: result.envelope.payload.capacity_generation,
     renew_at_ms: result.envelope.payload.renew_at_ms,

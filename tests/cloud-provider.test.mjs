@@ -3575,3 +3575,12 @@ test('attestation report exposes existing capacity counters without resetting li
  assert.equal(fixture.state.capacity.reserved_bytes,2800000);
  assert.ok(!JSON.stringify(result.capacity_snapshot).includes(fixture.env.UPSTASH_REDIS_REST_TOKEN));
 });
+
+
+test('capacity inventory diagnosis reads numeric metadata only and never changes a run',async()=>{
+ const {inspectCapacityMetadata}=await import('../scripts/attest-upstash-image-ledger.mjs');const commands=[];
+ const root='xiaoshimei:image-d37:{xiaoshimei-studio-v2}',keys=[root+':capacity',root+':scope:'+('a'.repeat(32))+':run:images-123-deadbeef:meta'];
+ const redis={command:async args=>{commands.push(args);if(args[0]==='TIME')return ['1000','0'];if(args[0]==='SCAN')return ['0',keys];if(args[0]==='MEMORY')return 100;if(args[0]==='HGETALL')return ['reserved_bytes','10','live_reservations','1','unfinalized_inventory','1','headroom_bytes','5','capacity_limit_bytes','1000','worst_case_run_bytes','10'];if(args[0]==='HMGET')return ['PLANNER_FAILED','900000','1100000','10','0','0'];throw new Error('UNEXPECTED_MUTATION');}};
+ const result=await inspectCapacityMetadata({redis});assert.equal(result.physical_bytes,200);assert.equal(result.runs.length,1);assert.equal(result.runs[0].status,'PLANNER_FAILED');assert.equal(result.runs[0].recovery_expired,true);
+ assert.ok(commands.every(a=>['TIME','SCAN','MEMORY','HGETALL','HMGET'].includes(a[0])));assert.ok(!JSON.stringify(result).includes(keys[1]));
+});
