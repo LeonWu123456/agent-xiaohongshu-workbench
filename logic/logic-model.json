@@ -239,6 +239,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/model.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/html-layout.mjs",
+          "kind": "implementation"
         }
       ]
     },
