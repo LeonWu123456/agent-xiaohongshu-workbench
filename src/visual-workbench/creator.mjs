@@ -227,7 +227,7 @@ export async function runImageGeneration({ provider, service, session, pageCount
       await service.sync({allowPending:false});
       throw imageResponseError(result);
     }
-    if (result.status !== 'COMPLETE' && !discoveryOnly) throw imageResponseError(result);
+    if (result.status === 'ERROR' || (result.status !== 'COMPLETE' && !discoveryOnly)) throw imageResponseError(result);
     return { status: completed ? 'COMPLETE' : result.status, content:completed?.content || null, workspace:completed?.workspace || service.workspace(), request_modes:requestModes, pending:service.pending(), layout_error:layoutError };
   } catch (error) {
     if (error?.intentionalStop === true && error?.checkpointPersisted === true) {

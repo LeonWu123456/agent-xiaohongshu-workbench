@@ -1768,7 +1768,9 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     }
     if (keys.some((key) => !inventoryUnion.has(key))) throw new Error("IMAGE_LEDGER_INVENTORY_UNION_MISMATCH");
     if (physicalBytes + reservedBytes + attestation.worst_case_run_bytes + attestation.headroom_bytes > attestation.capacity_limit_bytes) {
-      throw new Error("IMAGE_LEDGER_CAPACITY_EXHAUSTED");
+      const error=new Error("IMAGE_LEDGER_CAPACITY_EXHAUSTED");
+      error.details={physical_bytes:physicalBytes,reserved_bytes:reservedBytes,next_run_bytes:attestation.worst_case_run_bytes,headroom_bytes:attestation.headroom_bytes,capacity_limit_bytes:attestation.capacity_limit_bytes,live_reservations:liveReservations,unfinalized_inventory:unfinalizedInventory};
+      throw error;
     }
     return { ...attestation, mode: "START", runtime_attested: true, physicalBytes, reservedBytes, liveReservations, unfinalizedInventory, legacyRootCount: legacyCapacityKeys.length };
   };

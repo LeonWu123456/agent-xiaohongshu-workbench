@@ -240,3 +240,12 @@ test('single-image alternatives preserve source and restore one selected image w
  const variants=service.workspace().drafts.find(d=>d.generation_session?.image_variant_target);await service.activateDraft(variants.draft_id);
  await assert.rejects(()=>applyPageVariant({service,candidateIndex:0}),/原页.*变化/);
 });
+
+
+test('discovery ERROR is never reported as saved recovery and never releases or retries a paid lane',async()=>{
+ const {service,session}=await confirmedService();
+ const bootstrap={fetchImageMediaDelta:async()=>[],generateImages:async(input,onProgress)=>{await onProgress(readyImageResponse());return readyImageResponse();}};
+ await runImageGeneration({provider:bootstrap,service,session,discoveryOnly:true});const before=structuredClone(service.activeRecord());let calls=0;
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async input=>{calls++;assert.equal(input.mode,'DISCOVER');return {...readyImageResponse(),status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'},upstream_calls:0};}};
+ await assert.rejects(()=>runImageGeneration({provider,service,session:service.session(),discoveryOnly:true}),/IMAGE_LEDGER_RUN_MISSING/);assert.equal(calls,1);assert.deepEqual(service.activeRecord(),before);
+});
