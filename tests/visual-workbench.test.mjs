@@ -335,3 +335,23 @@ test('source gap inside one already arranged paragraph refuses atomically instea
  const api=await import('../src/visual-workbench/model.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body='先洗手。再揉面。';c.body='先洗手。备好面粉。再揉面。';c=api.composeEditableContent(c);const before=structuredClone(c);
  assert.throws(()=>api.reconcileConfirmedCopy(c),e=>e.code==='CONFIRMED_COPY_SEQUENCE_CONFLICT');assert.deepEqual(c,before);
 });
+
+
+test('free-object text owns letter spacing so editor chrome cannot change exported wrapping',async()=>{
+ const source=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');const css=source.slice(source.indexOf('function freeCss('),source.indexOf('// The browser owns editable descendants'));
+ assert.match(css,/letterSpacing:0/);
+});
+
+
+test('derived page headings never count as proof that a missing body instruction was delivered',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');const {freeObjectText}=await import('../src/html-layout.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body='再揉面。';c.body='先洗手。洗手。再揉面。';c=api.composeEditableContent(c);const fixed=api.reconcileConfirmedCopy(c);
+ const text=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)).map(o=>freeObjectText(p,o))).join('\n');assert.ok(text.includes('先洗手。\n\n洗手。'));assert.ok(text.indexOf('先洗手。')<text.indexOf('再揉面。'));assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);
+ const headingOnly=structuredClone(c);headingOnly.pages[0].title='先洗手。';assert.ok(api.confirmedCopyCoverage(headingOnly).missing.some(x=>x.text==='先洗手。'));
+});
+
+
+test('repeated source actions each require their own ordered visible occurrence',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');const {freeObjectText}=await import('../src/html-layout.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,2);c.visible_pages=2;c.pages[0].body='搅拌。';c.pages[1].body='装盘。';c.body='搅拌。静置。搅拌。装盘。';c=api.composeEditableContent(c);
+ const audit=api.confirmedCopyCoverage(c);assert.equal(audit.checked_segments,4);assert.deepEqual(audit.missing.map(x=>x.text),['静置。','搅拌。']);
+ const fixed=api.reconcileConfirmedCopy(c);const text=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)).map(o=>freeObjectText(p,o))).join('');assert.equal(text.replace(/\s/g,''),c.body);assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);assert.deepEqual(api.reconcileConfirmedCopy(fixed),fixed);
+});

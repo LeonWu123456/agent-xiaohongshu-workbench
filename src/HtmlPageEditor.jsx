@@ -913,7 +913,7 @@ export function measureFlowObjects(node, page) {
  return normalizeFreeObjects(objects);
 }
 function freeCss(item) {
- return {position:'absolute',left:0,top:0,margin:0,padding:0,boxSizing:'border-box',width:`${item.width}cqw`,height:item.kind==='image'?`${item.height}cqh`:'auto',minHeight:item.kind==='text'?`${item.font_size/1080*100*item.line_height}cqw`:undefined,transform:`translate(${item.x}cqw, ${item.y}cqh) rotate(${item.rotation}deg)`,transformOrigin:'50% 50%',opacity:item.opacity,fontSize:item.kind==='text'?`${item.font_size/1080*100}cqw`:undefined,fontFamily:FREE_FONTS[item.font_family],fontWeight:item.font_weight,fontStyle:item.font_style,lineHeight:item.line_height,textAlign:item.align,color:item.color};
+ return {position:'absolute',left:0,top:0,margin:0,padding:0,boxSizing:'border-box',width:`${item.width}cqw`,height:item.kind==='image'?`${item.height}cqh`:'auto',minHeight:item.kind==='text'?`${item.font_size/1080*100*item.line_height}cqw`:undefined,transform:`translate(${item.x}cqw, ${item.y}cqh) rotate(${item.rotation}deg)`,transformOrigin:'50% 50%',opacity:item.opacity,fontSize:item.kind==='text'?`${item.font_size/1080*100}cqw`:undefined,fontFamily:FREE_FONTS[item.font_family],fontWeight:item.font_weight,fontStyle:item.font_style,letterSpacing:0,lineHeight:item.line_height,textAlign:item.align,color:item.color};
 }
 // The browser owns editable descendants. React owns only the stable outer box.
 function syncFreeText(element,item,page,isEditing){

@@ -217,23 +217,31 @@ export function composeEditableContent(content,{force=false,pageIndex=null,measu
 const copyKey=value=>String(value||'').replace(/\s+/gu,' ').trim();
 function visibleCopy(page,index){
  const objects=page.html_state?.free_objects||seedEditableObjects(page,index);
- return objects.filter(o=>o.kind==='text'&&o.opacity!==0&&o.x<100&&o.y<100&&o.x+o.width>0&&o.y+o.height>0).map(o=>freeObjectText(page,o)).join('\n');
+ return objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)&&!/^panel-\d+-title$/.test(o.binding||'')&&o.opacity!==0&&o.x<100&&o.y<100&&o.x+o.width>0&&o.y+o.height>0).map(o=>freeObjectText(page,o)).join('\n');
 }
 export function confirmedCopyCoverage(content){
- const pages=(content?.pages||[]).slice(0,content?.visible_pages||0).map((p,i)=>new Set([...visibleCopy(p,i).matchAll(/[^。！？\r\n]+[。！？]?/gu)].map(m=>copyKey(m[0]))));
- const seen=new Set(),segments=[];
- for(const match of String(content?.body||'').matchAll(/[^。！？\r\n]+[。！？]?/gu)){
-  const text=match[0].trim(),key=copyKey(text);if(!key||seen.has(key))continue;seen.add(key);
-  segments.push({index:segments.length,text,key,page_indexes:pages.flatMap((p,i)=>p.has(key)?[i]:[])});
+ const split=value=>[...String(value||'').matchAll(/[^。！？\r\n]+[。！？]?/gu)].map(m=>({text:m[0].trim(),key:copyKey(m[0])})).filter(x=>x.key);
+ const visible=(content?.pages||[]).slice(0,content?.visible_pages||0).flatMap((p,i)=>split(visibleCopy(p,i)).map(x=>({...x,page_index:i})));
+ const segments=split(content?.body).map((x,index)=>({...x,index,page_indexes:[]}));
+ const n=segments.length,m=visible.length;
+ // Bounded sequence matching: each source occurrence must consume one distinct
+ // visible occurrence in order. Oversized documents stay explicitly unverified.
+ if(n>2048||m>4096||(n+1)*(m+1)>2000000)return{checked_segments:n,segments,missing:segments,unsupported:true};
+ const dp=Array.from({length:n+1},()=>new Uint16Array(m+1));
+ for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)dp[i][j]=segments[i].key===visible[j].key?1+dp[i+1][j+1]:Math.max(dp[i+1][j],dp[i][j+1]);
+ let i=0,j=0;
+ while(i<n&&j<m){
+  if(segments[i].key===visible[j].key){segments[i].page_indexes=[visible[j].page_index];i++;j++;}
+  else if(dp[i][j+1]>=dp[i+1][j])j++;else i++;
  }
- return {checked_segments:segments.length,segments,missing:segments.filter(s=>!s.page_indexes.length)};
+ return{checked_segments:n,segments,missing:segments.filter(x=>!x.page_indexes.length),unsupported:false};
 }
 export function reconcileConfirmedCopy(content,{measureText}={}){
  const repairPages=new Set();
  let result=composeEditableContent(content,{measureText});
- const first=confirmedCopyCoverage(result);if(!first.missing.length)return result;
+ const first=confirmedCopyCoverage(result);if(first.unsupported){const error=new Error('全文或画布句子过多，请先拆分作品；原稿未改变。');error.code='CONFIRMED_COPY_AUDIT_LIMIT';throw error;}if(!first.missing.length)return result;
  for(const missing of first.missing){
-  const audit=confirmedCopyCoverage(result),gap=audit.segments.find(x=>x.key===missing.key);
+  const audit=confirmedCopyCoverage(result),gap=audit.segments[missing.index];
   if(!gap||gap.page_indexes.length)continue;
   const previous=audit.segments.slice(0,gap.index).reverse().find(s=>s.page_indexes.length);
   const following=audit.segments.slice(gap.index+1).find(s=>s.page_indexes.length);
