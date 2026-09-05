@@ -267,3 +267,9 @@ test('split scenes retain their own action identity rather than the parent page 
  const result=composeEditableContent(c,{force:true});assert.equal(result.pages.length,3);
  result.pages.forEach((page,i)=>{assert.equal(page.visual_action,'unique action '+i);assert.equal(page.image_prompt,'unique scene '+i);});
 });
+
+
+test('interactive canvas does not defer manipulation controls past early edits',async()=>{
+ const {readFile}=await import('node:fs/promises');const source=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');
+ assert.match(source,/import Moveable from "react-moveable"/);assert.equal(source.includes('const Moveable = React.lazy('),false);
+});

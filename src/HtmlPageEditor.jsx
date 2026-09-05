@@ -18,7 +18,8 @@ import { cleanupGeneratedGridArtifacts } from "./mother-sheet-artifact-cleanup.m
 
 const PAGE_WIDTH = 1080;
 const PAGE_HEIGHT = 1440;
-const Moveable = React.lazy(() => import("react-moveable"));
+// Admit manipulation controls with the canvas, before early user edits.
+import Moveable from "react-moveable";
 
 function cleanEditableText(node, preserveInline = false) {
   return String((preserveInline ? node?.textContent : node?.innerText) || "").replace(/\u00a0/g, " ").replace(/\n{3,}/g, "\n\n").trim();
