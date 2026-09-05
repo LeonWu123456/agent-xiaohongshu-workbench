@@ -26,6 +26,33 @@ npm run verify:shareable-delivery -- \
 
 更新时间：2026-09-05
 
+## 2026-09-05 新可编辑工作台默认入口正式发布
+
+本记录确认新工作台已成为稳定域默认入口；旧界面保留在 `/legacy.html`。它不签发 `CONSUMER_VALIDATED`，也不冒充真实付费图片内容质量验收。
+
+| 项目 | 真实回读 |
+|---|---|
+| 发布源码 | 功能候选 `d069c63a3dd2700e6806cd5a233e3d9fee06fde8`；PR #8 的运行时合并提交为 `aa7eccbb4c264b1fd4d4138f2b6dcf51a53aa8be`；promote 时该提交就是 GitHub main，后续仅文档提交不改变运行制品；候选与运行提交 tree 同为 `caa584841c65e65107118ee0303863e10030b8e2`，0 文件差异 |
+| 构建与检查 | 默认入口补丁 scoped 19/19 PASS；全产品 `npm test` 599/599 PASS；Vite production build PASS；PR #8 quality run `33955441834` SUCCESS |
+| Preview | `dpl_6wuFvwKzP964uJic9xEKGnc8XkxR` · READY；`/` 与 `/studio.html` 同为新工作台，`/legacy.html` 保留旧界面，Provider API 路由不受影响 |
+| Production staging | `dpl_E3SiFox5dtUpYk4mJdT1uFSRcD1E` · READY；使用 Production 环境 `--skip-domain` 构建，gitCommitSha=`aa7eccbb...`；promote 前 health 为 SERVER_MANAGED / STUDIO_ACCESS_SESSION / image ledger READY，attestation candidate=`aa7eccbb...` |
+| Production | 同一 `dpl_E3SiFox5dtUpYk4mJdT1uFSRcD1E` 原地 promote，未重建；稳定域根路径现为新工作台，`/studio.html` 与根路径 HTML 一致，`/legacy.html` 仍可回退 |
+| 制品身份 | 稳定域主资源与本地 build 逐字节一致：`main-C_R2WbRu.js` SHA-256 `c2aa7bfbab6e6e8cc700753086401f4453159a4ea727b050672d1c6ca0228e18`；`main-Dmr1GfAv.css` SHA-256 `8f923ba3bd9b34fe51ee9ec505592fd3c411022dbf0d74c74f5bb21edff945f7` |
+| 稳定域旅程 | 根路径文字、配图 mock、恢复三条浏览器 Journey 全 PASS；文字确认前图片调用 0；START→checkpoint→STEP→COMPLETE、刷新恢复、DISCOVER 不追加付费 STEP 均通过；真实付费图片调用 0 |
+| 响应式 | 稳定根路径 1440px 与 360px 均无横向溢出，0 page/console error；根路径资产身份再次与本地 build 对齐 |
+| 生成服务 | 稳定 `/api/provider/health` 返回 `ACCESS_SESSION_REQUIRED`、SERVER_MANAGED、STUDIO_ACCESS_SESSION、图片账本 READY；attestation candidate=`aa7eccbb4c264b1fd4d4138f2b6dcf51a53aa8be`，签发 workflow `33955513852` SUCCESS |
+| 直接回退点 | `dpl_5rDJs1ye7tnuZsBw7q6FvrLyUVT9`，来源 `961033cf134f8062b9c5a47a0465c193fcb757e0`，是切默认入口前已验证 Production；更深回退仍保留既有 `dpl_A1n3g6ha7AFSVF7hN8dxiyZXLEGx` |
+| 定时续签 | 仓库变量已回读：`XIAOSHIMEI_PRODUCTION_COMMIT=aa7eccbb...`；`XIAOSHIMEI_ROLLBACK_COMMIT=961033cf...`；Production app scope 不变 |
+| 当前消费者边界 | Production 已应用且默认入口已切换；但稳定 health 明确 `authenticated=false`。尚未取得小师妹本人独立设备的直接反馈，也未在已认证 Studio 会话做真实 server-managed 新稿旅程，因此不得签发 `HANDOFF_READY` / `CONSUMER_VALIDATED` |
+
+直接回退命令（仅在真实运行回归时执行）：
+
+```sh
+vercel promote dpl_5rDJs1ye7tnuZsBw7q6FvrLyUVT9 --scope 892350620-5733s-projects
+```
+
+本轮默认入口切换没有删除旧 UI、DraftRecord、Provider、媒体库或恢复链；`/legacy.html` 是同一应用内的历史 UI 回退入口，不是第二数据面。
+
 ## 2026-09-05 参考图恢复修复正式发布
 
 本记录只确认部署已应用，不宣称正式交付或小师妹已经可生产。
