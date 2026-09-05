@@ -354,7 +354,7 @@ export function normalizeFreeObjects(value) {
    if(item.binding&&/^(eyebrow|title|body|panel-\d+-(title|body))$/.test(item.binding))out.binding=item.binding;
    else out.text=String(item.text||'').slice(0,10000);
    out.font_size=finite(item.font_size,42,8,400);out.font_family=Object.hasOwn(FREE_FONTS,item.font_family)?item.font_family:'pingfang';out.font_weight=Number(item.font_weight)>=600?700:400;out.font_style=item.font_style==='italic'?'italic':'normal';
-   out.color=/^#[0-9a-f]{6}$/i.test(item.color||'')?item.color:'#292720';out.align=['left','center','right','justify'].includes(item.align)?item.align:'left';out.line_height=finite(item.line_height,1.4,.8,3);
+   out.color=/^#[0-9a-f]{6}$/i.test(item.color||'')?item.color:'#292720';out.align=['left','center','right','justify'].includes(item.align)?item.align:'left';out.line_height=finite(item.line_height,1.4,.8,3);out.paragraph_gap=finite(item.paragraph_gap,0,0,120);
   }else{
    out.image_id=String(item.image_id||item.id);out.fit=item.fit==='contain'?'contain':'cover';
    if(/^(hero|panel-\d+)$/.test(item.binding||''))out.binding=item.binding;

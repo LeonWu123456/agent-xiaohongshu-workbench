@@ -187,3 +187,15 @@ test('Sprint 2 smart composition materializes every page and preserves text and 
  const custom={id:'custom-copy',kind:'text',text:'Manual copy is not discarded',x:2,y:2,width:30,height:10,font_size:36};result.pages[0].html_state.free_objects.push(custom);
  const reflow=composeEditableContent(result,{force:true});assert.ok(reflow.pages[0].html_state.free_objects.some(o=>o.id==='custom-copy'&&o.text===custom.text));assert.deepEqual(composeEditableContent(reflow),reflow);
 });
+
+
+test('legacy visible geometry materialization waits for a measurable page and is not a user edit',async()=>{
+ const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ assert.match(editor,/rect.width<=0\|\|rect.height<=0/);assert.match(editor,/new ResizeObserver\(convert\)/);assert.match(editor,/\{materialize:true\}/);assert.match(main,/meta\?\.materialize\?setContent/);
+});
+test('paragraph font and spacing survive free-object schema and persistence',async()=>{
+ const {normalizeHtmlState}=await import('../src/html-layout.mjs');const page=createBlankContent().pages[0];
+ const state=normalizeHtmlState({free_objects:[{id:'body-block',kind:'text',binding:'body',font_size:42.66,line_height:1.6,paragraph_gap:24,x:10,y:20,width:70,height:20}]},page);
+ assert.equal(state.free_objects[0].paragraph_gap,24);assert.equal(state.free_objects[0].font_size,42.66);
+ const content=importEditableContent({...createBlankContent(),pages:[{...page,html_state:state}]});assert.equal(content.pages[0].html_state.free_objects[0].paragraph_gap,24);
+});

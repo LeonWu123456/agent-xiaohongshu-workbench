@@ -114,7 +114,7 @@ export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHe
  for(const factor of [1,.92,.84,.76]){
   const updates=new Map();let y=72;
   const put=(o,x,top,width,height,extra={})=>updates.set(o.id,{...o,x:x/10.8,y:top/14.4,width:width/10.8,height:Math.max(8,height)/14.4,rotation:0,...extra});
-  const measure=(o,width)=>{const fontSize=Math.max(o.binding==='title'?48:26,o.font_size*factor);const height=Math.ceil(measureText({text:freeObjectText(page,o),width,fontSize,fontFamily:o.font_family,fontWeight:o.font_weight,lineHeight:o.line_height}))+3;return{height,fontSize};};
+  const measure=(o,width)=>{const fontSize=Math.max(o.binding==='title'?48:26,o.font_size*factor);const height=Math.ceil(measureText({text:freeObjectText(page,o),width,fontSize,fontFamily:o.font_family,fontWeight:o.font_weight,lineHeight:o.line_height,paragraphGap:o.paragraph_gap}))+3;return{height,fontSize};};
   for(const o of header){const m=measure(o,contentWidth);put(o,margin,y,contentWidth,m.height,{font_size:m.fontSize});y+=m.height+(o.binding==='eyebrow'?18:36);}
   for(let i=0;i<ordered.length;i++){
    const group=ordered[i],cover=pageIndex===0&&ordered.length===1&&group.images.length===1;

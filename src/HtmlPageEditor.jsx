@@ -898,10 +898,10 @@ export function measureFlowObjects(node, page) {
  const frame=el=>{const r=el.getBoundingClientRect();return {x:(r.left-rect.left)/rect.width*100,y:(r.top-rect.top)/rect.height*100,width:r.width/rect.width*100,height:r.height/rect.height*100};};
  const text=(selector,id,binding)=>{
   const el=node.querySelector(selector);if(!visible(el))return;
-  const c=getComputedStyle(el);let scale=1;
+  const sample=el.querySelector('p')||el;const c=getComputedStyle(sample);let scale=1;
   for(let at=el;at&&at!==node;at=at.parentElement){const t=getComputedStyle(at).transform;if(t!=='none'){const m=new DOMMatrixReadOnly(t);scale*=Math.hypot(m.a,m.b);}}
   const color=c.color.match(/\d+/g);const hex=color?'#'+color.slice(0,3).map(v=>Number(v).toString(16).padStart(2,'0')).join(''):'#292720';
-  objects.push({id,kind:'text',binding,...frame(el),font_size:parseFloat(c.fontSize)*scale/rect.width*1080,font_family:/Song|SimSun|serif/.test(c.fontFamily)&&!/sans-serif/.test(c.fontFamily)?'songti':'pingfang',font_weight:parseInt(c.fontWeight)||400,color:hex,align:c.textAlign,line_height:parseFloat(c.lineHeight)/parseFloat(c.fontSize)||1.4});
+  objects.push({id,kind:'text',binding,...frame(el),font_size:parseFloat(c.fontSize)*scale/rect.width*1080,font_family:/Song|SimSun|serif/.test(c.fontFamily)&&!/sans-serif/.test(c.fontFamily)?'songti':'pingfang',font_weight:parseInt(c.fontWeight)||400,color:hex,align:c.textAlign,line_height:parseFloat(c.lineHeight)/parseFloat(c.fontSize)||1.4,paragraph_gap:el!==sample?(parseFloat(getComputedStyle(el).rowGap)||0)/rect.width*1080:0});
  };
  text('.html-page__eyebrow','eyebrow-text','eyebrow');text('.html-page__title','title-block','title');
  if(page.info_panels?.length)page.info_panels.forEach((_,i)=>{text(`[data-panel-index="${i}"] .html-page__panel-copy h2`,`panel-${i}-title`,`panel-${i}-title`);text(`[data-panel-index="${i}"] .html-page__panel-copy p`,`panel-${i}-copy`,`panel-${i}-body`);});
@@ -944,7 +944,7 @@ function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSe
  return <>
   <article ref={root} className="html-page html-free-page" data-layout="free" data-page-role={page.page_role} tabIndex={renderOnly?undefined:0} onKeyDown={renderOnly?undefined:keys} onMouseDown={renderOnly?undefined:e=>{if(e.target===e.currentTarget){e.currentTarget.focus({preventScroll:true});onSelectObject?.(null);setCropping(null);setEditing(null);}}}>
    {objects.map(item=>{const image=item.kind==='image'?freeObjectImage(page,item):null;const crop=item.kind==='image'?imageEditFor(state,item.image_id,image):null;const style={...freeCss(item),...(crop?{'--image-focal-x':crop.focalX+'%','--image-focal-y':crop.focalY+'%','--image-zoom':crop.zoom}:{})};
-    return item.kind==='text'?<div key={item.id} className={`html-free-object html-free-text ${editing===item.id?'is-editing':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-editable-text="true" style={style} contentEditable={!renderOnly&&editing===item.id} suppressContentEditableWarning spellCheck={false} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onInput={renderOnly?undefined:()=>onDirty?.()} onBlur={renderOnly?undefined:e=>{if(editing===item.id)finishText(e,item);}} onPaste={renderOnly?undefined:e=>{if(editing!==item.id)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));}}>{freeObjectText(page,item)}</div>
+    return item.kind==='text'?<div key={item.id} className={`html-free-object html-free-text ${editing===item.id?'is-editing':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-editable-text="true" style={style} contentEditable={!renderOnly&&editing===item.id} suppressContentEditableWarning spellCheck={false} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onInput={renderOnly?undefined:()=>onDirty?.()} onBlur={renderOnly?undefined:e=>{if(editing===item.id)finishText(e,item);}} onPaste={renderOnly?undefined:e=>{if(editing!==item.id)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));}}>{item.paragraph_gap>0?bodyParagraphs(freeObjectText(page,item)).map((text,i)=><div key={i} style={{marginTop:i?`${item.paragraph_gap/10.8}cqw`:0}}>{text}</div>):freeObjectText(page,item)}</div>
      :<figure key={item.id} className={`html-page__image html-free-object html-free-image ${cropping===item.id?'is-cropping':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-image-id={item.image_id} style={style} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onPointerDown={renderOnly?undefined:e=>cropStart(e,item)} onPointerMove={renderOnly?undefined:e=>cropMove(e,item)} onPointerUp={renderOnly?undefined:e=>cropEnd(e,item)} onPointerCancel={renderOnly?undefined:e=>cropEnd(e,item,true)}><img src={image?.src} style={{objectFit:item.fit||'cover'}} alt="" draggable={false} crossOrigin={image?.src?.startsWith('data:')?undefined:'anonymous'}/></figure>;
    })}
   </article>
@@ -955,14 +955,20 @@ function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSe
 export function HtmlPageCanvas(props) {
  const flow=useRef(null);
  const {page,state,interactionMode,renderOnly,onPagePatch,readOnly}=props;
- useEffect(()=>{if(renderOnly||readOnly||interactionMode!=='direct'||state.free_objects)return;let live=true;(async()=>{await document.fonts?.ready;await Promise.all([...flow.current?.querySelectorAll('img')||[]].map(img=>img.decode?.().catch(()=>{})));await new Promise(r=>requestAnimationFrame(r));if(live&&flow.current)onPagePatch?.({html_state:{...state,free_objects:measureFlowObjects(flow.current,page)}});})();return()=>{live=false;};},[page,state.free_objects,interactionMode,renderOnly,readOnly]);
+ useEffect(()=>{
+  if(renderOnly||readOnly||interactionMode!=='direct'||state.free_objects)return;
+  const node=flow.current;if(!node)return;let live=true,pending=false;
+  const convert=async()=>{if(pending||!live)return;const rect=node.getBoundingClientRect();if(rect.width<=0||rect.height<=0||!node.getClientRects().length)return;pending=true;try{await document.fonts?.ready;await Promise.all([...node.querySelectorAll('img')].map(img=>img.decode?.().catch(()=>{})));await new Promise(r=>requestAnimationFrame(r));const fresh=node.getBoundingClientRect();if(live&&node===flow.current&&fresh.width>0&&fresh.height>0){const objects=measureFlowObjects(node,page);if(objects.length)onPagePatch?.({html_state:{...state,free_objects:objects}},{materialize:true});}}finally{pending=false;}};
+  const observer=typeof ResizeObserver==='function'?new ResizeObserver(convert):null;observer?.observe(node);window.addEventListener('resize',convert);void convert();
+  return()=>{live=false;observer?.disconnect();window.removeEventListener('resize',convert);};
+ },[page,state.free_objects,interactionMode,renderOnly,readOnly]);
  return state.free_objects?<FreePageCanvas {...props}/>:<FlowPageCanvas {...props} rootRef={flow}/>;
 }
 
 
 // Layout and export measure the same native font metrics at the 1080px page.
-export function measureEditableText({text,width,fontSize,fontFamily,fontWeight,lineHeight}) {
+export function measureEditableText({text,width,fontSize,fontFamily,fontWeight,lineHeight,paragraphGap=0}) {
  const el=document.createElement('div');
  Object.assign(el.style,{position:'fixed',left:'-20000px',top:'0',visibility:'hidden',width:width+'px',height:'auto',padding:'0',margin:'0',border:'0',boxSizing:'border-box',fontFamily:FREE_FONTS[fontFamily]||FREE_FONTS.pingfang,fontSize:fontSize+'px',fontWeight:String(fontWeight||400),lineHeight:String(lineHeight),letterSpacing:'.01em',whiteSpace:'pre-wrap',overflowWrap:'anywhere',wordBreak:'normal'});
- el.textContent=text;document.body.append(el);try{return el.getBoundingClientRect().height;}finally{el.remove();}
+ if(paragraphGap>0){bodyParagraphs(text).forEach((text,i)=>{const p=document.createElement('div');p.textContent=text;if(i)p.style.marginTop=paragraphGap+'px';el.append(p);});}else el.textContent=text;document.body.append(el);try{return el.getBoundingClientRect().height;}finally{el.remove();}
 }
