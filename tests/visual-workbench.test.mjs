@@ -177,3 +177,13 @@ test('workbench removes nonfunctional intro cards and uses the existing characte
  assert.doesNotMatch(main,/className="vw-stage-intro"|className="vw-inspector-note"/);
  assert.match(main,/className="vw-brand-avatar"/);
 });
+
+
+test('Sprint 2 smart composition materializes every page and preserves text and independent image sources',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');assert.equal(typeof composeEditableContent,'function');
+ const source=createBlankContent();source.pages[0].body='A body that must remain editable.';source.pages[0].visual='character';source.pages[0].image_style.src='/assets/xiaoshimei-character-full.png';
+ const result=composeEditableContent(source);assert.equal(result.body,source.body);assert.equal(source.pages[0].html_state?.free_objects,undefined);
+ const objects=result.pages[0].html_state.free_objects;assert.ok(objects.some(o=>o.binding==='body'));assert.ok(objects.some(o=>o.kind==='image'&&o.binding==='hero'));assert.ok(objects.some(o=>o.binding==='title'));
+ const custom={id:'custom-copy',kind:'text',text:'Manual copy is not discarded',x:2,y:2,width:30,height:10,font_size:36};result.pages[0].html_state.free_objects.push(custom);
+ const reflow=composeEditableContent(result,{force:true});assert.ok(reflow.pages[0].html_state.free_objects.some(o=>o.id==='custom-copy'&&o.text===custom.text));assert.deepEqual(composeEditableContent(reflow),reflow);
+});

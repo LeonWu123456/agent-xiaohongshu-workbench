@@ -124,3 +124,82 @@ test('inactive pending draft stays discoverable and reopening it is zero-provide
   const callsBeforeOpen=providerCalls;await service.activateDraft(draftA);
   assert.equal(providerCalls,callsBeforeOpen);assert.equal(service.pending().protocol_state,'READY');
 });
+
+
+test('Sprint 2 source input and references stay in one authoring record',async()=>{
+ const api=await import('../src/visual-workbench/creator.mjs');
+ assert.equal(typeof api.updateAuthoringInput,'function');assert.equal(typeof api.updateActionReferences,'function');
+ const initial=emptyAuthoringSession();const changed=api.updateAuthoringInput(initial,{topic:'A complete topic',textRequirements:'Keep the source facts'});
+ const referenced=api.updateActionReferences(changed,{note:'Use pose only'});
+ const storage=memoryStorage(),a=storageAdapter(storage);await a.load();await a.save(createDemo(),{generationSession:referenced});const b=storageAdapter(storage);await b.load();
+ assert.equal(b.session().topic,'A complete topic');assert.equal(b.session().text_requirements,'Keep the source facts');assert.equal(b.session().action_reference_note,'Use pose only');
+ assert.equal(b.session().text_confirmed,false);a.dispose();b.dispose();
+});
+
+test('Sprint 2 complete transaction stores editable objects and retains named draft and reference notes',async()=>{
+ const api=await import('../src/visual-workbench/creator.mjs');const model=await import('../src/visual-workbench/model.mjs');
+ assert.equal(typeof model.composeEditableContent,'function');
+ const {service,session,storage}=await confirmedService();await service.renameActiveDraft('Named production work');
+ const referenced={...session,action_reference_note:'Same red ribbon'};await service.save(service.activeRecord().content_package,{generationSession:referenced});
+ const copy=service.activeRecord().content_package;const final={...copy,source_input:referenced.text_draft.source_input,titles:referenced.text_draft.titles,selectedTitle:referenced.text_draft.selected_title,body:referenced.text_draft.body,tags:referenced.text_draft.tags,generation:{...copy.generation,mode:'PROVIDER',provider:'volcengine-ark',source_draft_id:referenced.text_draft.draft_id,strategy:'resumable_public_image_steps_v1'}};
+ let prepared=0;const provider={fetchImageMediaDelta:async()=>[],generateImages:async(input,consume)=>{
+  assert.equal(service.activeRecord().display_name,'Named production work');assert.equal(service.pending().operation_snapshot.reference_note,'Same red ribbon');
+  await consume(readyImageResponse());assert.equal(service.activeRecord().display_name,'Named production work');
+  await consume({...readyImageResponse('PARTIAL'),progress:{...readyImageResponse().progress,completed_image_steps:1,actual_image_calls:1,remaining_image_calls:5}});assert.equal(service.activeRecord().display_name,'Named production work');
+  const result={status:'COMPLETE',content_package:final,media_delta:[]};await consume(result);return result;
+ }};
+ const result=await api.runImageGeneration({provider,service,session:referenced,prepareContent:content=>{prepared++;return model.composeEditableContent(content);}});
+ assert.equal(prepared,1);assert.equal(result.status,'COMPLETE');assert.equal(service.pending(),null);const b=storageAdapter(storage);await b.load();
+ assert.equal(b.activeRecord().display_name,'Named production work');assert.equal(b.session().action_reference_note,'Same red ribbon');assert.equal(b.activeRecord().content_package.body,referenced.text_draft.body);
+ for(const p of b.activeRecord().content_package.pages)assert.ok(p.html_state.free_objects.length>0);
+ service.dispose();b.dispose();
+});
+
+
+test('reference upload accepts modern File.bytes method without confusing it with a bytes buffer',async()=>{
+ const {readReferenceFiles}=await import('../src/visual-workbench/creator.mjs');const raw=new Uint8Array([1,2,3]);const file={name:'test.png',type:'image/png',size:3,bytes:async()=>raw,arrayBuffer:async()=>raw.buffer};
+ const [result]=await readReferenceFiles([file]);assert.deepEqual(result.bytes,raw);assert.equal(result.name,'test.png');await assert.rejects(()=>readReferenceFiles([{...file,size:21000000}]),/FILE_INVALID/);
+});
+
+
+test('layout failure preserves paid completion and returns an explicit repair requirement',async()=>{
+ const {service,session}=await confirmedService();await service.renameActiveDraft('Recoverable named work');
+ const c=service.activeRecord().content_package,d=session.text_draft;
+ const final={...c,source_input:d.source_input,titles:d.titles,selectedTitle:d.selected_title,body:d.body,tags:d.tags,generation:{...c.generation,mode:'PROVIDER',provider:'volcengine-ark',source_draft_id:d.draft_id,strategy:'resumable_public_image_steps_v1'}};
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async(_input,consume)=>{const result={status:'COMPLETE',content_package:final,media_delta:[]};await consume(result);return result;}};
+ const result=await runImageGeneration({provider,service,session,prepareContent:()=>{throw new Error('Page requires split');}});
+ assert.equal(result.status,'COMPLETE');assert.equal(result.layout_error,'Page requires split');assert.equal(service.pending(),null);assert.equal(service.activeRecord().display_name,'Recoverable named work');assert.equal(service.activeRecord().content_package.body,d.body);service.dispose();
+});
+
+test('input/readiness UI preserves ledger guard and allows backup during unfinished generation',async()=>{
+ const {readFile}=await import('node:fs/promises');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ assert.match(main,/credential_mode==='SERVER_MANAGED'/);assert.match(main,/if\(!service.pending\(\)\)await saveCurrent\(\);download/);
+ assert.match(main,/disabled=\{exportBlocked\|\|!!pendingImage\}/);
+ assert.match(main,/e.requiresAccess\|\|e.httpStatus===401/);
+});
+
+
+test('access policy distinguishes required authentication from an authenticated session',async()=>{
+ const {requiresStudioAccess,updateActionReferences}=await import('../src/visual-workbench/creator.mjs');
+ assert.equal(requiresStudioAccess({access_required:true,authenticated:true,status:'LIVE_VERIFIED'}),false);
+ assert.equal(requiresStudioAccess({access_required:true,authenticated:false}),true);
+ assert.throws(()=>updateActionReferences(emptyAuthoringSession(),{note:'x'.repeat(1001)}),/MAX_1000/);
+});
+
+test('named pending work reloads and DISCOVER uses the frozen reference note',async()=>{
+ const {service,session,storage}=await confirmedService();await service.renameActiveDraft('Resume name');
+ const original={...session,action_reference_note:'Frozen instructions'};await service.save(service.activeRecord().content_package,{generationSession:original});
+ const modes=[];const provider={fetchImageMediaDelta:async()=>[],generateImages:async(input,consume)=>{modes.push(input.mode);const reply=readyImageResponse('READY_DISCOVERY');await consume(reply);return reply;}};
+ await runImageGeneration({provider,service,session:original,discoveryOnly:true});service.dispose();
+ const restored=storageAdapter(storage);await restored.load();assert.equal(restored.activeRecord().display_name,'Resume name');
+ await runImageGeneration({provider,service:restored,session:{...restored.session(),action_reference_note:'Do not substitute this'},discoveryOnly:true});
+ assert.deepEqual(modes,['START','DISCOVER']);assert.equal(restored.pending().operation_snapshot.reference_note,'Frozen instructions');assert.equal(restored.activeRecord().display_name,'Resume name');restored.dispose();
+});
+
+test('failed editable layout preserves the completed paid-result record instead of losing or regenerating it',async()=>{
+ const {service,session}=await confirmedService();await service.renameActiveDraft('Preserve result');const old=service.activeRecord().content_package;
+ const final={...old,source_input:session.text_draft.source_input,titles:session.text_draft.titles,selectedTitle:session.text_draft.selected_title,body:session.text_draft.body,tags:session.text_draft.tags,generation:{...old.generation,mode:'PROVIDER',provider:'volcengine-ark',source_draft_id:session.text_draft.draft_id,strategy:'resumable_public_image_steps_v1'}};
+ let count=0;const provider={fetchImageMediaDelta:async()=>[],generateImages:async(input,consume)=>{count++;const reply={status:'COMPLETE',content_package:final,media_delta:[]};await consume(reply);return reply;}};
+ const result=await runImageGeneration({provider,service,session,prepareContent:()=>{throw new Error('LAYOUT_REQUIRES_SPLIT');}});
+ assert.equal(count,1);assert.equal(result.status,'COMPLETE');assert.equal(result.layout_error,'LAYOUT_REQUIRES_SPLIT');assert.equal(service.activeRecord().display_name,'Preserve result');assert.equal(service.activeRecord().content_package.body,session.text_draft.body);assert.equal(service.pending(),null);service.dispose();
+});

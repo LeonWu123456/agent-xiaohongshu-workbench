@@ -161,7 +161,7 @@ async function persistBootstrap({ service, session, pageCount, productionMode, c
   await service.sync({allowPending:true});
   return {record:service.activeRecord(),pending:service.pending(),resumed:false};
 }
-export async function runImageGeneration({ provider, service, session, pageCount = null, productionMode = 'smart', discoveryOnly = false, cryptoApi = globalThis.crypto, onState = null } = {}) {
+export async function runImageGeneration({ provider, service, session, pageCount = null, productionMode = 'smart', discoveryOnly = false, cryptoApi = globalThis.crypto, onState = null, prepareContent = null } = {}) {
   if (!provider?.generateImages || !provider?.fetchImageMediaDelta) throw new TypeError('IMAGE_PROVIDER_UNAVAILABLE');
   if (!service?.coordinator || !service?.mediaStore || !service?.activeRecord) throw new TypeError('IMAGE_STORAGE_UNAVAILABLE');
   const checkedSession = normalizeAuthoringSession(session);
@@ -178,17 +178,20 @@ export async function runImageGeneration({ provider, service, session, pageCount
   const initialRequest = bootstrap.resumed ? imageDiscoveryRequest(pending) : await rebuildPendingImageStartV3({ pendingImageOperation:pending, mediaStore:service.mediaStore });
   const requestModes = [initialRequest.mode];
   let completed = null;
+  let layoutError = null;
   const consume = async response => {
     const mediaDelta = response.media_delta?.length ? await provider.fetchImageMediaDelta(response.media_delta) : [];
     if (response.status === 'COMPLETE') {
+      let editableContent=response.content_package;
+      if(typeof prepareContent==='function'){try{editableContent=await prepareContent(structuredClone(response.content_package));}catch(error){layoutError=String(error.message||error);}}
       const receipt = await commitDraftImageCompletionV3({
         coordinator:service.coordinator, mediaStore:service.mediaStore, draftId:operationRecord.draft_id,
         expectedDraftToken:expectedToken, operationSnapshot:operationRecord, recoveredDraftId,
-        contentPackage:response.content_package, mediaDelta,
+        contentPackage:editableContent, mediaDelta,
       });
       if (receipt.action !== 'COMPLETE' || !receipt.workspace) throw new Error(`IMAGE_COMPLETION_NOT_COMMITTED:${receipt.code || 'UNKNOWN'}`);
       completed = await service.sync({allowPending:false});
-      emit({ phase:'COMPLETE', request_modes:[...requestModes], recovered_draft_id:receipt.recovered_draft_id || null });
+      emit({ phase:'COMPLETE', request_modes:[...requestModes], recovered_draft_id:receipt.recovered_draft_id || null, layout_error:layoutError });
       return { action:'COMPLETE' };
     }
     const previous = operationRecord.pending_image_operation;
@@ -222,7 +225,7 @@ export async function runImageGeneration({ provider, service, session, pageCount
       throw imageResponseError(result);
     }
     if (result.status !== 'COMPLETE' && !discoveryOnly) throw imageResponseError(result);
-    return { status: completed ? 'COMPLETE' : result.status, content:completed?.content || null, workspace:completed?.workspace || service.workspace(), request_modes:requestModes, pending:service.pending() };
+    return { status: completed ? 'COMPLETE' : result.status, content:completed?.content || null, workspace:completed?.workspace || service.workspace(), request_modes:requestModes, pending:service.pending(), layout_error:layoutError };
   } catch (error) {
     if (error?.intentionalStop === true && error?.checkpointPersisted === true) {
       return { status:'CHECKPOINTED', content:null, workspace:service.workspace(), request_modes:requestModes, pending:service.pending(), paid_continuation_required:true };
@@ -242,4 +245,31 @@ export function updateImageSettings(sessionValue, { imageCountMode, customImageC
     assembled_draft_id: null,
     image_resume: null,
   });
+}
+
+
+export function updateAuthoringInput(sessionValue,{topic,textRequirements}={}) {
+ const session=normalizeAuthoringSession(sessionValue||emptyAuthoringSession());
+ const changed=(topic!==undefined&&String(topic)!==session.topic)||(textRequirements!==undefined&&String(textRequirements)!==session.text_requirements);
+ if(!changed)return session;
+ return normalizeAuthoringSession({...session,topic:topic===undefined?session.topic:String(topic),text_requirements:textRequirements===undefined?session.text_requirements:String(textRequirements),text_confirmed:false,assembled_draft_id:null,image_resume:null});
+}
+export function updateActionReferences(sessionValue,{manifest,note}={}) {
+ if(note!==undefined&&(typeof note!=='string'||note.length>1000))throw new TypeError('ACTION_REFERENCE_NOTE_MAX_1000');
+ const session=normalizeAuthoringSession(sessionValue||emptyAuthoringSession());
+ return normalizeAuthoringSession({...session,action_reference_manifest:manifest===undefined?session.action_reference_manifest:manifest,action_reference_note:note===undefined?session.action_reference_note:note,image_resume:null});
+}
+export function requiresStudioAccess(health){return Boolean(health?.status==='ACCESS_SESSION_REQUIRED'||(health?.access_required&&health?.authenticated!==true));}
+
+
+export async function readReferenceFiles(files){
+ if(!Array.isArray(files)||!files.length||files.length>3)throw new TypeError('ACTION_REFERENCE_COUNT_INVALID');
+ const out=[];
+ for(const file of files){
+  if(!file||!['image/png','image/jpeg','image/webp'].includes(file.type)||!Number.isInteger(file.size)||file.size<1||file.size>20000000)throw new TypeError('ACTION_REFERENCE_FILE_INVALID');
+  // Modern File.bytes is a method. Supply the library's explicit byte record,
+  // rather than allowing that method to be mistaken for a byte-buffer property.
+  out.push({name:file.name,type:file.type,size:file.size,bytes:new Uint8Array(await file.arrayBuffer())});
+ }
+ return out;
 }

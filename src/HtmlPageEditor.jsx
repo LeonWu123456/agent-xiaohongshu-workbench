@@ -954,7 +954,15 @@ function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSe
 }
 export function HtmlPageCanvas(props) {
  const flow=useRef(null);
- const {page,state,interactionMode,renderOnly,onPagePatch}=props;
- useEffect(()=>{if(renderOnly||interactionMode!=='direct'||state.free_objects)return;let live=true;(async()=>{await document.fonts?.ready;await Promise.all([...flow.current?.querySelectorAll('img')||[]].map(img=>img.decode?.().catch(()=>{})));await new Promise(r=>requestAnimationFrame(r));if(live&&flow.current)onPagePatch?.({html_state:{...state,free_objects:measureFlowObjects(flow.current,page)}});})();return()=>{live=false;};},[page,state.free_objects,interactionMode,renderOnly]);
+ const {page,state,interactionMode,renderOnly,onPagePatch,readOnly}=props;
+ useEffect(()=>{if(renderOnly||readOnly||interactionMode!=='direct'||state.free_objects)return;let live=true;(async()=>{await document.fonts?.ready;await Promise.all([...flow.current?.querySelectorAll('img')||[]].map(img=>img.decode?.().catch(()=>{})));await new Promise(r=>requestAnimationFrame(r));if(live&&flow.current)onPagePatch?.({html_state:{...state,free_objects:measureFlowObjects(flow.current,page)}});})();return()=>{live=false;};},[page,state.free_objects,interactionMode,renderOnly,readOnly]);
  return state.free_objects?<FreePageCanvas {...props}/>:<FlowPageCanvas {...props} rootRef={flow}/>;
+}
+
+
+// Layout and export measure the same native font metrics at the 1080px page.
+export function measureEditableText({text,width,fontSize,fontFamily,fontWeight,lineHeight}) {
+ const el=document.createElement('div');
+ Object.assign(el.style,{position:'fixed',left:'-20000px',top:'0',visibility:'hidden',width:width+'px',height:'auto',padding:'0',margin:'0',border:'0',boxSizing:'border-box',fontFamily:FREE_FONTS[fontFamily]||FREE_FONTS.pingfang,fontSize:fontSize+'px',fontWeight:String(fontWeight||400),lineHeight:String(lineHeight),letterSpacing:'.01em',whiteSpace:'pre-wrap',overflowWrap:'anywhere',wordBreak:'normal'});
+ el.textContent=text;document.body.append(el);try{return el.getBoundingClientRect().height;}finally{el.remove();}
 }

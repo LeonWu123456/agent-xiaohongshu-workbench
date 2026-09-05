@@ -1,5 +1,6 @@
+import {applySmartLayoutSequence} from '../smart-layout.mjs';
 import {generateContentPackage, parseContentPackage, importLocalEditableDraft, reorderPage, duplicatePage, deletePage} from '../content-engine.mjs';
-import {normalizeHtmlState,freeObjectText} from '../html-layout.mjs';
+import {normalizeHtmlState,freeObjectText,normalizeFreeObjects} from '../html-layout.mjs';
 export function changePage(content, index, patch) {
   if (!content?.pages?.[index]) throw new TypeError('页面不存在');
   const next={...content,pages:content.pages.map((p,i)=>i===index?{...p,...patch}:p)};
@@ -85,4 +86,57 @@ export function createDemo() {
   source.selectedTitle=copy[0][0];source.titles=[copy[0][0],'让生活留白','找到自己的节奏'];
   source.stage='LOCAL_DRAFT';source.visible_pages=3;source.scale_permission='UNVERIFIED';
   return parseContentPackage(JSON.stringify(source));
+}
+
+
+function estimateTextHeight({text,width,fontSize,lineHeight}) {
+ return String(text).split('\n').reduce((height,line)=>{
+  const units=[...line].reduce((n,c)=>n+(/[^\x00-\x7f]/.test(c)?1:.56),0);
+  return height+Math.max(1,Math.ceil(units*fontSize/width))*fontSize*lineHeight;
+ },0);
+}
+export function seedEditableObjects(page,pageIndex=0) {
+ const objects=[];
+ const text=(id,binding,size,weight=400)=>{if(freeObjectText(page,{binding}).trim())objects.push({id,kind:'text',binding,x:7,y:7,width:86,height:10,font_size:size,font_family:binding==='title'?'songti':'pingfang',font_weight:weight,line_height:binding==='title'?1.15:1.5,color:binding==='eyebrow'?page.accent:'#292720'});};
+ const image=(id,binding)=>objects.push({id,kind:'image',image_id:binding,binding,fit:'contain',x:7,y:30,width:86,height:50});
+ text('eyebrow-text','eyebrow',28);text('title-block','title',pageIndex===0?92:64,700);
+ if(page.info_panels?.length){page.info_panels.forEach((panel,i)=>{text(`panel-${i}-title`,`panel-${i}-title`,40,700);text(`panel-${i}-copy`,`panel-${i}-body`,34);if(panel.image_style?.src&&!panel.image_style.hidden)image(`panel-${i}-image`,`panel-${i}`);});}
+ else{text('body-block','body',36);if(page.visual!=='none'&&page.image_style?.src&&!page.image_style.hidden)image('hero-image','hero');}
+ return normalizeFreeObjects(objects);
+}
+
+export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHeight}={}) {
+ const source=normalizeFreeObjects(page.html_state?.free_objects||seedEditableObjects(page,pageIndex));
+ const header=source.filter(o=>o.kind==='text'&&['eyebrow','title'].includes(o.binding)).sort((a,b)=>(a.binding==='eyebrow'?-1:1));
+ const rest=source.filter(o=>!header.includes(o)),groups=new Map();
+ for(const o of rest){const panel=/^panel-(\d+)/.exec(o.binding||'');const key=panel?'panel-'+panel[1]:(o.binding==='body'||o.binding==='hero')?'main':o.id;const group=groups.get(key)||{texts:[],images:[]};group[o.kind==='text'?'texts':'images'].push(o);groups.set(key,group);}
+ const ordered=[...groups.values()];const margin=72,contentWidth=936,bottom=1368;
+ for(const factor of [1,.92,.84,.76]){
+  const updates=new Map();let y=72;
+  const put=(o,x,top,width,height,extra={})=>updates.set(o.id,{...o,x:x/10.8,y:top/14.4,width:width/10.8,height:Math.max(8,height)/14.4,rotation:0,...extra});
+  const measure=(o,width)=>{const fontSize=Math.max(o.binding==='title'?48:26,o.font_size*factor);const height=Math.ceil(measureText({text:freeObjectText(page,o),width,fontSize,fontFamily:o.font_family,fontWeight:o.font_weight,lineHeight:o.line_height}))+3;return{height,fontSize};};
+  for(const o of header){const m=measure(o,contentWidth);put(o,margin,y,contentWidth,m.height,{font_size:m.fontSize});y+=m.height+(o.binding==='eyebrow'?18:36);}
+  for(let i=0;i<ordered.length;i++){
+   const group=ordered[i],cover=pageIndex===0&&ordered.length===1&&group.images.length===1;
+   const textWidth=group.images.length&&!cover&&group.texts.length?580:contentWidth;
+   const sizes=group.texts.map(o=>measure(o,textWidth));const textHeight=sizes.reduce((h,m,j)=>h+m.height+(j?16:0),0);
+   if(cover){let top=y;group.texts.forEach((o,j)=>{put(o,margin,top,textWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});const height=Math.max(300,bottom-top-24);put(group.images[0],margin,top+12,contentWidth,height);y=top+12+height;}
+   else if(group.images.length&&group.texts.length){const rowHeight=Math.max(190*factor*group.images.length,textHeight);const imageLeft=(pageIndex+i)%2===0;let top=y;group.texts.forEach((o,j)=>{put(o,imageLeft?428:margin,top,textWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});const imageHeight=(rowHeight-16*(group.images.length-1))/group.images.length;group.images.forEach((o,j)=>put(o,imageLeft?margin:688,y+j*(imageHeight+16),320,imageHeight));y+=rowHeight;}
+   else if(group.texts.length){let top=y;group.texts.forEach((o,j)=>{put(o,margin,top,contentWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});y=top;}
+   else{const columns=Math.min(2,group.images.length),width=(contentWidth-24*(columns-1))/columns;group.images.forEach((o,j)=>put(o,margin+(j%columns)*(width+24),y+Math.floor(j/columns)*340,width,316));y+=Math.ceil(group.images.length/columns)*340;}
+   if(i<ordered.length-1)y+=32;
+  }
+  if(y<=bottom+1){return{...page,editor_mode:'html',html_state:{...normalizeHtmlState(page.html_state,page,pageIndex),free_objects:normalizeFreeObjects(source.map(o=>updates.get(o.id)||o))}};}
+ }
+ const error=new Error(`\u7b2c${pageIndex+1}\u9875\u5185\u5bb9\u8fc7\u591a\uff0c\u8bf7\u62c6\u5206\u9875\u9762\u540e\u518d\u6392\u7248\uff1b\u539f\u6587\u548c\u56fe\u7247\u5747\u4fdd\u7559\u3002`);error.code='EDITABLE_LAYOUT_NEEDS_SPLIT';error.page=pageIndex;throw error;
+}
+
+export function composeEditableContent(content,{force=false,pageIndex=null,measureText}={}) {
+ if(!content?.pages?.length)throw new TypeError('EDITABLE_CONTENT_MISSING');
+ const pages=applySmartLayoutSequence(content.pages).map((page,i)=>{
+  if(pageIndex!==null&&pageIndex!==i)return content.pages[i];
+  if(!force&&page.html_state?.free_objects)return content.pages[i];
+  return arrangeEditablePage(page,i,{measureText});
+ });
+ return {...content,pages};
 }
