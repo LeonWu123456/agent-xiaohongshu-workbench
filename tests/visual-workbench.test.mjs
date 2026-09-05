@@ -204,3 +204,34 @@ test('paragraph font and spacing survive free-object schema and persistence',asy
 test('editable browser descendants are not React-managed paragraph nodes',async()=>{
  const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');assert.match(editor,/ref=\{element=>syncFreeText\(element,item,page,editing===item.id\)\}/);assert.match(editor,/if\(!element\|\|isEditing\)return/);assert.match(editor,/element.replaceChildren/);assert.doesNotMatch(editor,/bodyParagraphs\(freeObjectText\(page,item\)\)\.map\(\(text,i\)=><div/);
 });
+
+
+test('mobile editorial reflow keeps body readable and splits dense system panels, without changing copy or image sources',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');
+ const base=createBlankContent();base.pages[0].page_role='method';base.pages[0].title='Three calm moments';
+ base.pages[0].info_panels=[0,1,2].map(i=>({id:'p'+i,title:'Moment '+i,body:'Keep this sentence exactly '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'},visual_action:'calm'}));
+ const before=structuredClone(base),result=composeEditableContent(base,{force:true});
+ assert.equal(result.pages.length,3);assert.equal(result.visible_pages,3);assert.equal(result.body,before.body);assert.deepEqual(base,before);
+ assert.deepEqual(result.pages.map(p=>p.body),before.pages[0].info_panels.map(x=>x.body));
+ for(const p of result.pages){const o=p.html_state.free_objects;assert.ok(o.filter(x=>x.kind==='text'&&x.binding!=='eyebrow').every(x=>x.font_size>=54));assert.equal(o.filter(x=>x.kind==='image').length,1);assert.ok(o.find(x=>x.kind==='image').height>=30);}
+ assert.equal(composeEditableContent(result,{force:true}).pages.length,3);assert.equal(importEditableContent(result).pages.length,3);
+});
+
+test('mobile reflow refuses overflow rather than shrinking copy or silently discarding custom objects',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();c.pages[0].body='Long reading copy. '.repeat(600);const before=structuredClone(c);
+ assert.throws(()=>composeEditableContent(c,{force:true}),/\u62c6\u5206|\u62c6\u9875/);assert.deepEqual(c,before);
+});
+
+
+test('mobile page cap is atomic, and a single-page reflow never changes untouched custom pages',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const one=createBlankContent();const p=one.pages[0];const dense={...p,info_panels:[0,1,2].map(i=>({id:'p'+i,title:'Title '+i,body:'Exact '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'}}))};
+ const full={...one,pages:Array.from({length:4},()=>structuredClone(dense)),visible_pages:4},frozen=structuredClone(full);assert.throws(()=>composeEditableContent(full,{force:true}),e=>e.code==='MOBILE_PAGE_LIMIT');assert.deepEqual(full,frozen);
+ const partial={...one,pages:[dense,p],visible_pages:2};const output=composeEditableContent(partial,{force:true,pageIndex:0});assert.equal(output.pages.length,4);assert.deepEqual(output.pages[3],p);
+});
+
+
+test('mobile cover continuation preserves the complete opening text across pages and reflow stays stable',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();c.pages[0].body='A quiet opening. '+('Keep every original word in the next reading page.');c.pages[0].visual='character';c.pages[0].image_style.src='/assets/xiaoshimei-character-full.png';
+ const p={...structuredClone(c.pages[0]),body:'Context stays too.',page_role:'method',info_panels:[0,1,2].map(i=>({title:'Step '+i,body:'Original step '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'}}))};c.pages.push(p);c.visible_pages=2;
+ const result=composeEditableContent(c,{force:true});assert.equal(result.pages.length,4);const again=composeEditableContent(result,{force:true});assert.equal(again.pages.length,4);assert.deepEqual(result.pages.map(p=>p.body),again.pages.map(p=>p.body));
+});

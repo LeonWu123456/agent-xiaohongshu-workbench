@@ -1,5 +1,5 @@
 import {applySmartLayoutSequence} from '../smart-layout.mjs';
-import {generateContentPackage, parseContentPackage, importLocalEditableDraft, reorderPage, duplicatePage, deletePage} from '../content-engine.mjs';
+import {generateContentPackage, parseContentPackage, importLocalEditableDraft, reorderPage, duplicatePage, deletePage,invalidateVisualReview} from '../content-engine.mjs';
 import {normalizeHtmlState,freeObjectText,normalizeFreeObjects} from '../html-layout.mjs';
 export function changePage(content, index, patch) {
   if (!content?.pages?.[index]) throw new TypeError('页面不存在');
@@ -99,44 +99,110 @@ export function seedEditableObjects(page,pageIndex=0) {
  const objects=[];
  const text=(id,binding,size,weight=400)=>{if(freeObjectText(page,{binding}).trim())objects.push({id,kind:'text',binding,x:7,y:7,width:86,height:10,font_size:size,font_family:binding==='title'?'songti':'pingfang',font_weight:weight,line_height:binding==='title'?1.15:1.5,color:binding==='eyebrow'?page.accent:'#292720'});};
  const image=(id,binding)=>objects.push({id,kind:'image',image_id:binding,binding,fit:'contain',x:7,y:30,width:86,height:50});
- text('eyebrow-text','eyebrow',28);text('title-block','title',pageIndex===0?92:64,700);
- if(page.info_panels?.length){page.info_panels.forEach((panel,i)=>{text(`panel-${i}-title`,`panel-${i}-title`,40,700);text(`panel-${i}-copy`,`panel-${i}-body`,34);if(panel.image_style?.src&&!panel.image_style.hidden)image(`panel-${i}-image`,`panel-${i}`);});}
- else{text('body-block','body',36);if(page.visual!=='none'&&page.image_style?.src&&!page.image_style.hidden)image('hero-image','hero');}
+ text('eyebrow-text','eyebrow',42);text('title-block','title',pageIndex===0?114:102,700);
+ if(page.info_panels?.length){page.info_panels.forEach((panel,i)=>{text(`panel-${i}-title`,`panel-${i}-title`,72,700);text(`panel-${i}-copy`,`panel-${i}-body`,54);if(panel.image_style?.src&&!panel.image_style.hidden)image(`panel-${i}-image`,`panel-${i}`);});}
+ else{text('body-block','body',54);if(page.visual!=='none'&&page.image_style?.src&&!page.image_style.hidden)image('hero-image','hero');}
  return normalizeFreeObjects(objects);
 }
 
-export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHeight}={}) {
- const source=normalizeFreeObjects(page.html_state?.free_objects||seedEditableObjects(page,pageIndex));
- const header=source.filter(o=>o.kind==='text'&&['eyebrow','title'].includes(o.binding)).sort((a,b)=>(a.binding==='eyebrow'?-1:1));
- const rest=source.filter(o=>!header.includes(o)),groups=new Map();
- for(const o of rest){const panel=/^panel-(\d+)/.exec(o.binding||'');const key=panel?'panel-'+panel[1]:(o.binding==='body'||o.binding==='hero')?'main':o.id;const group=groups.get(key)||{texts:[],images:[]};group[o.kind==='text'?'texts':'images'].push(o);groups.set(key,group);}
- const ordered=[...groups.values()];const margin=72,contentWidth=936,bottom=1368;
- for(const factor of [1,.92,.84,.76]){
-  const updates=new Map();let y=72;
-  const put=(o,x,top,width,height,extra={})=>updates.set(o.id,{...o,x:x/10.8,y:top/14.4,width:width/10.8,height:Math.max(8,height)/14.4,rotation:0,...extra});
-  const measure=(o,width)=>{const fontSize=Math.max(o.binding==='title'?48:26,o.font_size*factor);const height=Math.ceil(measureText({text:freeObjectText(page,o),width,fontSize,fontFamily:o.font_family,fontWeight:o.font_weight,lineHeight:o.line_height,paragraphGap:o.paragraph_gap}))+3;return{height,fontSize};};
-  for(const o of header){const m=measure(o,contentWidth);put(o,margin,y,contentWidth,m.height,{font_size:m.fontSize});y+=m.height+(o.binding==='eyebrow'?18:36);}
-  for(let i=0;i<ordered.length;i++){
-   const group=ordered[i],cover=pageIndex===0&&ordered.length===1&&group.images.length===1;
-   const textWidth=group.images.length&&!cover&&group.texts.length?580:contentWidth;
-   const sizes=group.texts.map(o=>measure(o,textWidth));const textHeight=sizes.reduce((h,m,j)=>h+m.height+(j?16:0),0);
-   if(cover){let top=y;group.texts.forEach((o,j)=>{put(o,margin,top,textWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});const height=Math.max(300,bottom-top-24);put(group.images[0],margin,top+12,contentWidth,height);y=top+12+height;}
-   else if(group.images.length&&group.texts.length){const rowHeight=Math.max(190*factor*group.images.length,textHeight);const imageLeft=(pageIndex+i)%2===0;let top=y;group.texts.forEach((o,j)=>{put(o,imageLeft?428:margin,top,textWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});const imageHeight=(rowHeight-16*(group.images.length-1))/group.images.length;group.images.forEach((o,j)=>put(o,imageLeft?margin:688,y+j*(imageHeight+16),320,imageHeight));y+=rowHeight;}
-   else if(group.texts.length){let top=y;group.texts.forEach((o,j)=>{put(o,margin,top,contentWidth,sizes[j].height,{font_size:sizes[j].fontSize});top+=sizes[j].height+16;});y=top;}
-   else{const columns=Math.min(2,group.images.length),width=(contentWidth-24*(columns-1))/columns;group.images.forEach((o,j)=>put(o,margin+(j%columns)*(width+24),y+Math.floor(j/columns)*340,width,316));y+=Math.ceil(group.images.length/columns)*340;}
-   if(i<ordered.length-1)y+=32;
-  }
-  if(y<=bottom+1){return{...page,editor_mode:'html',html_state:{...normalizeHtmlState(page.html_state,page,pageIndex),free_objects:normalizeFreeObjects(source.map(o=>updates.get(o.id)||o))}};}
- }
- const error=new Error(`\u7b2c${pageIndex+1}\u9875\u5185\u5bb9\u8fc7\u591a\uff0c\u8bf7\u62c6\u5206\u9875\u9762\u540e\u518d\u6392\u7248\uff1b\u539f\u6587\u548c\u56fe\u7247\u5747\u4fdd\u7559\u3002`);error.code='EDITABLE_LAYOUT_NEEDS_SPLIT';error.page=pageIndex;throw error;
-}
 
-export function composeEditableContent(content,{force=false,pageIndex=null,measureText}={}) {
- if(!content?.pages?.length)throw new TypeError('EDITABLE_CONTENT_MISSING');
- const pages=applySmartLayoutSequence(content.pages).map((page,i)=>{
-  if(pageIndex!==null&&pageIndex!==i)return content.pages[i];
-  if(!force&&page.html_state?.free_objects)return content.pages[i];
-  return arrangeEditablePage(page,i,{measureText});
+export const MOBILE_READING = Object.freeze({pageWidth:1080,viewportWidth:360,body:54,label:42,title:102,section:72});
+function mobileType(item,pageIndex){
+ if(item.kind!=='text')return item;
+ const binding=item.binding||'',isTitle=binding==='title',isLabel=binding==='eyebrow',isSection=/^panel-\d+-title$/.test(binding);
+ const floor=isLabel?42:isTitle?(pageIndex===0?114:102):isSection?72:54;
+ return {...item,font_size:Math.max(floor,item.font_size),line_height:isTitle?1.12:isLabel?1.3:isSection?1.2:Math.max(1.5,item.line_height),color:isLabel&&item.color.toLowerCase()==='#e6773d'?'#9b4f32':item.color};
+}
+function layoutOverflow(pageIndex,code='EDITABLE_LAYOUT_NEEDS_SPLIT'){
+ const e=new Error(`\u7b2c${pageIndex+1}\u9875\u5185\u5bb9\u8fc7\u591a\uff0c\u8bf7\u62c6\u9875\u540e\u518d\u6392\u7248\uff1b\u4e0d\u4f1a\u7f29\u5c0f\u6b63\u6587\u6216\u5220\u9664\u56fe\u6587\u3002`);e.code=code;e.page=pageIndex;return e;
+}
+// Pagination reuses the existing page/undo contract. Only complete, canonical
+// multi-panel groups can be split automatically; custom/deleted objects stay put.
+function mobilePages(content,{force,pageIndex}){
+ const out=[],touched=new Set(),splitStarts=new Map();let changed=false;
+ content.pages.forEach((page,i)=>{
+  if(i>=content.visible_pages||(pageIndex!==null&&pageIndex!==i)||(!force&&page.html_state?.free_objects)){out.push(page);return;}
+  const panels=page.info_panels||[],objects=page.html_state?.free_objects;
+  const canonical=new Set(['eyebrow','title',...panels.flatMap((_,j)=>[`panel-${j}-title`,`panel-${j}-body`,`panel-${j}`])]);
+  const intact=!objects||(objects.some(o=>o.binding==='title')&&(!page.eyebrow?.trim()||objects.some(o=>o.binding==='eyebrow'))&&objects.every(o=>canonical.has(o.binding))&&panels.every((p,j)=>objects.some(o=>o.binding===`panel-${j}-body`)&&objects.some(o=>o.binding===`panel-${j}-title`)&&(!p.image_style?.src||p.image_style.hidden||objects.some(o=>o.binding===`panel-${j}`))));
+  if(panels.length<3||!intact){touched.add(out.length);out.push(page);return;}
+  changed=true;splitStarts.set(i,out.length);
+  panels.forEach((panel,j)=>{
+
+   // The canonical panel contract requires 2-4 panels. A one-scene reading
+   // page is therefore a normal body+hero page, not an invalid one-panel list.
+   const sub={...page,eyebrow:[page.eyebrow,page.title].filter(Boolean).join(' / '),title:panel.title,body:panel.body,info_panels:[],image_style:{...panel.image_style},visual:panel.image_style?.src&&!panel.image_style.hidden?'character':'none',layout_ir:null,layout_recipe:null,editor_mode:'html',html_state:undefined};
+   const state=normalizeHtmlState(null,sub,out.length),source=seedEditableObjects(sub,out.length);
+   const previousBinding={title:`panel-${j}-title`,body:`panel-${j}-body`,hero:`panel-${j}`};
+   const next=source.map(o=>{
+    const old=objects?.find(x=>x.binding===previousBinding[o.binding]);
+    if(old)return{...old,id:o.id,binding:o.binding,...(o.kind==='image'?{image_id:o.image_id}:{})};return o;
+   });
+   // Page-level copy that the old multi-panel renderer hid is not discarded.
+   if(j===panels.length-1&&page.body?.trim()&&page.body!==panel.body)next.push({id:'context-copy',kind:'text',text:page.body,x:5,y:70,width:90,height:10,font_size:54,font_family:'pingfang',font_weight:400,line_height:1.5,color:'#292720'});
+   const originalCrop=page.html_state?.image_edits?.[`panel-${j}`];sub.html_state={...state,free_objects:normalizeFreeObjects(next),...(originalCrop?{image_edits:{...state.image_edits,hero:{...originalCrop}}}:{})};
+   touched.add(out.length);out.push(sub);
+  });
  });
- return {...content,pages};
+
+ // A reading cover gets one opening sentence, not a reduced-size paragraph.
+ // Its remaining exact text flows into the first automatically split scene.
+ // This only runs in explicit whole-work reflow/new composition, never on load
+ // or on a manually edited/deleted object set. A second reflow is idempotent.
+ const cover=out[0],coverObjects=cover?.html_state?.free_objects;
+ if(pageIndex===null&&splitStarts.has(1)&&content.visible_pages>1&&(force||!coverObjects)&&!cover.info_panels?.length&&cover.image_style?.src&&cover.body?.length>60&&(!coverObjects||(coverObjects.some(o=>o.binding==='body')&&coverObjects.every(o=>['title','eyebrow','body','hero'].includes(o.binding))))){
+  const parts=/^([\s\S]*?[。！？!?])([\s\S]+)$/.exec(cover.body);
+  if(parts&&parts[2].trim()){
+   out[0]={...cover,body:parts[1]};const target=splitStarts.get(1),next=out[target];
+   const prefix={id:'opening-continuation',kind:'text',text:parts[2],x:5,y:60,width:90,height:10,font_size:54,font_family:'pingfang',font_weight:400,line_height:1.5,color:'#292720'};
+   const objects=[...next.html_state.free_objects],at=objects.findIndex(o=>o.binding==='body');objects.splice(Math.max(0,at),0,prefix);
+   out[target]={...next,html_state:{...next.html_state,free_objects:normalizeFreeObjects(objects)}};touched.add(0);
+  }
+ }
+ if(out.length>8)throw layoutOverflow(0,'MOBILE_PAGE_LIMIT');
+ return{pages:out,changed,touched};
+}
+export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHeight}={}){
+ const source=normalizeFreeObjects(page.html_state?.free_objects||seedEditableObjects(page,pageIndex)).map(o=>mobileType(o,pageIndex));
+ const headers=source.filter(o=>o.kind==='text'&&['eyebrow','title'].includes(o.binding)).sort((a,b)=>Number(b.binding==='eyebrow')-Number(a.binding==='eyebrow'));
+ const images=source.filter(o=>o.kind==='image'),copy=source.filter(o=>o.kind==='text'&&!headers.includes(o));
+ const left=54,width=972,bottom=1386,updates=new Map();let y=54;
+ const put=(o,x,top,w,h)=>updates.set(o.id,{...o,x:x/10.8,y:top/14.4,width:w/10.8,height:Math.max(8,h)/14.4,rotation:0});
+ const height=(o,w)=>Math.ceil(measureText({text:freeObjectText(page,o),width:w,fontSize:o.font_size,fontFamily:o.font_family,fontWeight:o.font_weight,lineHeight:o.line_height,paragraphGap:o.paragraph_gap}))+4;
+ for(const o of headers){const text=freeObjectText(page,o),n=[...text].length;const balance=o.binding==='title'&&n>8&&n<=20&&/^[\u3400-\u9fff\s，。！？、]+$/.test(text)&&height(o,width)>o.font_size*o.line_height+6;const w=balance?Math.min(width,Math.ceil(n/2)*o.font_size*1.055):width;const h=height(o,w);put(o,left,y,w,h);y+=h+(o.binding==='eyebrow'?22:34);}
+ if(images.length===1){
+  const heights=copy.map(o=>height(o,width)),copyH=heights.reduce((n,h)=>n+h,0)+Math.max(0,copy.length-1)*22;
+  const imageH=bottom-y-copyH-(copy.length?34:0);
+  if(imageH<360)throw layoutOverflow(pageIndex);
+  // One scene is the visual anchor. Copy spans the phone width below it, never
+  // squeezed into a narrow column beside a thumbnail.
+  put(images[0],left,y,width,imageH);y+=imageH+(copy.length?34:0);
+  copy.forEach((o,j)=>{put(o,left,y,width,heights[j]);y+=heights[j]+(j<copy.length-1?22:0);});
+ }else if(images.length===0){
+  for(const o of copy){const h=height(o,width);put(o,left,y,width,h);y+=h+24;}
+ }else{
+  const groups=new Map();
+  for(const o of source.filter(o=>!headers.includes(o))){const panel=/^panel-(\d+)/.exec(o.binding||'');const key=panel?'panel-'+panel[1]:o.id;const group=groups.get(key)||{texts:[],images:[]};group[o.kind==='text'?'texts':'images'].push(o);groups.set(key,group);}
+  for(const group of groups.values()){
+   if(group.images.length&&group.texts.length){const tw=558,hs=group.texts.map(o=>height(o,tw));const th=hs.reduce((n,h)=>n+h,0)+Math.max(0,hs.length-1)*18;const rowH=Math.max(360*group.images.length,th);let top=y+(rowH-th)/2;
+    group.images.forEach((o,j)=>put(o,left,y+j*rowH/group.images.length,378,rowH/group.images.length));group.texts.forEach((o,j)=>{put(o,468,top,tw,hs[j]);top+=hs[j]+18;});y+=rowH+38;
+   }else if(group.texts.length){for(const o of group.texts){const h=height(o,width);put(o,left,y,width,h);y+=h+24;}}
+   else{for(const o of group.images){put(o,left,y,width,400);y+=424;}}
+  }
+  y-=38;
+ }
+ const occupiedBottom=Math.max(0,...[...updates.values()].map(o=>(o.y+o.height)*14.4));
+ if(occupiedBottom>bottom+1)throw layoutOverflow(pageIndex);
+ return{...page,editor_mode:'html',html_state:{...normalizeHtmlState(page.html_state,page,pageIndex),free_objects:normalizeFreeObjects(source.map(o=>updates.get(o.id)||o))}};
+}
+export function mobileReadability(page){
+ const text=(page?.html_state?.free_objects||[]).filter(o=>o.kind==='text'&&o.binding!=='eyebrow'&&o.binding!=='title'&&!/^panel-\d+-title$/.test(o.binding||''));
+ const minimum=text.length?Math.min(...text.map(o=>o.font_size/3)):null;
+ return{minimum_body_px:minimum,readable:minimum===null||minimum>=18};
+}
+export function composeEditableContent(content,{force=false,pageIndex=null,measureText}={}){
+ if(!content?.pages?.length)throw new TypeError('EDITABLE_CONTENT_MISSING');
+ const prepared=mobilePages(content,{force,pageIndex});
+ const pages=applySmartLayoutSequence(prepared.pages).map((page,i)=>prepared.touched.has(i)?arrangeEditablePage(page,i,{measureText}):prepared.pages[i]);
+ return invalidateVisualReview({...content,pages,...(prepared.changed?{visible_pages:content.visible_pages+pages.length-content.pages.length,stage:'LOCAL_DRAFT'}:{})});
 }
