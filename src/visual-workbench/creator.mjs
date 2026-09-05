@@ -109,11 +109,11 @@ function confirmedImageDraftSnapshot(draft) {
   };
 }
 
-function imageOperationSnapshot({ recordId, draft, pageCount, productionMode }) {
+function imageOperationSnapshot({ recordId, draft, pageCount, productionMode, referenceNote = '' }) {
   return {
     schema: 'xiaoshimei.image-operation-snapshot.v1', draft_record_id: recordId,
     mutation_epoch: Date.now(), confirmed_draft: confirmedImageDraftSnapshot(draft), page_count: pageCount,
-    production_mode: productionMode, reference_note: '',
+    production_mode: productionMode, reference_note: referenceNote,
   };
 }
 
@@ -152,10 +152,10 @@ async function persistBootstrap({ service, session, pageCount, productionMode, c
   const operationNonce=nonce64(cryptoApi);
   const pending=await createRestartablePendingImageOperationV3({
     operationNonce,
-    operationSnapshot:imageOperationSnapshot({recordId:record.draft_id,draft:session.text_draft,pageCount,productionMode}),
+    operationSnapshot:imageOperationSnapshot({recordId:record.draft_id,draft:session.text_draft,pageCount,productionMode,referenceNote:session.action_reference_note||''}),
     orderedReferenceManifest:session.action_reference_manifest||[], protocolState:'BOOTSTRAP', updatedAt:new Date().toISOString(),
   });
-  const desired=createDraftRecordV3({draftId:record.draft_id,contentPackage:record.content_package,generationSession:session,pendingImageOperation:pending,createdAt:record.created_at,updatedAt:new Date().toISOString()});
+  const desired=createDraftRecordV3({draftId:record.draft_id,displayName:record.display_name,contentPackage:record.content_package,generationSession:session,pendingImageOperation:pending,createdAt:record.created_at,updatedAt:new Date().toISOString()});
   const receipt=await service.coordinator.mergeDraftCas({draftId:record.draft_id,expectedDraftToken:draftRecordToken(record),buildDraft:()=>desired,requireActiveDraftId:record.draft_id,reason:`VISUAL_IMAGE_BOOTSTRAP:${operationNonce}`});
   if(!receipt.ok||!receipt.target_draft?.pending_image_operation) throw new Error(`IMAGE_BOOTSTRAP_NOT_COMMITTED:${receipt.code||'UNKNOWN'}`);
   await service.sync({allowPending:true});

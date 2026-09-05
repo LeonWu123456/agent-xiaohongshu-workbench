@@ -7,7 +7,7 @@ import {
 import {
   HTML_IMAGE_ZOOM_MAX, bodyParagraphs, editorialPanelMeta, highlightTextSegments, imageEditFor, layoutsForPage, nextHtmlLayout, normalizeHtmlState,
   objectDragEdit, objectEditFor, objectTransformStyle, updateImageEdit, updateObjectEdit,
-  titleTextSegments,
+  titleTextSegments, freeResizeGeometry, FREE_FONTS, normalizeFreeObjects, freeObjectText, freeObjectImage, updateFreeObject, freeTextPatch,
 } from "./html-layout.mjs";
 import { assertRenderedImageRegions, assertRenderedPageContent } from "./export-image-verification.mjs";
 import { rectContainedBy, rectsIntersect } from "./layout-qa.mjs";
@@ -148,6 +148,7 @@ export function inspectHtmlPageLayout(pageElement) {
      their rendered children, otherwise a healthy layout fails merely because
      its container reaches the footer boundary. */
   const content = [...pageElement.querySelectorAll([
+    ".html-free-object",
     ".html-page__header",
     ".html-page__eyebrow",
     ".html-page__title",
@@ -166,7 +167,7 @@ export function inspectHtmlPageLayout(pageElement) {
        at the viewport origin and used to create a false HORIZONTAL_OVERFLOW
        warning even after a successful export. */
     .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
-  const textBlocks = [...pageElement.querySelectorAll(".html-page__eyebrow, .html-page__title, .html-page__panel-copy h2, .html-page__panel-copy p, .html-page__body p")]
+  const textBlocks = [...pageElement.querySelectorAll(".html-free-text, .html-page__eyebrow, .html-page__title, .html-page__panel-copy h2, .html-page__panel-copy p, .html-page__body p")]
     .filter((element) => getComputedStyle(element).display !== "none" && element.getClientRects().length > 0);
   textBlocks.forEach((element) => {
     const style = getComputedStyle(element);
@@ -183,6 +184,7 @@ export function inspectHtmlPageLayout(pageElement) {
   content.forEach((element) => {
     const rect = element.getBoundingClientRect();
     const identity = element.dataset.panelId || element.dataset.imageId || element.className;
+    if (element.classList.contains("html-free-object") && rect.top < pageRect.top - 1) reasons.push(`TOP_OVERFLOW:${identity}`);
     if (rect.left < pageRect.left - 1 || rect.right > pageRect.right + 1) reasons.push(`HORIZONTAL_OVERFLOW:${identity}`);
     if (rect.bottom > boundaryBottom + 1) reasons.push(`FOOTER_COLLISION:${identity}`);
   });
@@ -386,7 +388,7 @@ function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAs
   </figure>;
 }
 
-export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedImage, selectedObject, interactionMode = "edit", onSelectImage, onSelectObject, onImageEdit, onObjectEdit, onPagePatch, renderOnly = false }) {
+function FlowPageCanvas({ page, pageIndex, totalPages, state, selectedImage, selectedObject, interactionMode = "edit", onSelectImage, onSelectObject, onImageEdit, onObjectEdit, onPagePatch, renderOnly = false, rootRef }) {
   const directMoveRef = useRef(null);
   const directResizeRef = useRef(null);
   const panels = Array.isArray(page.info_panels) ? page.info_panels : [];
@@ -513,7 +515,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     onClick: (event) => { event.stopPropagation(); onSelectObject?.(objectId); },
   };
 
-  return <article
+  return <article ref={rootRef}
     className={`html-page is-density-${state.density}`}
     data-layout={state.layout_id}
     data-panel-count={panels.length}
@@ -885,4 +887,74 @@ export async function renderHtmlPageToPng(page, pageIndex, totalPages) {
     root.unmount();
     host.remove();
   }
+}
+
+
+// Read the existing page once, preserving its visible geometry. Only geometry
+// and typography are projected; text/image bindings keep their original owner.
+export function measureFlowObjects(node, page) {
+ const rect=node.getBoundingClientRect(),objects=[];
+ const visible=el=>el&&el.getClientRects().length&&el.getBoundingClientRect().width>0&&getComputedStyle(el).display!=='none';
+ const frame=el=>{const r=el.getBoundingClientRect();return {x:(r.left-rect.left)/rect.width*100,y:(r.top-rect.top)/rect.height*100,width:r.width/rect.width*100,height:r.height/rect.height*100};};
+ const text=(selector,id,binding)=>{
+  const el=node.querySelector(selector);if(!visible(el))return;
+  const c=getComputedStyle(el);let scale=1;
+  for(let at=el;at&&at!==node;at=at.parentElement){const t=getComputedStyle(at).transform;if(t!=='none'){const m=new DOMMatrixReadOnly(t);scale*=Math.hypot(m.a,m.b);}}
+  const color=c.color.match(/\d+/g);const hex=color?'#'+color.slice(0,3).map(v=>Number(v).toString(16).padStart(2,'0')).join(''):'#292720';
+  objects.push({id,kind:'text',binding,...frame(el),font_size:parseFloat(c.fontSize)*scale/rect.width*1080,font_family:/Song|SimSun|serif/.test(c.fontFamily)&&!/sans-serif/.test(c.fontFamily)?'songti':'pingfang',font_weight:parseInt(c.fontWeight)||400,color:hex,align:c.textAlign,line_height:parseFloat(c.lineHeight)/parseFloat(c.fontSize)||1.4});
+ };
+ text('.html-page__eyebrow','eyebrow-text','eyebrow');text('.html-page__title','title-block','title');
+ if(page.info_panels?.length)page.info_panels.forEach((_,i)=>{text(`[data-panel-index="${i}"] .html-page__panel-copy h2`,`panel-${i}-title`,`panel-${i}-title`);text(`[data-panel-index="${i}"] .html-page__panel-copy p`,`panel-${i}-copy`,`panel-${i}-body`);});
+ else if(visible(node.querySelector('.html-page__body')))text('.html-page__body','body-block','body');
+ else if(visible(node.querySelector('.html-page__cover-lede')))text('.html-page__cover-lede','cover-lede','body');
+ node.querySelectorAll('figure[data-image-id]').forEach(el=>{if(visible(el))objects.unshift({id:el.dataset.editorObjectId,kind:'image',binding:el.dataset.imageId,image_id:el.dataset.imageId,fit:getComputedStyle(el.querySelector('img')).objectFit,...frame(el)});});
+ return normalizeFreeObjects(objects);
+}
+function freeCss(item) {
+ return {position:'absolute',left:0,top:0,margin:0,padding:0,boxSizing:'border-box',width:`${item.width}cqw`,height:item.kind==='image'?`${item.height}cqh`:'auto',minHeight:item.kind==='text'?`${item.font_size/1080*100*item.line_height}cqw`:undefined,transform:`translate(${item.x}cqw, ${item.y}cqh) rotate(${item.rotation}deg)`,transformOrigin:'50% 50%',opacity:item.opacity,fontSize:item.kind==='text'?`${item.font_size/1080*100}cqw`:undefined,fontFamily:FREE_FONTS[item.font_family],fontWeight:item.font_weight,fontStyle:item.font_style,lineHeight:item.line_height,textAlign:item.align,color:item.color};
+}
+function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSelectImage,onImageEdit,onPagePatch,renderOnly=false,onDirty}) {
+ const root=useRef(null),moveable=useRef(null),gesture=useRef(null),cropDrag=useRef(null),latest=useRef(null);
+ const [target,setTarget]=useState(null),[editing,setEditing]=useState(null),[cropping,setCropping]=useState(null),[keepRatio,setKeepRatio]=useState(false);
+ const objects=state.free_objects,selected=objects.find(o=>o.id===selectedObject);
+ latest.current={page,state,selected,onImageEdit,onPagePatch};
+ const size=()=>({w:root.current?.clientWidth||1,h:root.current?.clientHeight||1});
+ const apply=(el,item)=>Object.assign(el.style,freeCss(item));
+ const commit=item=>onPagePatch?.({html_state:updateFreeObject(latest.current.state,item.id,item)});
+ function stopGesture(){const g=gesture.current;gesture.current=null;if(g){apply(g.target,g.original);moveable.current?.stopDrag();moveable.current?.updateRect();}}
+ function begin(e,type){const item=latest.current.selected;if(!item)return;const {w,h}=size();gesture.current={original:{...item},next:null,target:e.target,w,h,type,baseWidth:e.target.offsetWidth,baseHeight:e.target.offsetHeight};if(type==='drag')e.set([item.x*w/100,item.y*h/100]);else e.dragStart?.set([item.x*w/100,item.y*h/100]);if(type==='resize'){e.set([e.target.offsetWidth,e.target.offsetHeight]);setKeepRatio(Boolean(e.direction[0]&&e.direction[1]));}if(type==='rotate')e.set(item.rotation);}
+ function preview(e,type){const g=gesture.current;if(!g)return;let next={...g.original};const xy=(type==='drag'?e.beforeTranslate:e.drag?.beforeTranslate);if(xy){next.x=xy[0]/g.w*100;next.y=xy[1]/g.h*100;}
+  if(type==='resize'){next.width=Math.max(.5,e.width/g.w*100);next.height=Math.max(.5,e.height/g.h*100);if(next.kind==='text'&&e.direction[0]&&e.direction[1])next.font_size=Math.max(8,Math.min(400,g.original.font_size*e.width/g.baseWidth));apply(e.target,next);Object.assign(next,freeResizeGeometry(g.original,{width:g.baseWidth,height:g.baseHeight},{width:e.target.offsetWidth,height:e.target.offsetHeight},e.direction,g.w,g.h));}
+  if(type==='rotate')next.rotation=e.beforeRotate;
+  g.next=next;apply(e.target,next);
+ }
+ function end(e){const g=gesture.current;gesture.current=null;if(!g)return;if(e.inputEvent?.type?.includes('cancel'))apply(g.target,g.original);else if(g.next)commit(g.next);}
+ useEffect(()=>{setTarget(root.current?.querySelector(`[data-free-id="${selectedObject}"]`)||null);if(editing!==selectedObject)setEditing(null);if(cropping!==selectedObject)setCropping(null);},[selectedObject,objects.length,pageIndex]);
+ useEffect(()=>{moveable.current?.updateRect();},[state,page]);
+ useEffect(()=>{if(!editing)return;const el=root.current?.querySelector(`[data-free-id="${editing}"]`);el?.focus();},[editing]);
+ useEffect(()=>{const cancel=()=>stopGesture();window.addEventListener('pointercancel',cancel);return()=>window.removeEventListener('pointercancel',cancel);},[]);
+ useEffect(()=>{const node=root.current;if(!node||renderOnly)return;const wheel=e=>{const item=latest.current.state.free_objects.find(o=>o.id===cropping);if(!item||!e.target.closest?.(`[data-free-id="${item.id}"]`))return;e.preventDefault();e.stopPropagation();const edit=imageEditFor(latest.current.state,item.image_id,freeObjectImage(latest.current.page,item));latest.current.onImageEdit?.(item.image_id,{zoom:Math.max(1,Math.min(1.8,edit.zoom+(e.deltaY<0?.05:-.05)))});};node.addEventListener('wheel',wheel,{passive:false});return()=>node.removeEventListener('wheel',wheel);},[cropping,renderOnly]);
+ function select(e,item){if(renderOnly)return;e.stopPropagation();if(editing===item.id||cropping===item.id)return;root.current?.focus({preventScroll:true});const changed=item.id!==selectedObject;onSelectObject?.(item.id);onSelectImage?.(item.kind==='image'?item.image_id:null);setTarget(e.currentTarget);if(changed){const event=e.nativeEvent;requestAnimationFrame(()=>moveable.current?.dragStart(event));}}
+ function edit(e,item){e.stopPropagation();stopGesture();onSelectObject?.(item.id);if(item.kind==='text'){setEditing(item.id);setCropping(null);}else{setCropping(item.id);setEditing(null);}}
+ function finishText(e,item){const next=e.currentTarget.innerText.replace(/\u00a0/g,' ');setEditing(null);if(next!==freeObjectText(page,item))onPagePatch?.(freeTextPatch(latest.current.page,item,next));}
+ function cropStart(e,item){if(cropping!==item.id)return;e.preventDefault();e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId);const edit=imageEditFor(state,item.image_id,freeObjectImage(page,item)),r=e.currentTarget.getBoundingClientRect();cropDrag.current={id:item.id,pointer:e.pointerId,x:e.clientX,y:e.clientY,edit,rect:r,next:null,target:e.currentTarget};}
+ function cropMove(e,item){const g=cropDrag.current;if(!g||g.id!==item.id||g.pointer!==e.pointerId)return;const next={...g.edit,focalX:Math.max(12,Math.min(88,g.edit.focalX-(e.clientX-g.x)/g.rect.width*100)),focalY:Math.max(12,Math.min(88,g.edit.focalY-(e.clientY-g.y)/g.rect.height*100))};g.next=next;g.target.style.setProperty('--image-focal-x',next.focalX+'%');g.target.style.setProperty('--image-focal-y',next.focalY+'%');}
+ function cropEnd(e,item,cancel=false){const g=cropDrag.current;if(!g)return;cropDrag.current=null;if(cancel){g.target.style.setProperty('--image-focal-x',g.edit.focalX+'%');g.target.style.setProperty('--image-focal-y',g.edit.focalY+'%');}else if(g.next)onImageEdit?.(item.image_id,g.next);if(g.target.hasPointerCapture?.(e.pointerId))g.target.releasePointerCapture(e.pointerId);}
+ function keys(e){if(e.key==='Escape'){stopGesture();document.activeElement?.blur();setCropping(null);setEditing(null);return;}if(editing||e.target.isContentEditable||!selected)return;const {key}=e,step=e.shiftKey?10:1;if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(key)){e.preventDefault();commit({...selected,x:selected.x+({'ArrowLeft':-step,'ArrowRight':step}[key]||0)/1080*100,y:selected.y+({'ArrowUp':-step,'ArrowDown':step}[key]||0)/1440*100});}}
+ return <>
+  <article ref={root} className="html-page html-free-page" data-layout="free" data-page-role={page.page_role} tabIndex={renderOnly?undefined:0} onKeyDown={renderOnly?undefined:keys} onMouseDown={renderOnly?undefined:e=>{if(e.target===e.currentTarget){e.currentTarget.focus({preventScroll:true});onSelectObject?.(null);setCropping(null);setEditing(null);}}}>
+   {objects.map(item=>{const image=item.kind==='image'?freeObjectImage(page,item):null;const crop=item.kind==='image'?imageEditFor(state,item.image_id,image):null;const style={...freeCss(item),...(crop?{'--image-focal-x':crop.focalX+'%','--image-focal-y':crop.focalY+'%','--image-zoom':crop.zoom}:{})};
+    return item.kind==='text'?<div key={item.id} className={`html-free-object html-free-text ${editing===item.id?'is-editing':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-editable-text="true" style={style} contentEditable={!renderOnly&&editing===item.id} suppressContentEditableWarning spellCheck={false} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onInput={renderOnly?undefined:()=>onDirty?.()} onBlur={renderOnly?undefined:e=>{if(editing===item.id)finishText(e,item);}} onPaste={renderOnly?undefined:e=>{if(editing!==item.id)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));}}>{freeObjectText(page,item)}</div>
+     :<figure key={item.id} className={`html-page__image html-free-object html-free-image ${cropping===item.id?'is-cropping':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-image-id={item.image_id} style={style} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onPointerDown={renderOnly?undefined:e=>cropStart(e,item)} onPointerMove={renderOnly?undefined:e=>cropMove(e,item)} onPointerUp={renderOnly?undefined:e=>cropEnd(e,item)} onPointerCancel={renderOnly?undefined:e=>cropEnd(e,item,true)}><img src={image?.src} style={{objectFit:item.fit||'cover'}} alt="" draggable={false} crossOrigin={image?.src?.startsWith('data:')?undefined:'anonymous'}/></figure>;
+   })}
+  </article>
+  {!renderOnly&&cropping&&<div className="html-crop-toolbar"><span>{'\u62d6\u52a8\u56fe\u7247\u53d6\u666f \u00b7 \u6eda\u8f6e\u7f29\u653e'}</span><button type="button" onClick={()=>setCropping(null)}>{'\u5b8c\u6210\u88c1\u5207'}</button></div>}
+  {!renderOnly&&<React.Suspense fallback={null}><Moveable ref={moveable} target={editing?null:target} container={root.current?.parentElement||undefined} draggable={!cropping} resizable rotatable={!cropping} keepRatio={keepRatio&&!cropping} origin={false} throttleDrag={0} throttleResize={0} throttleRotate={0} rotationPosition="bottom" renderDirections={selected?.kind==='text'?['nw','ne','sw','se','w','e']:['nw','n','ne','w','e','sw','s','se']} onDragStart={e=>begin(e,'drag')} onDrag={e=>preview(e,'drag')} onDragEnd={end} onResizeStart={e=>begin(e,'resize')} onResize={e=>preview(e,'resize')} onResizeEnd={end} onRotateStart={e=>begin(e,'rotate')} onRotate={e=>preview(e,'rotate')} onRotateEnd={end}/></React.Suspense>}
+ </>;
+}
+export function HtmlPageCanvas(props) {
+ const flow=useRef(null);
+ const {page,state,interactionMode,renderOnly,onPagePatch}=props;
+ useEffect(()=>{if(renderOnly||interactionMode!=='direct'||state.free_objects)return;let live=true;(async()=>{await document.fonts?.ready;await Promise.all([...flow.current?.querySelectorAll('img')||[]].map(img=>img.decode?.().catch(()=>{})));await new Promise(r=>requestAnimationFrame(r));if(live&&flow.current)onPagePatch?.({html_state:{...state,free_objects:measureFlowObjects(flow.current,page)}});})();return()=>{live=false;};},[page,state.free_objects,interactionMode,renderOnly]);
+ return state.free_objects?<FreePageCanvas {...props}/>:<FlowPageCanvas {...props} rootRef={flow}/>;
 }

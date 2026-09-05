@@ -188,7 +188,7 @@ export function normalizeHtmlState(value, page, pageIndex = 0) {
     Object.entries(source.image_edits).forEach(([key, edit]) => {
       if (!edit || typeof edit !== "object" || Array.isArray(edit)) return;
       const policy = mediaPolicyFor(imageStyles.get(key) || {});
-      const legacyZoom = finite(edit.zoom, policy.defaultZoom, 1, 1.45);
+      const legacyZoom = finite(edit.zoom, policy.defaultZoom, 1, sourceVersion < 4 ? 1.45 : HTML_IMAGE_ZOOM_MAX);
       const migratedZoom = sourceVersion < 4 && [1.04, 1.06, 1.08].includes(Number(legacyZoom.toFixed(2)))
         ? policy.defaultZoom
         : legacyZoom;
@@ -238,6 +238,7 @@ export function normalizeHtmlState(value, page, pageIndex = 0) {
     design_program: designProgram,
     image_edits: imageEdits,
     object_edits: objectEdits,
+    ...(source.free_objects === undefined ? {} : { free_objects: normalizeFreeObjects(source.free_objects) }),
   };
 }
 
@@ -333,4 +334,65 @@ export function bodyParagraphs(value) {
     .map((part) => part.trim())
     .filter(Boolean);
   return paragraphs.length ? paragraphs : [""];
+}
+
+
+// Optional geometry is part of the existing page, not a parallel document.
+export const FREE_FONTS = {
+ songti:'"Songti SC", "STSong", "SimSun", serif', heiti:'"Heiti SC", "Microsoft YaHei", sans-serif',
+ kaiti:'"Kaiti SC", "KaiTi", serif', fangsong:'"FangSong", "STFangsong", serif',
+ yuanti:'"Yuanti SC", "YouYuan", sans-serif', pingfang:'"PingFang SC", "Microsoft YaHei", sans-serif',
+};
+export function normalizeFreeObjects(value) {
+ if(!Array.isArray(value)||value.length>128)throw new TypeError('FREE_OBJECTS_INVALID');
+ const seen=new Set();
+ return value.map(item=>{
+  if(!item||!/^[\w-]{1,120}$/.test(item.id||'')||seen.has(item.id)||!['text','image'].includes(item.kind))throw new TypeError('FREE_OBJECT_INVALID');
+  seen.add(item.id);
+  const out={id:item.id,kind:item.kind,x:finite(item.x,8,-200,200),y:finite(item.y,8,-200,200),width:finite(item.width,40,.5,400),height:finite(item.height,12,.5,400),rotation:finite(item.rotation,0,-36000,36000),opacity:finite(item.opacity,1,0,1)};
+  if(item.kind==='text'){
+   if(item.binding&&/^(eyebrow|title|body|panel-\d+-(title|body))$/.test(item.binding))out.binding=item.binding;
+   else out.text=String(item.text||'').slice(0,10000);
+   out.font_size=finite(item.font_size,42,8,400);out.font_family=Object.hasOwn(FREE_FONTS,item.font_family)?item.font_family:'pingfang';out.font_weight=Number(item.font_weight)>=600?700:400;out.font_style=item.font_style==='italic'?'italic':'normal';
+   out.color=/^#[0-9a-f]{6}$/i.test(item.color||'')?item.color:'#292720';out.align=['left','center','right','justify'].includes(item.align)?item.align:'left';out.line_height=finite(item.line_height,1.4,.8,3);
+  }else{
+   out.image_id=String(item.image_id||item.id);out.fit=item.fit==='contain'?'contain':'cover';
+   if(/^(hero|panel-\d+)$/.test(item.binding||''))out.binding=item.binding;
+   else{const src=String(item.src||'');if(!/^(data:image\/(png|jpeg|webp);base64,|blob:|\/(assets|generated)\/|xiaoshimei-media:\/\/sha256\/|https:\/\/)/i.test(src))throw new TypeError('FREE_IMAGE_SOURCE_INVALID');out.src=src;}
+  }
+  return out;
+ });
+}
+export function freeObjectText(page,item){
+ if(!item?.binding)return String(item?.text||'');
+ const panel=/^panel-(\d+)-(title|body)$/.exec(item.binding);
+ return String(panel?page?.info_panels?.[Number(panel[1])]?.[panel[2]]||'':page?.[item.binding]||'');
+}
+export function freeObjectImage(page,item){
+ if(!item?.binding)return {src:item?.src};
+ return item.binding==='hero'?page?.image_style:page?.info_panels?.[Number(item.binding.replace('panel-',''))]?.image_style;
+}
+export function updateFreeObject(state,id,patch){
+ if(!state?.free_objects?.some(item=>item.id===id))throw new TypeError('FREE_OBJECT_MISSING');
+ return {...state,free_objects:normalizeFreeObjects(state.free_objects.map(item=>item.id===id?{...item,...patch}:item))};
+}
+export function freeTextPatch(page,item,text){
+ const value=String(text||'');
+ if(!item.binding)return {html_state:updateFreeObject(page.html_state,item.id,{text:value})};
+ const panel=/^panel-(\d+)-(title|body)$/.exec(item.binding);
+ if(panel)return {info_panels:page.info_panels.map((p,i)=>i===Number(panel[1])?{...p,[panel[2]]:value||'\u70b9\u51fb\u8f93\u5165\u6587\u5b57'}:p)};
+ return {[item.binding]:value||(item.binding==='title'?'\u70b9\u51fb\u8f93\u5165\u6807\u9898':item.binding==='eyebrow'?'\u5c0f\u6807\u9898':'\u70b9\u51fb\u8f93\u5165\u6b63\u6587')};
+}
+export function duplicateFreeObject(page,state,id,newId){
+ const item=state.free_objects.find(item=>item.id===id);if(!item)throw new TypeError('FREE_OBJECT_MISSING');
+ const copy={...item,id:newId,binding:undefined,x:item.x+2,y:item.y+2};
+ if(item.kind==='text')copy.text=freeObjectText(page,item);else{copy.src=freeObjectImage(page,item)?.src;copy.image_id=newId;}
+ return {...state,free_objects:normalizeFreeObjects([...state.free_objects,copy]),image_edits:item.kind==='image'?{...state.image_edits,[newId]:{...imageEditFor(state,item.image_id)}}:state.image_edits};
+}
+
+export function freeResizeGeometry(item,before,after,direction,pageWidth,pageHeight){
+ const theta=item.rotation*Math.PI/180,c=Math.cos(theta),s=Math.sin(theta),rot=(x,y)=>[c*x-s*y,s*x+c*y];
+ const ax=-direction[0],ay=item.kind==='text'&&!direction[1]?-1:-direction[1];
+ const a=rot(ax*before.width/2,ay*before.height/2),b=rot(ax*after.width/2,ay*after.height/2);
+ return {x:(item.x*pageWidth/100+before.width/2+a[0]-b[0]-after.width/2)/pageWidth*100,y:(item.y*pageHeight/100+before.height/2+a[1]-b[1]-after.height/2)/pageHeight*100};
 }

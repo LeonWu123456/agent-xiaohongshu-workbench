@@ -38,3 +38,18 @@ html,body,#visual-root{margin:0;width:100%;height:100%;min-width:360px}body{over
 
 .vw-panel-close{display:none}
 @media(max-width:650px){.vw-body.vw-panel-open .vw-left{display:flex;grid-column:2;grid-row:1/3;min-width:0}.vw-body.vw-panel-open .vw-workspace,.vw-body.vw-panel-open .vw-inspector{display:none}.vw-body.vw-panel-open .vw-panel-close{display:inline-flex;width:30px;height:30px;padding:0;font-size:18px!important}.vw-body.vw-panel-open .vw-library-actions{grid-template-columns:1fr 1fr}.vw-body.vw-panel-open .vw-page-actions{grid-template-columns:repeat(3,1fr)}.vw-body.vw-panel-open .vw-pages{padding:16px}.vw-body.vw-panel-open .vw-thumb{width:150px}}
+
+/* Product chrome: existing character artwork, no generated image asset. */
+.vw-brand-avatar{position:relative;display:inline-block;overflow:hidden;width:46px;height:46px;flex:0 0 46px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px #e8e5df}
+.vw-brand-avatar img{position:absolute;max-width:none!important;width:236%;height:236%;left:-8%;top:-4%;object-fit:fill}
+.vw-brand:hover .vw-brand-avatar{transform:rotate(-5deg)}
+.vw-paper{position:relative}.vw-paper>.html-page.html-free-page{width:100%;max-width:none}
+.vw-canvas-tools{display:flex;align-items:center;gap:5px}.vw-canvas-tools small{margin-left:6px;font-size:10px;color:#a3998e;white-space:nowrap}.vw-canvas-tools .vw-button{background:#fffefa;border-color:#e7e0d7;height:32px}
+.vw-text-format{display:flex;gap:5px;align-items:center;margin-bottom:13px}.vw-text-format .vw-button{border-color:#e7e0d7;min-width:32px;padding:0 7px}.vw-text-format input{height:30px;width:32px;border:1px solid #e7e0d7;background:none;border-radius:6px;padding:2px}.vw-field select,.vw-text-format select{width:100%;min-width:0;border:1px solid #e7e0d7;background:#fffefa;border-radius:7px;padding:8px;font-size:11px;color:#716454}
+.vw-object-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.vw-object-actions .vw-button{border-color:#e7e0d7;font-size:10px!important}.vw-page-order{display:flex;justify-content:flex-end;gap:3px;margin-top:-10px;margin-bottom:12px}.vw-page-order button{border:1px solid #e7e0d7;border-radius:5px;background:#fffefa;width:24px;height:23px;color:#988773}
+.vw-rename-form{padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid #eee8df}
+.vw-paper .moveable-control-box{--moveable-color:#be633f!important;z-index:60!important}.vw-paper .moveable-control{width:10px!important;height:10px!important;margin-left:-5px!important;margin-top:-5px!important;background:#fffefa!important;border:1px solid #be633f!important}.vw-paper .moveable-line{background:#be633f!important}.vw-paper .moveable-rotation-control{background:#be633f!important}
+.html-crop-toolbar{position:absolute;left:8px;top:8px;display:flex;align-items:center;gap:12px;z-index:80;background:#fffefa;border:1px solid #e1d5c8;border-radius:8px;padding:8px 10px;box-shadow:0 3px 16px #47362114;font-size:10px;color:#8f7860}.html-crop-toolbar button{border:0;border-radius:5px;background:#be633f;color:white;padding:5px 9px;font:inherit}
+@media(max-width:800px){.vw-canvas-tools small{display:none}.vw-brand-avatar{width:36px;height:36px;flex-basis:36px}}
+@media(max-width:650px){.vw-body.is-create{grid-template-columns:46px minmax(0,1fr)}.vw-stage-scroll{padding-top:18px}.vw-brand-avatar{width:36px;height:36px;flex-basis:36px}.vw-canvas-tools .vw-button{padding:0 8px;height:31px}.vw-header-actions{gap:2px}.vw-paper .moveable-control{width:12px!important;height:12px!important;margin-left:-6px!important;margin-top:-6px!important}}
+@media(prefers-reduced-motion:reduce){.vw-brand:hover .vw-brand-avatar{transform:none}}

@@ -94,9 +94,9 @@ test('blank draft never inherits demo publish copy',()=>{
  assert.doesNotMatch(copy,/忙起来时|古法养生|传统文化|自我照顾/);
 });
 
-test('direct resize controls use the same 72 percent floor as the persistent object model',async()=>{
+test('legacy flow retains its scale floor while free canvas exposes independent pixel geometry',async()=>{
  const [main,editor]=await Promise.all([readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'),readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8')]);
- assert.match(main,/aria-label="模块大小" type="range" min="\.72" max="1\.4"/);
+ assert.match(main,/freeSelected.width\*10.8/);assert.match(main,/freeSelected.font_size/);
  assert.match(editor,/Math\.max\(\.72, drag\.start\.scale/);assert.match(editor,/Math\.max\(\.72, scale \* fitFactor\)/);
  assert.doesNotMatch(editor,/Math\.max\(\.65, (?:drag\.start\.scale|scale \* fitFactor)/);
 });
@@ -161,4 +161,19 @@ test('narrow workbench exposes the selected library or page panel without hiding
  assert.match(source,/className="vw-panel-close"/);
  assert.match(css,/\.vw-body\.vw-panel-open \.vw-left\{display:flex/);
  assert.match(css,/\.vw-body\.vw-panel-open \.vw-workspace,\.vw-body\.vw-panel-open \.vw-inspector\{display:none\}/);
+});
+
+
+test('free canvas geometry and typography survive the canonical HTML normalization',async()=>{
+ const {normalizeHtmlState}=await import('../src/html-layout.mjs');
+ const page=createBlankContent().pages[0];
+ const state=normalizeHtmlState({...normalizeHtmlState(null,page),free_objects:[{id:'title-block',kind:'text',binding:'title',x:65,y:70,width:25,height:10,rotation:17,font_size:96,font_family:'songti'}]},page);
+ assert.equal(state.free_objects[0].x,65);assert.equal(state.free_objects[0].font_size,96);assert.equal(state.free_objects[0].width,25);assert.equal(state.free_objects[0].rotation,17);
+ const restored=importEditableContent({...createBlankContent(),pages:[{...page,html_state:state}]});assert.deepEqual(restored.pages[0].html_state.free_objects,state.free_objects);
+});
+
+test('workbench removes nonfunctional intro cards and uses the existing character avatar',async()=>{
+ const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ assert.doesNotMatch(main,/className="vw-stage-intro"|className="vw-inspector-note"/);
+ assert.match(main,/className="vw-brand-avatar"/);
 });

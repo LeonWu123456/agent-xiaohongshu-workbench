@@ -1,5 +1,5 @@
 import {generateContentPackage, parseContentPackage, importLocalEditableDraft, reorderPage, duplicatePage, deletePage} from '../content-engine.mjs';
-import {normalizeHtmlState} from '../html-layout.mjs';
+import {normalizeHtmlState,freeObjectText} from '../html-layout.mjs';
 export function changePage(content, index, patch) {
   if (!content?.pages?.[index]) throw new TypeError('页面不存在');
   const next={...content,pages:content.pages.map((p,i)=>i===index?{...p,...patch}:p)};
@@ -11,12 +11,13 @@ export function changePage(content, index, patch) {
 }
 export function replacePageImage(page, imageId, src) {
   if(!/^(data:image\/(png|jpeg|webp);base64,|blob:|\/assets\/|xiaoshimei-media:\/\/sha256\/|https:\/\/)/i.test(src)) throw new TypeError('不支持这张图片的来源');
-  if(imageId==='hero')return {...page,visual:'character',image_style:{...page.image_style,src}};
+  if(imageId==='hero')return {...page,visual:'character',image_style:{...page.image_style,src,hidden:false}};
   const index=Number(String(imageId).replace(/^panel-/,''));
   if(!Number.isInteger(index)||!page.info_panels?.[index])throw new TypeError('图片对象不存在');
   return {...page,info_panels:page.info_panels.map((p,i)=>i===index?{...p,image_style:{...p.image_style,src,hidden:false}}:p)};
 }
 export function listPageObjects(page,index) {
+  if(page.html_state?.free_objects)return page.html_state.free_objects.map(o=>({id:o.id,kind:o.kind,imageId:o.kind==='image'?o.image_id:null,label:o.kind==='image'?'\u56fe\u7247':freeObjectText(page,o).slice(0,16)||'\u7a7a\u6587\u5b57'}));
   const items=[{id:'title-block',label:'标题',kind:'text'}];
   if(normalizeHtmlState(page.html_state,page,index).layout_id==='cover-poster')items.push({id:'cover-lede',label:'引言',kind:'text'});
   if(page.info_panels?.length) page.info_panels.forEach((p,i)=>{

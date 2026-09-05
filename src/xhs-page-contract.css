@@ -393,3 +393,12 @@
   .html-page { width: min(calc(100% - 8px), 438px, calc((100vh - 286px) * .75)); }
   .html-editor__layout-warning { position: sticky; right: 0; }
 }
+
+/* Free editing is an optional page projection; exports use these same rules. */
+.html-page.html-free-page{display:block;position:relative;width:100%;aspect-ratio:3 / 4;container-type:size;padding:0;overflow:hidden;background:#fff;isolation:isolate;outline:none}
+.html-free-page .html-free-object{display:block;position:absolute;margin:0;padding:0;border:0;border-radius:0;box-shadow:none;max-width:none;max-height:none;min-width:0;float:none;touch-action:none}
+.html-free-page .html-free-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:normal;cursor:move;user-select:none;overflow:visible}
+.html-free-page .html-free-text.is-editing{cursor:text;user-select:text;outline:none}
+.html-free-page .html-free-image{overflow:hidden;background:transparent;cursor:move;clip-path:none}
+.html-free-page .html-free-image.is-cropping{cursor:grab;outline:2px dashed #be633f;outline-offset:-2px}
+.html-free-page .html-free-image img{display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:cover;object-position:var(--image-focal-x,50%) var(--image-focal-y,50%);transform:scale(var(--image-zoom,1));transform-origin:center;pointer-events:none}

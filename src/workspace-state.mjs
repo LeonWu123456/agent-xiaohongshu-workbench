@@ -233,6 +233,7 @@ function imageBootstrapComparableDraftTokenV3(value) {
     : { ...record.generation_session, image_resume: null };
   return draftRecordToken(createDraftRecordV3({
     draftId: record.draft_id,
+    displayName: record.display_name,
     contentPackage: record.content_package,
     generationSession,
     pendingImageOperation: null,
@@ -2306,6 +2307,7 @@ export async function migrateWorkspaceEnvelopeV2ToV3({ workspace, serializedV2, 
     const imageState = await projectLegacyImageState(record, migratedContent, migratedSession, mediaStore);
     drafts.push(createDraftRecordV3({
       draftId: record.draft_id,
+      displayName: record.display_name,
       contentPackage: migratedContent,
       generationSession: imageState.generationSession,
       pendingImageOperation: imageState.pendingImageOperation,
@@ -3054,6 +3056,7 @@ async function commitImageRecoveryMoveV3({
     const releasedTarget = targetStillOwnsOperation
       ? createDraftRecordV3({
         draftId: latestTarget.draft_id,
+        displayName: latestTarget.display_name,
         contentPackage: latestTarget.content_package,
         generationSession: latestTarget.generation_session == null
           ? null
@@ -3148,6 +3151,7 @@ export async function commitDraftImageProgressV3({
   const pending = pendingAfterProgress(snapshotRecord.pending_image_operation, resume, mediaManifest, timestamp, nextProtocolState);
   const buildRecord = ({ sourceRecord, draftId: nextId, createdAt }) => createDraftRecordV3({
     draftId: nextId,
+    displayName: sourceRecord.display_name,
     contentPackage: sourceRecord.content_package,
     generationSession: { ...sourceRecord.generation_session, image_resume: resume },
     pendingImageOperation: pending,
@@ -3173,6 +3177,7 @@ export async function commitDraftImageProgressV3({
         const recoveredPending = pendingAfterProgress(sourceRecord.pending_image_operation, resume, mediaManifest, timestamp, nextProtocolState);
         return createDraftRecordV3({
           draftId: targetId,
+          displayName: sourceRecord.display_name,
           contentPackage: sourceRecord.content_package,
           generationSession: { ...sourceRecord.generation_session, image_resume: resume },
           pendingImageOperation: recoveredPending,
@@ -3218,6 +3223,7 @@ export async function commitDraftImageProgressV3({
         const recoveredPending = pendingAfterProgress(sourceRecord.pending_image_operation, resume, mediaManifest, timestamp, nextProtocolState);
         return createDraftRecordV3({
           draftId: recoveredId,
+          displayName: sourceRecord.display_name,
           contentPackage: sourceRecord.content_package,
           generationSession: { ...sourceRecord.generation_session, image_resume: resume },
           pendingImageOperation: recoveredPending,
@@ -3264,6 +3270,7 @@ export async function commitDraftImagePlannerFailureV3({
   };
   const buildRecord = (target) => createDraftRecordV3({
     draftId: target.draft_id,
+    displayName: target.display_name,
     contentPackage: target.content_package,
     generationSession: finalSession,
     pendingImageOperation: null,
@@ -3371,6 +3378,7 @@ export async function parkStalePendingImageOperationV3({
     operationSnapshot: snapshotRecord,
     buildRecoveredDraft: (existingRecovered) => createDraftRecordV3({
       draftId: recoveredId,
+      displayName: existingRecovered?.display_name || snapshotRecord.display_name,
       contentPackage: existingRecovered?.content_package || snapshotRecord.content_package,
       generationSession: existingRecovered?.generation_session || recoverySession,
       pendingImageOperation: existingRecovered?.pending_image_operation || snapshotRecord.pending_image_operation,
@@ -3476,6 +3484,7 @@ export async function commitDraftImageCompletionV3({
   };
   const buildRecord = ({ draftId: nextId, createdAt, saveToLibrary = false, sourceRecord = snapshotRecord }) => createDraftRecordV3({
     draftId: nextId,
+    displayName: sourceRecord.display_name,
     contentPackage: saveToLibrary
       ? { ...content, id: nextId, saved_at: timestamp }
       : draftContentWithPreservedBookkeepingV3({ contentPackage: content, draftRecord: sourceRecord }),
