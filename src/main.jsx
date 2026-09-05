@@ -30,6 +30,8 @@ import {
   activeDraftRecordV3,
   authoringSessionForDraftSnapshotV3,
   beginNewDraftV3,
+  forkDraftForReferenceEditV3,
+  libraryContentsFromNormalized as libraryContentsFromWorkspaceView,
   buildWorkspaceBackupV3,
   commitDraftImageCompletionV3,
   commitDraftImagePlannerFailureV3,
@@ -49,6 +51,7 @@ import {
   materializePersistentMediaRefsV3,
   migrateLegacyWorkspaceState,
   normalizeAuthoringSession,
+  parkStalePendingImageOperationV3,
   reconcilePersistentLibraryView,
   rebuildPendingImageStartV3,
   readWorkspaceSnapshot,
@@ -57,7 +60,15 @@ import {
   saveWorkspaceProfileV3,
   workspaceEnvelopeV3Token,
 } from "./workspace-state.mjs";
-import { generationFailureFeedback, providerHealthState } from "./generation-feedback.mjs";
+import {
+  generationFailureAction,
+  generationFailureBelongsToDraft,
+  generationFailureFeedback,
+  providerHealthState,
+  restoreGenerationFailure,
+  runGenerationFailureAction,
+  workbenchImageFailureFeedback,
+} from "./generation-feedback.mjs";
 import { buildHistoricalDraftAdoption, derivePublicationAuthority, publicationBlockMessage } from "./publication-authority.mjs";
 import { publicationSnapshotDecision, runGuardedPublicationAction } from "./publication-action-guard.mjs";
 import { contentHasRenderableCanvas, deriveCreatorJourney } from "./creator-journey.mjs";
@@ -357,34 +368,13 @@ async function resolveLocalBlobMedia(url) {
   return { bytes: new Uint8Array(await blob.arrayBuffer()), mime: blob.type };
 }
 
-function libraryContentsFromWorkspaceView(workspace) {
-  return (workspace?.drafts || [])
-    .filter((draft) => Boolean(draft?.content_package?.saved_at) || (
-      /^image-recovery-[0-9a-f]{32}$/.test(draft?.draft_id || "")
-      && draft?.pending_image_operation == null
-      && draft?.generation_session?.text_confirmed === true
-      && draft?.content_package?.generation?.source_draft_id === draft?.generation_session?.assembled_draft_id
-    ))
-    .map((draft) => ({
-      ...draft.content_package,
-      draft_record_id: draft.draft_id,
-      id: draft.content_package.id || draft.draft_id,
-      saved_at: draft.content_package.saved_at || draft.updated_at,
-    }));
-}
-
 function loadPromptMemory() {
   return parsePromptMemory(localStorage.getItem(PROMPT_MEMORY_KEY));
 }
 
 function loadGenerationFailure() {
   try {
-    const value = JSON.parse(localStorage.getItem(GENERATION_FAILURE_KEY));
-    if (!value || typeof value !== "object" || typeof value.title !== "string") return null;
-    if (value.technical_code) {
-      return generationFailureFeedback({ message: value.technical_code, providerCode: value.technical_code, providerStage: value.stage, failureId: value.failure_id });
-    }
-    return value;
+    return restoreGenerationFailure(JSON.parse(localStorage.getItem(GENERATION_FAILURE_KEY)));
   } catch { return null; }
 }
 
@@ -710,10 +700,18 @@ export function authoringInputLockReason({ workspaceReady, workspaceReadOnly } =
   return null;
 }
 
-export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, activeDraftId, imageOperationDraftId } = {}) {
+export function imageLaneLockReason({ workspaceReady, workspaceReadOnly, pendingImageOperation, pendingLocation = null, pendingTextDraftId = null, currentTextDraftId = null, activeDraftId, imageOperationDraftId } = {}) {
   const workspaceReason = authoringInputLockReason({ workspaceReady, workspaceReadOnly });
   if (workspaceReason) return workspaceReason;
-  if (pendingImageOperation || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
+  const pendingTargetsCurrentText = Boolean(pendingImageOperation) && (
+    pendingLocation == null
+    || (pendingLocation === "ACTIVE" && (
+      !pendingTextDraftId
+      || !currentTextDraftId
+      || pendingTextDraftId === currentTextDraftId
+    ))
+  );
+  if (pendingTargetsCurrentText || (activeDraftId && imageOperationDraftId === activeDraftId)) return "PENDING_IMAGE_OPERATION_INPUT_FROZEN";
   return null;
 }
 
@@ -810,11 +808,11 @@ function panelSelectionIndex(value) {
 }
 
 
-function FailureNotice({ feedback, onRetry }) {
+function FailureNotice({ feedback, onRetry, actionLabel, disabled = false }) {
   if (!feedback) return null;
   return <div className="generation-error" role="alert" data-error-code={feedback.code}>
     <div><strong>{feedback.title}</strong><span>{feedback.detail}</span></div>
-    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" onClick={onRetry}>{feedback.retry_label || `重试${feedback.stage === "image" ? "图片" : "文字"}`}</button></footer>
+    <footer><code>{feedback.stage === "image" ? "图片" : "文字"} · {feedback.technical_code || feedback.code}</code><button type="button" disabled={disabled} onClick={onRetry}>{actionLabel || "重试文字"}</button></footer>
   </div>;
 }
 
@@ -1032,9 +1030,9 @@ function App() {
     : initialWorkspaceLoad.persistence.ok ? "" : "旧工作台已读入，但 v2 草稿权威尚未可靠落盘；请立即备份工作台。");
   const [exportState, setExportState] = useState("IDLE");
   const [preparedExport, setPreparedExport] = useState(null);
-  const [generationState, setGenerationState] = useState("IDLE");
-  const [activeImageIntent, setActiveImageIntent] = useState(null);
   const [generationError, setGenerationError] = useState(loadGenerationFailure);
+  const [generationState, setGenerationState] = useState(generationError ? "FAILED" : "IDLE");
+  const [activeImageIntent, setActiveImageIntent] = useState(null);
   const [textDraft, setTextDraft] = useState(initialGenerationSession?.text_draft || null);
   const [textConfirmed, setTextConfirmed] = useState(Boolean(initialGenerationSession?.text_confirmed));
   const [assembledDraftId, setAssembledDraftId] = useState(initialGenerationSession?.assembled_draft_id || null);
@@ -1109,12 +1107,21 @@ function App() {
     : null;
   const imageOperationRecord = imageOperationAuthority?.record || (workspaceReady ? activeDraftRecordV3(workspaceEnvelopeRef.current) : null);
   const pendingImageOperation = imageOperationRecord?.pending_image_operation || null;
-  const effectiveImageResume = pendingImageOperation == null ? imageResume : imageOperationRecord?.generation_session?.image_resume || imageResume;
-  const imageAuthorityTextDraft = pendingImageOperation?.operation_snapshot?.confirmed_draft || textDraft;
+  const pendingTextDraftId = pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || null;
+  const currentTextDraftId = textDraft?.draft_id || null;
+  const pendingTargetsCurrentText = Boolean(pendingImageOperation)
+    && imageOperationAuthority?.location === "ACTIVE"
+    && (!pendingTextDraftId || !currentTextDraftId || pendingTextDraftId === currentTextDraftId);
+  const currentPendingImageOperation = pendingTargetsCurrentText ? pendingImageOperation : null;
+  const stalePendingImageOperation = pendingImageOperation && !pendingTargetsCurrentText ? pendingImageOperation : null;
+  const stalePendingNeedsParking = Boolean(stalePendingImageOperation && imageOperationAuthority?.location === "ACTIVE");
+  const effectiveImageResume = currentPendingImageOperation == null ? imageResume : imageOperationRecord?.generation_session?.image_resume || imageResume;
+  const recoveryImageResume = stalePendingImageOperation ? imageOperationRecord?.generation_session?.image_resume || null : null;
+  const imageAuthorityTextDraft = currentPendingImageOperation?.operation_snapshot?.confirmed_draft || textDraft;
   const workspaceReadOnly = !workspaceReady || workspaceWriteBlocked;
   const authoringInputLocked = workspaceReadOnly || workspaceTransitioning;
   const textLaneLocked = authoringInputLocked || generationState === "TEXT_GENERATING" || generationState === "IMAGE_GENERATING";
-  const imageLaneLocked = authoringInputLocked || Boolean(pendingImageOperation) || generationState === "IMAGE_GENERATING";
+  const imageLaneLocked = authoringInputLocked || Boolean(currentPendingImageOperation) || generationState === "IMAGE_GENERATING";
   const draftEditingLocked = workspaceReadOnly || workspaceTransitioning || generationState === "IMAGE_GENERATING";
   const providerCanAttempt = !workspaceReadOnly && !accessRequired
     && (providerHealth === "ONLINE" || providerHealth === "DEGRADED" || providerHealth === "UNVERIFIED");
@@ -1178,21 +1185,24 @@ function App() {
     activeDraftId: workspaceEnvelope.active_draft_id,
     pendingImageOperation,
   }), [content, textDraft, textConfirmed, assembledDraftId, activatedAsContentOnly, workspaceEnvelope.active_draft_id, pendingImageOperation]);
-  const pendingRecoveryDiscoveryOnly = Boolean(pendingImageOperation);
+  const pendingRecoveryDiscoveryOnly = Boolean(currentPendingImageOperation);
   const paidRecoveryContinuationReady = Boolean(pendingImageOperation
     && recoveryDiscoveryReceipt?.active_draft_id === imageOperationAuthority?.source_draft_id
     && recoveryDiscoveryReceipt?.operation_nonce === pendingImageOperation.operation_nonce
     && recoveryDiscoveryReceipt?.run_id === pendingImageOperation.run_id
     && ["READY", "PARTIAL"].includes(recoveryDiscoveryReceipt?.status));
   const publicationExportLocked = workspaceReadOnly || workspaceTransitioning || !publicationAuthority.allowed;
-  const imageFailureFeedback = generationError?.stage === "image" && pendingRecoveryDiscoveryOnly && publicationAuthority.allowed
-    ? {
-      ...generationError,
-      title: "另一条配图还在恢复窗内",
-      detail: `当前 ${visiblePages.length} 页成品仍可复制和下载。恢复检查会先读账本；若记录缺失，可能调用文字模型重建配图计划，但不会调用图片模型。`,
-      retry_label: "检查恢复状态（不生成图片）",
-    }
-    : generationError;
+  const imageFailureFeedback = workbenchImageFailureFeedback({
+    feedback: generationError,
+    pendingRecoveryDiscoveryOnly,
+    publicationAuthorityCode: publicationAuthority.code,
+    visiblePageCount: visiblePages.length,
+  });
+  const imageFailureActionContext = {
+    feedback: imageFailureFeedback,
+    hasPendingOperation: Boolean(pendingImageOperation),
+  };
+  const imageFailureAction = generationFailureAction(imageFailureActionContext);
   authorityTargetRef.current = {
     draftId: workspaceEnvelopeRef.current.active_draft_id,
     pageId: pageSemanticIdentity(currentPage, pageIndex),
@@ -1260,7 +1270,7 @@ function App() {
     return true;
   }
 
-  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false, workspaceView = null } = {}) {
+  function adoptWorkspaceState(nextWorkspace, { record = null, previousId, nextProfile, applyRecord = false, workspaceView = null, preserveGenerationFailure = false } = {}) {
     workspaceEnvelopeRef.current = nextWorkspace;
     authorityTargetRef.current = {
       ...authorityTargetRef.current,
@@ -1287,7 +1297,7 @@ function App() {
       const recordId = record?.draft_id || nextWorkspace.active_draft_id;
       const sourceWorkspace = workspaceView?.workspace || nextWorkspace;
       const visibleRecord = sourceWorkspace.drafts.find((draft) => draft.draft_id === recordId);
-      if (visibleRecord) applyDraftRecord(visibleRecord);
+      if (visibleRecord) applyDraftRecord(visibleRecord, { preserveGenerationFailure });
     }
     workspaceReadyRef.current = true;
     setWorkspaceReady(true);
@@ -1338,12 +1348,15 @@ function App() {
       workspaceReady: workspaceReadyRef.current,
       workspaceReadOnly: workspaceWriteBlockedRef.current,
       pendingImageOperation: durablePending,
+      pendingLocation: durableAuthority?.location || null,
+      pendingTextDraftId: durablePending?.operation_snapshot?.confirmed_draft?.draft_id || null,
+      currentTextDraftId: textDraft?.draft_id || null,
       activeDraftId,
       imageOperationDraftId: draftMutationLockRef.current?.draft_id,
     });
     if (!reason) return false;
     setToast(reason === "PENDING_IMAGE_OPERATION_INPUT_FROZEN"
-      ? "同一次配图仍在恢复；图片参数暂时锁定，文字、排版、保存与导出可继续"
+      ? "当前文字的同一次配图仍在恢复；图片参数暂时锁定，文字、排版、保存与导出可继续"
       : "工作台当前为只读；不能修改图片输入");
     return true;
   }
@@ -1429,7 +1442,11 @@ function App() {
       } catch (error) {
         console.warn(error);
         if (!active) return;
-        adoptWorkspaceState(receipt.workspace, { record: finalRecord, applyRecord: true });
+        adoptWorkspaceState(receipt.workspace, {
+          record: finalRecord,
+          applyRecord: true,
+          preserveGenerationFailure: generationFailureBelongsToDraft(generationError, finalRecord),
+        });
         setWorkspaceBlocked(true);
         const missing = error.mediaHydration?.missing_refs?.length || 0;
         const corrupt = error.mediaHydration?.corrupt_refs?.length || 0;
@@ -1444,6 +1461,7 @@ function App() {
         record: finalRecord,
         applyRecord: true,
         workspaceView,
+        preserveGenerationFailure: generationFailureBelongsToDraft(generationError, finalRecord),
       });
       setWorkspaceBlocked(bootstrapReadOnly);
       setStorageIssue(bootstrapReadOnly ? "已读回现有 v3 稿件，但检测到旧写入漂移；当前以只读方式打开，未采用旧 v2 覆盖。" : "");
@@ -1914,7 +1932,7 @@ function App() {
     mutatePage((page) => ({ ...page, layer_state: moveLayer(page.layer_state, key, direction) }));
   }
 
-  function applyDraftRecord(record) {
+  function applyDraftRecord(record, { preserveGenerationFailure = false } = {}) {
     mainAuthority.markSemanticMutation();
     const nextContent = record.content_package;
     const session = record.generation_session;
@@ -1950,9 +1968,11 @@ function App() {
     setCandidatePageIndex(null);
     setCandidatePageIdentity(null);
     setCandidateRunId(null);
-    setGenerationState("IDLE");
-    setGenerationError(null);
-    try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
+    if (!preserveGenerationFailure) {
+      setGenerationState("IDLE");
+      setGenerationError(null);
+      try { localStorage.removeItem(GENERATION_FAILURE_KEY); } catch {}
+    }
     setPreparedExport((current) => {
       if (current?.revoke) URL.revokeObjectURL(current.url);
       return null;
@@ -2110,6 +2130,40 @@ function App() {
     }
   }
 
+  async function openReferenceSettings() {
+    if (draftMutationIsLocked()) return false;
+    const baseWorkspace = workspaceEnvelopeRef.current;
+    if (!activeDraftRecordV3(baseWorkspace).pending_image_operation) {
+      scrollCreatorStage("creator-action-references");
+      return true;
+    }
+    const operation = mainAuthority.capture("FORK_REFERENCE_EDIT", { envelopeScoped: true });
+    const expectedWorkspaceToken = workspaceEnvelopeV3Token(baseWorkspace);
+    const currentContent = contentRef.current;
+    const currentSession = currentAuthoringSession();
+    try {
+      const materialized = await materializeForWorkspace({ current_content: currentContent, current_session: currentSession });
+      if (!mainAuthority.isCurrent(operation)) return false;
+      const created = forkDraftForReferenceEditV3(baseWorkspace, {
+        newDraftId: crypto.randomUUID(),
+        currentContent: materialized.value.current_content,
+        currentSession: materialized.value.current_session,
+      });
+      if (!await persistAndAdoptWorkspace(created.workspace, { record: created.activeDraft, previousId: created.previousDraftId, expectedWorkspaceToken, operation, reason: "FORK_REFERENCE_EDIT" })) return false;
+      setView("compose");
+      const confirmed = created.activeDraft.generation_session?.text_confirmed;
+      scrollCreatorStage(confirmed ? "creator-action-references" : "creator-text");
+      setToast(confirmed
+        ? "原任务已完整保留；现在可在副本调整参考图，未调用生成服务。原任务在资产库标为待恢复配图"
+        : "原任务已完整保留；请先确认副本文字，再调整参考图。本次未调用生成服务");
+      return true;
+    } catch (error) {
+      console.warn(error);
+      setToast("编辑副本未建立，原任务和画布未改变；请先检查本机存储或恢复备份");
+      return false;
+    }
+  }
+
   async function createAuthoringRecord({ source, nextPillar, nextGoal = "save", successMessage }) {
     if (workspaceMutationIsLocked()) return false;
     const operation = mainAuthority.capture("CREATE_AUTHORING_DRAFT", { envelopeScoped: true });
@@ -2179,7 +2233,7 @@ function App() {
       setRealityFeedbackId(null);
       setView("compose");
       setCreatorOpen(Boolean(activated.activeDraft.generation_session));
-      setToast("已切回完整稿件；文字、画布与发布来源同步恢复");
+      setToast("已切回完整稿件；能否发布仍以当前文字与画布校验结果为准");
       return true;
     } catch (error) {
       console.warn(error);
@@ -2230,7 +2284,7 @@ function App() {
 
   async function repairVisibleCanvasLineage() {
     if (workspaceMutationIsLocked()) return;
-    if (publicationAuthorityRef.current?.code !== "CONTENT_LINEAGE_MISMATCH" || historicalAdoptionRef.current) return;
+    if (!["CONTENT_LINEAGE_MISMATCH", "PUBLICATION_COPY_MISMATCH"].includes(publicationAuthorityRef.current?.code) || historicalAdoptionRef.current) return;
     const operation = mainAuthority.capture("visible-canvas-lineage-repair", { envelopeScoped: true });
     historicalAdoptionRef.current = true;
     setHistoricalAdoptionBusy(true);
@@ -2239,7 +2293,7 @@ function App() {
       const draftId = baseWorkspace.active_draft_id;
       const sourceRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
       const sourceLineageId = String(sourceRecord?.content_package?.generation?.source_draft_id || "");
-      if (!sourceRecord || !sourceLineageId || !sourceRecord.pending_image_operation) throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRECONDITION_FAILED");
+      if (!sourceRecord || !sourceLineageId) throw new TypeError("VISIBLE_CANVAS_LINEAGE_REPAIR_PRECONDITION_FAILED");
       const frozenPages = JSON.stringify(sourceRecord.content_package.pages);
       const frozenPending = JSON.stringify(sourceRecord.pending_image_operation);
       const adoption = buildHistoricalDraftAdoption({
@@ -2267,10 +2321,10 @@ function App() {
         operation,
       })) return;
       setRecoveryDiscoveryReceipt(null);
-      setToast("当前两页对应文案已恢复为唯一确认文字；图片与待恢复操作均未改变");
+      setToast(`当前 ${sourceRecord.content_package.pages.length} 页对应文案已恢复为唯一确认文字；图片与待恢复操作均未改变`);
     } catch (error) {
       console.warn(error);
-      mainAuthority.commit(operation, () => setToast("当前两页对应文案未能恢复，原稿和待恢复操作都没有改变"));
+      mainAuthority.commit(operation, () => setToast("当前画布对应文案未能恢复，原稿和待恢复操作都没有改变"));
     } finally {
       historicalAdoptionRef.current = false;
       setHistoricalAdoptionBusy(false);
@@ -2312,10 +2366,14 @@ function App() {
   }
 
   function failGeneration(feedback) {
+    const scopedFeedback = {
+      ...feedback,
+      draft_record_id: workspaceEnvelopeRef.current?.active_draft_id || null,
+    };
     setGenerationState("FAILED");
-    setGenerationError(feedback);
-    try { localStorage.setItem(GENERATION_FAILURE_KEY, JSON.stringify(feedback)); } catch {}
-    setToast(feedback.title);
+    setGenerationError(scopedFeedback);
+    try { localStorage.setItem(GENERATION_FAILURE_KEY, JSON.stringify(scopedFeedback)); } catch {}
+    setToast(scopedFeedback.title);
   }
 
   function clearGenerationFailure() {
@@ -2453,6 +2511,67 @@ function App() {
     return true;
   }
 
+  async function parkOldImageRecovery() {
+    if (!stalePendingImageOperation) { setToast("没有需要分离的旧配图任务"); return; }
+    if (!stalePendingNeedsParking) { setToast("旧配图任务已经独立保存在资产库，不再锁定当前稿"); return; }
+    if (workspaceMutationIsLocked()) return;
+    const operation = mainAuthority.capture("PARK_STALE_IMAGE_RECOVERY", { envelopeScoped: true });
+    if (!workspaceTransitionLock.acquire(operation, workspaceEnvelopeRef.current.active_draft_id)) {
+      setToast("工作台正在保存；旧任务没有改变，请稍候再试");
+      return;
+    }
+    setWorkspaceTransitioning(true);
+    try {
+      const baseWorkspace = workspaceEnvelopeRef.current;
+      const draftId = baseWorkspace.active_draft_id;
+      const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === draftId);
+      if (!baseRecord?.pending_image_operation) throw new TypeError("STALE_IMAGE_RECOVERY_MISSING");
+      const snapshotted = await workspaceWithCurrentSnapshot(baseWorkspace, contentRef.current, currentAuthoringSession());
+      if (!mainAuthority.isCurrent(operation)) return;
+      const replacement = snapshotted.drafts.find((draft) => draft.draft_id === draftId);
+      const saveReceipt = await workspaceCoordinator.mergeDraftCas({
+        draftId,
+        expectedDraftToken: draftRecordToken(baseRecord),
+        buildDraft: (target) => mainAuthority.isCurrent(operation) ? createDraftRecordV3({
+          draftId: target.draft_id,
+          contentPackage: draftContentWithPreservedBookkeepingV3({ contentPackage: replacement.content_package, draftRecord: target }),
+          generationSession: replacement.generation_session,
+          pendingImageOperation: target.pending_image_operation,
+          createdAt: target.created_at,
+          updatedAt: replacement.updated_at,
+        }) : target,
+        reason: "PARK_STALE_IMAGE_RECOVERY_SNAPSHOT_V3",
+      });
+      if (!saveReceipt.ok || !saveReceipt.target_draft) {
+        handleWorkspaceConflict(saveReceipt, "当前稿保存时发生冲突；旧配图任务没有移动");
+        return;
+      }
+      const parkReceipt = await parkStalePendingImageOperationV3({
+        coordinator: workspaceCoordinator,
+        draftId,
+        expectedDraftToken: draftRecordToken(saveReceipt.target_draft),
+        operationSnapshot: saveReceipt.target_draft,
+      });
+      if (!parkReceipt.ok || !parkReceipt.workspace) {
+        handleWorkspaceConflict(parkReceipt, "旧配图任务未能独立保存；当前稿没有丢失");
+        return;
+      }
+      const committed = mainAuthority.commit(operation, () => {
+        adoptWorkspaceState(parkReceipt.workspace);
+        setRecoveryDiscoveryReceipt(null);
+        setToast("旧配图任务已保留到资产库；当前稿的配图设置已解锁（0 次模型调用）");
+      });
+      if (!committed.applied) {
+        reconcileStaleDraftWrite(parkReceipt, { dirtyDraftId: draftId, issueLabel: "旧配图任务分离" });
+      }
+    } catch (error) {
+      console.warn(error);
+      mainAuthority.commit(operation, () => setToast("旧配图任务没有移动；当前稿和旧任务都仍保留"));
+    } finally {
+      if (workspaceTransitionLock.release(operation)) setWorkspaceTransitioning(false);
+    }
+  }
+
   async function addActionReferences(event) {
     const operation = mainAuthority.capture("action-reference-reader", { pageScoped: true });
     const files = [...event.target.files]; event.target.value = "";
@@ -2489,20 +2608,24 @@ function App() {
 
   async function generateImageNode(options = {}) {
     if (!mediaWorkspaceIsUsable()) return;
-    if (!textConfirmed && !pendingImageOperation) { setToast("请先确认文字，再进入配图"); return; }
+    const recoveryOperation = options?.recoveryOperation === true;
+    if (recoveryOperation && !pendingImageOperation) { setToast("旧配图任务已经结束或不存在"); return; }
+    if (!recoveryOperation && !textConfirmed) { setToast("请先确认文字，再进入配图"); return; }
+    if (!recoveryOperation && stalePendingNeedsParking) { setToast("请先保留旧任务并解锁当前配图；该动作不会调用模型"); return; }
     if (!provider?.generateImages) {
       failGeneration({ code: "LOCAL_PROVIDER_UNAVAILABLE", title: "生成服务没有接好", detail: IS_PUBLIC_RUNTIME ? "文字草稿和当前画布已经保留。请在模型设置中连接自己的火山方舟，再重试图片。" : "文字草稿和当前画布已经保留。请确认本机生成服务正在运行，然后重试图片。", stage: "image" });
       return;
     }
     if (!providerCanAttempt) { setToast(accessRequired ? "请先输入小师妹 Studio 访问码" : IS_PUBLIC_RUNTIME ? "生成服务尚未就绪" : "本机生成服务暂时不可连接，请稍后再试"); return; }
     if (activeImageOperationRef.current || draftMutationLockRef.current) { setToast("已有图片步骤正在固定或保存，请等待同一次操作收束"); return; }
-    if (!pendingImageOperation && !textDraftIsReady()) return;
+    if (!recoveryOperation && !currentPendingImageOperation && !textDraftIsReady()) return;
     const mainOperation = mainAuthority.capture("image-generation");
     const authGeneration = authStateRef.current.generation;
     const baseWorkspace = workspaceEnvelopeRef.current;
     const sourceDraftId = baseWorkspace.active_draft_id;
     const operationAuthority = imageOperationAuthorityV3(baseWorkspace, { activeDraftId: sourceDraftId });
-    const targetDraftId = operationAuthority?.holder_draft_id || sourceDraftId;
+    const useRecoveryAuthority = recoveryOperation || Boolean(currentPendingImageOperation);
+    const targetDraftId = useRecoveryAuthority ? operationAuthority?.holder_draft_id || sourceDraftId : sourceDraftId;
     const baseRecord = baseWorkspace.drafts.find((draft) => draft.draft_id === targetDraftId);
     if (!baseRecord) { setToast("当前稿件身份缺失，配图没有开始"); return; }
     const recoveryCheck = imageRecoveryClickMode({
@@ -3620,7 +3743,15 @@ function App() {
       </section>}
 
       {textDraft && (textConfirmed || pendingImageOperation) && <section id="creator-images" className="workbench-section workbench-images" data-text-draft-id={textDraft.draft_id || ""} data-content-source-draft-id={content.generation?.source_draft_id || ""} data-pending-snapshot-draft-record-id={pendingImageOperation?.operation_snapshot?.draft_record_id || ""} data-pending-snapshot-text-draft-id={pendingImageOperation?.operation_snapshot?.confirmed_draft?.draft_id || ""} data-pending-bootstrap-nonce={pendingImageOperation?.operation_nonce || ""} data-pending-run-id={pendingImageOperation?.run_id || ""} data-pending-protocol-state={pendingImageOperation?.protocol_state || ""} data-publication-authority-code={publicationAuthority.code} data-last-image-request-modes={imageOperationReadback?.request_modes?.join(",") || ""} data-last-image-response-status={imageOperationReadback?.response_status || ""} data-last-image-upstream-calls={imageOperationReadback?.upstream_calls ?? ""}>
-        <header><div><strong>{pendingImageOperation && !textConfirmed ? "旧文字的配图恢复" : "配图生成"}</strong><small>{pendingImageOperation && !textConfirmed ? "当前文字修改不影响已保存的配图任务；先查询已有结果" : "文字已锁定为本轮输入 · AI 建议 1–8 页，你可以覆盖"}</small></div><span className="text-gate is-confirmed">{pendingImageOperation && !textConfirmed ? "可恢复" : "文字已确认"}</span></header>
+        <header><div><strong>配图生成</strong><small>{textConfirmed ? "当前文字是本轮输入 · AI 建议 1–8 页，你可以覆盖" : "当前文字仍可修改；旧任务恢复不会锁住这份稿"}</small></div><span className={`text-gate ${textConfirmed ? "is-confirmed" : ""}`}>{textConfirmed ? "文字已确认" : "当前文字待确认"}</span></header>
+        {stalePendingImageOperation && <aside className="image-recovery-card" aria-label="旧配图任务">
+          <div><strong>旧配图任务</strong><small>它属于“{stalePendingImageOperation.operation_snapshot?.confirmed_draft?.selected_title || "上一版文字"}”，不会再和当前文字混成一次操作。</small></div>
+          <div className="image-recovery-card__actions">
+            {stalePendingNeedsParking && <button type="button" onClick={parkOldImageRecovery} disabled={isGenerating || workspaceTransitioning}>保留旧任务并解锁当前配图</button>}
+            <button type="button" onClick={() => generateImageNode({ recoveryOperation: true, discoveryOnly: true })} disabled={isGenerating || (provider && !providerCanAttempt)}>检查旧任务（不生成图片）</button>
+          </div>
+          {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ recoveryOperation: true, paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续旧任务图片步骤 {Number(recoveryImageResume?.completed_image_steps || 0) + 1}/{Number(recoveryImageResume?.total_image_steps || 1)}</button>}
+        </aside>}
         <fieldset className="production-mode-picker">
           <legend><strong>内容表现方式</strong><small>先选整套怎么讲，系统再做分镜和排版</small></legend>
           <div className="production-mode-options">{PRODUCTION_MODES.map((mode) => <label key={mode.id} className={productionMode === mode.id ? "is-selected" : ""}>
@@ -3629,7 +3760,7 @@ function App() {
           </label>)}</div>
         </fieldset>
         <section className="image-plan-card"><div className="image-count-choice"><label className={imageCountMode === "AUTO" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "AUTO"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("AUTO")} /><span><strong>智能判断</strong><small>建议 {imageAuthorityTextDraft.recommended_image_count} 个画板</small></span></label><label className={imageCountMode === "CUSTOM" ? "is-selected" : ""}><input type="radio" name="image-count" checked={imageCountMode === "CUSTOM"} disabled={imageLaneLocked || isGenerating} onChange={() => changeImageCountModeChoice("CUSTOM")} /><span><strong>指定画板数</strong><small>1 到 8 页</small></span>{imageCountMode === "CUSTOM" && <select aria-label="指定画板数量" value={customImageCount} disabled={imageLaneLocked || isGenerating} onChange={(event) => changeCustomImageCountValue(event.target.value)}>{[1,2,3,4,5,6,7,8].map((count) => <option key={count} value={count}>{count} 页</option>)}</select>}</label></div><p>{effectiveImageResume?.completed_image_steps != null ? `已保存图片步骤 ${effectiveImageResume.completed_image_steps}/${effectiveImageResume.total_image_steps}${Number.isInteger(effectiveImageResume.max_image_calls) ? `；本轮已调用 ${effectiveImageResume.actual_image_calls}/${effectiveImageResume.max_image_calls} 次，剩余 ${effectiveImageResume.remaining_image_calls} 次${effectiveImageResume.plan_exceeds_remaining_budget ? "，当前计划可能超过余额" : ""}` : ""}；继续时只做剩余步骤。` : effectiveImageResume?.completed_mother_sheets != null ? `已保留 ${effectiveImageResume.completed_mother_sheets}/${effectiveImageResume.total_mother_sheets} 张母图，从第 ${effectiveImageResume.completed_mother_sheets + 1} 张继续。` : `预计 ${illustrationUnitRange} 个插画单元 · ${motherSheetRange} 张 3:4 母版图（首张含 9:8 高清 KV，后续按需续页）· 约 ¥${(motherSheetEstimate.minMotherSheets * 0.22).toFixed(2)}${motherSheetEstimate.minMotherSheets === motherSheetEstimate.maxMotherSheets ? "" : `–${(motherSheetEstimate.maxMotherSheets * 0.22).toFixed(2)}`}`}</p></section>
-        <section className="action-reference-panel">
+        <section className="action-reference-panel" id="creator-action-references">
           <div className="action-reference-panel__head"><div><strong>动作参考图</strong><small>拳架、器械与连续姿势 · 最多 3 张</small></div><button type="button" onClick={() => actionReferenceRef.current?.click()} disabled={imageLaneLocked || isGenerating || actionReferences.length >= 3}><ImagePlus />加入</button></div>
           <input ref={actionReferenceRef} hidden multiple type="file" accept="image/png,image/jpeg,image/webp" onChange={addActionReferences} />
           {actionReferences.length > 0 && <div className="action-reference-list">{actionReferences.map((item) => <figure key={item.media_ref}><img src={actionReferencePreviewUrls[item.media_ref] || ""} alt={item.name} /><figcaption>{item.name}</figcaption><button type="button" disabled={imageLaneLocked || isGenerating} onClick={() => removeActionReference(item.media_ref)} aria-label={`删除参考图 ${item.name}`}><X /></button></figure>)}</div>}
@@ -3642,9 +3773,21 @@ function App() {
         </details>
         {generationState === "IMAGE_GENERATING" && <div className="generation-progress" role="status"><RefreshCw /><div><strong>{activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : effectiveImageResume?.completed_image_steps != null ? `图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps} 生成中` : `正在规划并生成首张母图`}</strong><small>{activeImageIntent === "RECOVERY_CHECK" ? "先读取已有账本；记录缺失时会调用文字模型重建配图计划" : "本次操作可能产生图片调用；每完成一步都会先保存"}</small></div></div>}
         {providerServerManaged && !imageLedgerAttested && <p className="generation-service-note" role="status">文字生成仍可使用；配图服务正在恢复，本次不会发起图片调用。</p>}
-        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : pendingRecoveryDiscoveryOnly ? "检查恢复状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
-        {paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
-        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice feedback={imageFailureFeedback} onRetry={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} />}
+        <button className="creator-submit" onClick={() => generateImageNode({ discoveryOnly: pendingRecoveryDiscoveryOnly })} disabled={stalePendingNeedsParking || isGenerating || (provider && !(pendingRecoveryDiscoveryOnly ? providerCanAttempt : imageProviderCanAttempt))}>{generationState === "IMAGE_GENERATING" ? (activeImageIntent === "RECOVERY_CHECK" ? "正在检查恢复状态（不会生成图片）" : "正在生成配图（可能产生图片调用）") : accessRequired ? "先验证访问码" : stalePendingNeedsParking ? "先保留旧任务，再生成当前稿" : pendingRecoveryDiscoveryOnly ? "检查当前任务状态（不生成图片）" : providerServerManaged && !imageLedgerAttested ? "配图服务恢复中（不会调用图片）" : effectiveImageResume?.total_image_steps != null ? `继续图片步骤 ${effectiveImageResume.completed_image_steps + 1}/${effectiveImageResume.total_image_steps}` : effectiveImageResume?.total_mother_sheets != null ? `继续母图 ${effectiveImageResume.completed_mother_sheets + 1}/${effectiveImageResume.total_mother_sheets}` : `生成配图并自动排版 ${resolvedPageCount} 页`}</button>
+        {!stalePendingImageOperation && paidRecoveryContinuationReady && <button className="creator-submit creator-submit--paid" onClick={() => generateImageNode({ paidContinuation: true })} disabled={isGenerating || (provider && !imageProviderCanAttempt)}>确认付费：继续图片步骤 {Number(effectiveImageResume?.completed_image_steps || 0) + 1}/{Number(effectiveImageResume?.total_image_steps || 1)}</button>}
+        {generationState === "FAILED" && generationError?.stage === "image" && <FailureNotice
+          feedback={imageFailureFeedback}
+          actionLabel={imageFailureAction.label}
+          disabled={isGenerating || workspaceTransitioning}
+          onRetry={() => runGenerationFailureAction(imageFailureActionContext, {
+            discover: () => generateImageNode({ recoveryOperation: Boolean(stalePendingImageOperation), discoveryOnly: true }),
+            openRecoveryLibrary: () => { setView("library"); setToast("请在资产库找回原配图任务或恢复备份；本次没有生成图片"); },
+            openBackupRestore: () => { setView("library"); setToast("请点击恢复备份，选择已有工作台备份；本次没有生成图片"); },
+            openReferenceSettings: openReferenceSettings,
+            openAccessSettings: openProviderSettings,
+            generateImages: () => generateImageNode(),
+          })}
+        />}
       </section>}
     </>;
   }
@@ -3774,7 +3917,7 @@ function App() {
                   <span>当前画布：{content.selectedTitle || "无成稿"}</span>
                   <small>可以继续保存；复制和发布包不会读取这份冲突内容。</small>
                   {["HISTORICAL_CONFIRMATION_REQUIRED", "GENERATION_SESSION_MISSING"].includes(publicationAuthority.code) && <button type="button" className="copy-publish" disabled={draftEditingLocked || historicalAdoptionBusy} onClick={adoptHistoricalDraft}><Check />{historicalAdoptionBusy ? "正在确认…" : "确认现有文案为本稿唯一发布文案"}</button>}
-                  {publicationAuthority.code === "CONTENT_LINEAGE_MISMATCH" && pendingImageOperation && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : "恢复当前两页对应文案（0 次图片调用）"}</button>}
+                  {["CONTENT_LINEAGE_MISMATCH", "PUBLICATION_COPY_MISMATCH"].includes(publicationAuthority.code) && <button type="button" className="copy-publish" disabled={workspaceReadOnly || workspaceTransitioning || historicalAdoptionBusy} onClick={repairVisibleCanvasLineage}><RotateCcw />{historicalAdoptionBusy ? "正在恢复对应文案…" : `恢复当前 ${visiblePages.length} 页对应文案（0 次图片调用）`}</button>}
                 </div> : publicationAuthority.mode === "TEXT_DRAFT_PROJECTION" ? <div className="publish-package-summary">
                   <strong>{content.selectedTitle}</strong>
                   <span>{content.body.replace(/\s/g, "").length} 字 · {content.tags.length} 个标签 · {visiblePages.length} 页画布</span>

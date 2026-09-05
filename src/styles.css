@@ -873,6 +873,13 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
 .production-mode-options small { color: #686159; font-size: 9px; line-height: 1.5; }
 .production-mode-options b { color: var(--moss); font-size: 9px; font-weight: 700; line-height: 1.45; }
 .image-plan-card { display: grid; gap: 10px; }
+.image-recovery-card { display: grid; gap: 10px; padding: 13px; border: 1px solid rgba(184,100,66,.32); border-radius: 13px; background: rgba(184,100,66,.065); }
+.image-recovery-card > div:first-child { display: grid; gap: 4px; }
+.image-recovery-card strong { color: #75442f; font-size: 11px; }
+.image-recovery-card small { color: #755f54; font-size: 9px; line-height: 1.55; }
+.image-recovery-card__actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.image-recovery-card__actions button { min-height: 40px; padding: 0 10px; border: 1px solid rgba(184,100,66,.25); border-radius: 9px; color: #75442f; background: rgba(255,255,255,.72); font-size: 9px; font-weight: 800; }
+.image-recovery-card__actions button:first-child { color: white; border-color: #b86442; background: #b86442; }
 .image-count-choice { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .image-count-choice > label { min-height: 72px; border: 1px solid var(--line); border-radius: 13px; background: #fff; padding: 12px; display: flex; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; cursor: pointer; transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
 .image-count-choice > label.is-selected { border-color: var(--noir); box-shadow: 0 0 0 1px var(--noir); transform: translateY(-1px); }
@@ -926,6 +933,7 @@ input, textarea, select { width: 100%; border: 1px solid var(--line); border-rad
   .production-mode-picker legend small { text-align: left; }
   .production-mode-options { grid-template-columns: 1fr; }
   .production-mode-options > label, .production-mode-options > label:first-child { grid-column: auto; min-height: 88px; }
+  .image-recovery-card__actions { grid-template-columns: 1fr; }
 }
 
 .lf-card { color: var(--ink); background: var(--paper); border-radius: 24px; padding: 20px 18px 14px; font-family: var(--font-sans); }

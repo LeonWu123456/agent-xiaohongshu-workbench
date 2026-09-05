@@ -219,10 +219,9 @@ test("generation UI distinguishes canvases, illustration units, mother sheets, a
   assert.match(source, /mode: "START"|rebuildPendingImageStartV3/);
   assert.match(source, /mode: "DISCOVER"/);
   assert.match(source, /mode: "STEP"/);
-  assert.match(source, /检查恢复状态（不生成图片）/);
+  assert.match(source, /检查当前任务状态（不生成图片）/);
   assert.match(source, /记录缺失时会调用文字模型重建配图计划/);
   assert.match(source, /确认付费：继续图片步骤/);
-  assert.match(source, /恢复当前两页对应文案（0 次图片调用）/);
   assert.match(source, /data-text-draft-id=\{textDraft\.draft_id \|\| ""\}/);
   assert.match(source, /data-content-source-draft-id=\{content\.generation\?\.source_draft_id \|\| ""\}/);
   assert.match(source, /data-pending-snapshot-draft-record-id=\{pendingImageOperation\?\.operation_snapshot\?\.draft_record_id \|\| ""\}/);

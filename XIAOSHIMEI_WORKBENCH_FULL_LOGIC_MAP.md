@@ -1,126 +1,234 @@
-# 小师妹工作台 Current Logic Map v2.0.0
+# 小师妹工作台｜图文交付主链逻辑地图（郭东超原版绘法）
 
-> **状态：CURRENT / runtime-bound**
-> 这张图只描述当前有效产品逻辑，不再兼任事故史、发布台账或未来计划。历史 Rxx/Dxx 证据留在 Git/Tasks；机器真相见 `logic/logic-model.json`。
+> 只描述产品功能逻辑：用户看到什么、做什么、进入什么流程、调用什么、保存什么、哪些规则不能破、怎样验证。
+>
+> 本文件是唯一产品逻辑权威与人类入口；`logic/logic-model.json` 是同节点 ID 的机器投影，`logic/nodes/` 只负责逐节点追溯。三者必须由测试校验一致，任何 `RESOLVED` 都不能代替真实页面结果。
+>
+> 范围只含当前最短交付旅程“原文 → 文字 → 配图 → 排版 → 编辑 → 保存/重载 → 下载”及其恢复、反馈边界；研究选题和账号档案是上游辅助能力，不冒充这条交付旅程已经走通。
 
-## 一张图
+## 九个问题
+
+### 参考图恢复的目的地合同（FLOW-006，本地修复待发布验收）
+
+`参考图失败 → 保留原任务 → 原子落盘编辑副本 → 可修改参考图 → 保存重载 → 原任务仍可返回`。
+这里的成功不是“滚动到了设置”，而是输入实际可改、改动可保存、原冻结快照和恢复点不变。副本不继承 pending/image_resume；此动作不调用生成服务。只读、媒体缺失、并发冲突或陈旧回调不得提前声称解锁；文字未确认时先回确认步骤。验证落在 FLOW-006 的实现、行为测试和浏览器旅程，不能用图的结构完整代替用户结果。
+
+| 类型 | 问题 | 小师妹答案 |
+|---|---|---|
+| CAP | 用户最终能完成什么？ | 完成一套可编辑、可保存、可发布的小红书图文 |
+| PAGE | 在哪里完成？ | 创作工作台、稿件与反馈、生成服务设置 |
+| UI | 用户看到或点击什么？ | 原文、确认文字、生成图片、检查状态、编辑、保存、下载 |
+| ACT | 点击后实际做什么？ | 生成、确认、检查恢复、明确付费继续、编辑、保存、导出 |
+| FLOW | 动作怎样流动？ | 创作、图文生成、任务恢复、编辑、发布包、反馈 |
+| API | 调用什么？ | 生成服务、本机存取、下载 |
+| STORE | 保存什么？ | 文稿、任务恢复点、画布媒体、发布包、反馈 |
+| RULE | 什么绝不能被破坏？ | 同稿身份、检查零图片调用、明确付费、发布同稿、排版有效 |
+| TEST | 怎样证明正常？ | 真实故障用例、生成恢复、保存重载、编辑导出、反馈回流 |
+
+## 产品全景图
 
 ```mermaid
 flowchart TD
-  U["稳定入口\nxiaoshimei-full-workbench.vercel.app"] --> A["Studio Access Session\n生产 Key 留在 Vercel"]
-  A --> W["当前 Workspace / DraftRecord"]
+  CAP["CAP-001<br/>完成一套可编辑、可发布的小红书图文"]
 
-  W --> R["研究选题"]
-  R --> S1["1 原文"]
-  W --> S1
-  S1 --> S2["2 文字草稿"]
-  S2 --> C{"人工确认文字?"}
-  C -- 否 --> S2
-  C -- 是 --> S3["3 配图\nDraft-bound paid image op"]
-  S3 --> P["Provider START → DISCOVER/STEP* → COMPLETE"]
-  P --> L["Server Image Ledger\n跨实例付费副作用保护"]
-  P --> M["IndexedDB Media\ncontent-addressed bytes"]
-  P --> S4["4 排版\nHTML smart / Fabric precision\n同一 Page Contract"]
-  S4 --> Q["deterministic layout/export QA"]
-  Q --> PA{"Publication Authority\nconfirmed text + exact lineage"}
-  PA -- BLOCK --> S2
-  PA -- PASS --> S5["5 发布包\nPNG + 文案 + JSON + manifest"]
-  S5 --> F["资产库登记发布与 24h/72h/7d Reality Feedback"]
-  F --> RL["bounded Reality Learning Context\n最多3条 / 2000字符 / 仅作参考"]
-  RL -. 下一轮建议 .-> S2
-  RL -. 下一轮视觉建议 .-> S3
+  P1["PAGE-001<br/>创作与编辑工作台"]
+  P2["PAGE-002<br/>资产库与现实反馈"]
+  P3["PAGE-003<br/>生成服务设置"]
+  CAP --> P1
+  CAP --> P2
+  CAP --> P3
 
-  W <--> WS["Workspace v3\nWeb Locks + CAS"]
-  WS --> M
+  U1["UI-001<br/>原文与选题输入"]
+  U2["UI-002<br/>确认文字进入配图"]
+  U3["UI-003<br/>当前文字的配图设置与生成"]
+  U4["UI-004<br/>页面编辑器"]
+  U5["UI-005<br/>保存草稿"]
+  U6["UI-006<br/>下载发布包"]
+  U9["UI-009<br/>旧配图任务恢复卡"]
+  U10["UI-010<br/>检查当前图片任务状态"]
+  U11["UI-011<br/>明确付费继续图片步骤"]
+  U7["UI-007<br/>现实反馈"]
+  U8["UI-008<br/>生成服务设置按钮"]
+  P1 --> U1 & U2 & U3 & U4 & U5 & U6 & U9 & U10 & U11
+  P2 --> U7
+  P3 --> U8
 
-  G["GitHub main"] --> T["npm test + production build"]
-  T --> V["Vercel Production"]
-  V --> U
-  V --> H["/api/provider/health\nexact commit + ledger attestation"]
+  A1["ACT-001<br/>生成文字草稿"]
+  A2["ACT-002<br/>确认文字"]
+  A3["ACT-003<br/>为当前文字生成图片"]
+  A4["ACT-004<br/>编辑页面"]
+  A5["ACT-005<br/>保存并重载"]
+  A6["ACT-006<br/>生成并保存发布包"]
+  A9["ACT-009<br/>保留旧任务并解锁当前配图"]
+  A10["ACT-010<br/>检查现有图片操作"]
+  A11["ACT-011<br/>明确继续下一个付费图片步骤"]
+  A7["ACT-007<br/>保存现实反馈"]
+  A8["ACT-008<br/>配置并验证 Provider"]
+  U1 --> A1
+  U2 --> A2
+  U3 --> A3
+  U4 --> A4
+  U5 --> A5
+  U6 --> A6
+  U9 --> A9
+  U10 --> A10
+  U11 --> A11
+  U7 --> A7
+  U8 --> A8
+
+  F1["FLOW-001<br/>原文到发布包的创作旅程"]
+  F2["FLOW-002<br/>当前文字 Provider 生成链路"]
+  F3["FLOW-003<br/>页面排版与编辑"]
+  F4["FLOW-004<br/>发布包生成与落盘"]
+  F5["FLOW-005<br/>Reality Feedback → 下一轮建议"]
+  F6["FLOW-006<br/>当前任务状态与旧恢复稿血缘分流"]
+  A1 --> F2
+  A2 --> F1
+  A3 --> F2
+  A4 --> F3
+  A5 --> F1
+  A6 --> F4
+  A7 --> F5
+  A8 --> F2
+  A9 --> F6
+  A10 --> F6
+  A11 --> F2
+  F1 --> F2 & F3 & F4
+  F5 --> F1
+
+  AP1["API-001<br/>同源或本机 Provider"]
+  AP2["API-002<br/>浏览器本机持久化"]
+  AP3["API-003<br/>下载 transport"]
+  F2 --> AP1 & AP2
+  F3 --> AP2
+  F4 --> AP2 & AP3
+  F5 --> AP2
+  F6 --> AP1 & AP2
+
+  S1["STORE-001<br/>生成会话与恢复点"]
+  S2["STORE-002<br/>当前稿资产库与编辑历史"]
+  S3["STORE-003<br/>生成资产与发布包"]
+  S4["STORE-004<br/>发布后 Reality feedback"]
+  S5["STORE-005<br/>跨实例图片调用幂等账本"]
+  F2 --> S1 & S2 & S5
+  F3 --> S2
+  F4 --> S3
+  F5 --> S4
+  F6 --> S1 & S5
+
+  R1["RULE-001<br/>付费图片与 confirmed draft 精确绑定<br/>状态检查 0 次图片调用，付费续步独立确认"]
+  R2["RULE-002<br/>同一页面几何与导出真相"]
+  R3["RULE-003<br/>交付层级与 Reality 证据不可偷换<br/>文字与画布非同稿时禁止发布"]
+  R4["RULE-004<br/>Secret 与外部发布边界"]
+  R5["RULE-005<br/>不同 confirmed draft 不得互锁或串写"]
+  F2 -.遵守.-> R1
+  F6 -.遵守.-> R1 & R5
+  F1 -.遵守.-> R3
+  F4 -.遵守.-> R2 & R3
+  F3 -.遵守.-> R2
+  F2 -.遵守.-> R4
+  R1 -.约束.-> U3 & U10 & U11
+  R3 -.约束.-> U6
+  R3 -.约束.-> U7
+  R5 -.约束.-> U9
+
+  T1["TEST-001<br/>当前文字 Provider 与付费边界<br/>覆盖 T=P 且 C≠T"]
+  T2["TEST-002<br/>母图排版与编辑回归"]
+  T3["TEST-003<br/>保存重载与发布包实物"]
+  T4["TEST-004<br/>反馈目标环境与消费者"]
+  T5["TEST-005<br/>旧任务分流与九类逻辑地图回归"]
+  F1 -.验证.-> T1 & T3
+  F2 -.验证.-> T1 & T2
+  F6 -.验证.-> T1 & T5
+  F3 -.验证.-> T2 & T3 & T4
+  F4 -.验证.-> T3 & T4
+  F5 -.验证.-> T4
+  T1 -.覆盖.-> P1
+  T3 -.覆盖.-> P1
+  T5 -.覆盖.-> P1
+  T4 -.覆盖.-> P2
+
+  FB["现实反馈<br/>检查状态后显示重试图片<br/>发布区同时判定不是同一稿"]
+  FB -.定位.-> U10
+  FB -.定位.-> F6
+  FB -.反证.-> R1
+  FB -.要求补测.-> T1
 ```
 
-## 1. 用户实际看到的产品
+## 当前故障切片
 
-| 面 | 唯一职责 | 不拥有的 Authority |
+```mermaid
+flowchart LR
+  T["当前文字 T"] --> R{"身份与动作规则"}
+  P["待恢复图片任务 P"] --> R
+  C["当前画布 C"] --> R
+
+  R -->|T=P 且 C=T| OK["当前稿继续生成或发布"]
+  R -->|T=P 且 C≠T| SPLIT["图片任务属于当前文字<br/>但画布仍是另一稿"]
+  R -->|T≠P| OLD["旧图片任务进入独立恢复"]
+
+  SPLIT --> CHECK["检查任务：0 次图片调用<br/>缺记录时可能重建文字分镜"]
+  SPLIT --> REPAIR["恢复画布对应文案：0 次图片调用"]
+  SPLIT -.用户再次明确.-> PAID["继续图片步骤：可能付费"]
+```
+
+截图对应 `T=P、C≠T`。因此“图片任务属于当前文字”和“当前画布不能按当前文字发布”可以同时成立，但界面必须解释这两个事实，不能把零图片调用的检查显示为“重试图片”。检查缺记录时可能调用文字模型，不可统称只读。
+
+## 本轮逻辑审计
+
+### 复核后的修复合同（本地验证，尚未上线）
+
+范围：UI-009/010/011、ACT-009/010/011、FLOW-006、RULE-001/003/005、TEST-001/005，以及共用故障按钮、发布恢复入口。
+当前反证：错稿禁止发布时仍提示可导出；无稿件 ID 的旧故障被任意 pending 稿接纳；按钮动作未按恢复类型分流；页数写死。
+
+| 输入状态 | 点击后的行为 | 必须保留的不变量 |
 |---|---|---|
-| 新创作 | 五阶段创作、编辑当前稿 | 不自行跳过文字确认/发布门 |
-| 研究选题 | 研究并回填选题 | 不直接发布 |
-| 资产库 | 回载稿件、备份、Reality Feedback | 不改变历史稿血缘 |
-| 账号档案 | Profile v2 / 人设与内容约束 | 不保存 Production Key、不授予发布 |
+| 有 pending 的未知/处理中/部分结果 | 发现原操作 | 不新建图片付费操作 |
+| 零图片恢复故障但 pending 缺失 | 打开资产库找回原任务 | 不以新生成代替恢复 |
+| 登录过期 | 打开现有访问验证入口 | 不调用图片模型 |
+| 缺少本机媒体 | 打开现有资产库备份恢复入口 | 不调用图片模型 |
+| 参考图过大 | 定位现有参考图设置 | 不调用图片模型 |
+| 发布规则不允许，或画布为空 | 明确显示不可复制/导出 | 不宣称成品可用 |
+| 故障缺稿件 ID 或 ID 不匹配 | 不恢复为当前稿故障 | 不能从 pending 存在推断故障归属 |
+| 当前画布 N 页 | 恢复按钮使用实际 N 页 | 不固定写两页 |
 
-## 2. 创作状态机
+验收：动作分流调用记录、真实发布判定组合、刷新归属反例、浏览器点击与保存/重载。测试数量与标签一致不能替代这些行为证据。
 
-```text
-原文 → 文字草稿 → 人工确认 → 配图 → 排版 → 发布包
-                         │
-                         └─ paid image: START → DISCOVER/STEP* → COMPLETE
-```
-
-- `creator-journey.mjs` 从当前事实推导阶段，UI 标签不构成阶段证据。
-- 配图操作绑定 DraftRecord、confirmed copy 与调用预算；失败只续同一操作，冲突时写 recovered sibling，不覆盖用户新编辑。
-- HTML 与 Fabric 是同一 Page Contract 的两种编辑器，不是两套作品状态。
-
-## 3. 三个 Authority
-
-### Workspace Authority
-`Workspace v3 + Web Locks + CAS` 是本机稿件唯一持久化权威。DraftRecord 同时带 `content_package + generation_session`。媒体 bytes 独立存 IndexedDB，稿件只保存 hash ref。
-
-### Paid-image Authority
-Server Image Ledger 只负责跨实例付费调用、步骤缓存和恢复窗口，不替代 Workspace/IndexedDB。浏览器只有 exact media ref 通过 readback 后才允许持久化。
-
-### Publication Authority
-只有**当前已确认文字 + exact content lineage + current/assembled canvas**可以复制发布文案或导出 ZIP。保存、历史 feedback、pending recovery、UI 按钮状态都不能自己造发布权威。
-
-## 4. Reality 学习闭环
-
-旧链路到这里断了：
-
-```text
-发布后数据 → 保存 → 资产库
-                   ✕ 没有消费者
-```
-
-现在是：
-
-```text
-已发布标识（published_at 或 published_url）
-+ 24h/72h/7d 指标 + 人工复盘 + 已用 layout recipe
-→ buildRealityLearningContext
-→ 最多 3 条 / 2000 字符 / 明示“仅作参考”
-→ 下一轮文字与图片 Provider context
-→ 当前 deterministic QA / publication gate 继续裁决
-```
-
-所以“上次表现好”可以影响下一次建议，但永远不能直接让一个坏版式、串稿或第 7 次付费调用过门。
-
-## 5. 部署与交付
-
-```text
-GitHub main
-→ 完整 tests + production build
-→ Vercel deployment
-→ stable alias
-→ exact HTML/JS/CSS + /api/provider/health + rollback readback
-→ HANDOFF_READY
-→ 独立真实使用者完成 fresh journey
-→ CONSUMER_VALIDATED
-```
-
-`CONSUMER_VALIDATED` 不能由小师妹工作台自己签发。
-
-## 6. 本轮关闭的问题
-
-| 问题 | 结论 | 修复 |
+| 不合逻辑处 | 根因 | 修复后的唯一规则 |
 |---|---|---|
-| D20 | **RESOLVED** | Reality Feedback 进入下一轮 bounded advisory context；不接管 deterministic Authority |
-| D32 | **RESOLVED** | 删除未被入口引用的 `src/App.jsx`，`src/main.jsx` 成为唯一 App 入口 |
-| D33 | **RESOLVED** | Workspace v3 + DraftRecord + CAS，跨稿写入 fail closed |
-| D34 | **RESOLVED** | confirmed text 是唯一 publish copy Authority |
-| D35 | **RESOLVED** | paid image START/DISCOVER/STEP/COMPLETE + durable recovery |
-| D36 | **RESOLVED** | Production server-managed credential + Studio Access Session + signed ledger readiness |
+| `IMAGE_STEP_UNKNOWN` 被当成未知故障 | Provider 码没有进入产品语义层 | 归一为 `UNKNOWN`，进入任务发现，不直接重试图片 |
+| “检查状态”与“继续生成”共用重试按钮 | 把检查恢复与图片生成混成同一个动作 | 状态检查固定 0 次图片调用；付费续步必须是独立、明确动作 |
+| `T=P、C≠T` 时两段提示互相打架 | 图片任务身份与画布发布身份只各说一半 | 同一提示同时说明“任务属当前文字、画布属另一稿、禁止发布” |
+| 未确认、正文漂移等邻接状态被说成“可导出” | 恢复卡将“不是血缘冲突”等同于“发布已获准” | 由真实发布门返回值判断；保留 UNKNOWN/IN_FLIGHT/记录缺失原始原因，所有未通过发布门的状态明确保持锁定 |
+| 恢复卡无证据地声称“还在恢复窗”或“只读” | 文案覆盖掉了已知失败原因，也未覆盖缺记录重建分镜分支 | 不推断恢复窗仍有效；明确检查零图片调用，但可能调用文字模型 |
+| 画布错稿但没有 pending operation 时无出口 | 修复按钮错误依赖图片任务存在 | 只要发布门判定 `CONTENT_LINEAGE_MISMATCH`，就提供零图片调用的文案恢复 |
+| 故障已持久化，刷新后界面却恢复成正常 | 启动流程应用 DraftRecord 时清空了同稿故障 | 只恢复与当前 `draft_record_id` 匹配的故障；跨稿故障拒绝串写 |
+| 未分类图片故障仍显示“重试图片” | 默认文案掩盖动作成本 | 未证明零调用时必须显示“可能产生图片调用” |
+| 人类 Mermaid 与机器地图节点含义漂移 | 两份地图只有形式关联，没有可执行一致性约束 | 稳定 ID、标签与含义由测试逐项对齐 |
+| `task / impact / reality` 各自发布状态结论 | 多个权威面互相覆盖 | 全部退为指向本文件的只读入口；机器状态只在 JSON 投影 |
+| 付费图片规则曾错误约束原文输入 `UI-001` | 关系边连错了对象 | `RULE-001` 只约束图片生成、状态检查和付费续步 `UI-003/010/011` |
 
-## 7. 与旧地图的关系
+本表覆盖当前交付主链及截图可达的一阶相邻节点；它不声称软件从此不存在任何未知缺陷。
 
-旧 `XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md` 把 Current Map、事故史、Rxx 回执、未来方案和发布记录揉在一起，导致 Agent 每次都要读历史地层。本文件从 v2 起只保留 Current。
+## 当前现实
 
-详细三方差异与证据见当前 MeSy Task：`INTAKE-13F71C425B7E647E`。
+| 层级 | 回读 |
+|---|---|
+| 产品意图 | 以上九问图 |
+| 本地机制 | 2026-09-05 复核修复：579/579 测试、生产构建通过；含动作调用记录、真实发布判定组合、无归属故障和刷新后付费边界反例 |
+| 本地页面 | 最终构建使用本地服务替身回放：三页错稿点击检查仅发 DISCOVER；三页及八页恢复文案后刷新保持同稿；缺媒体/无原任务/参考图/验证入口点击分流；无归属旧故障不显示为当前稿故障，原 pending 仍可检查。替身不证明线上生成服务恢复 |
+| 本地源码 | 工作分支基线 `e0075787370b3e95fccf5e1eeaa7738f4635d6ce`，另有本轮未提交修复 |
+| GitHub main | `d8482ab4b26ef58f2497947724ae50670f18fc58` |
+| 线上运行证明 | `/api/provider/health` 当前仍声明候选 commit `d8482ab4b26ef58f2497947724ae50670f18fc58` |
+| 消费者现实 | 用户截图证明线上仍把 `IMAGE_STEP_UNKNOWN` 显示成“重试图片”；本地候选已通过精确故障回放，但尚未部署，不能称为已修复上线 |
+
+## 使用方式
+
+出现问题时只做四件事：
+
+1. 把反馈连到最接近的 `UI / ACT / FLOW`。
+2. 沿边检查相关 `API / STORE / RULE`。
+3. 先补能复现现实的 `TEST`，再改代码。
+4. 回到同一真实页面重走旅程；页面没好，就不写 `RESOLVED`。
+
+原始方法来源：郭东超分享逐字稿，SHA-256 `da545e4fec3ecac4d89ac88068eb69091d7689761ac588f582145bcb8ff71f09`。

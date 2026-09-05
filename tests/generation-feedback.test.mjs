@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { generationFailureFeedback, providerHealthState } from "../src/generation-feedback.mjs";
+import { generateContentPackage } from "../src/content-engine.mjs";
+import { derivePublicationAuthority } from "../src/publication-authority.mjs";
+import {
+  generationFailureActionLabel,
+  generationFailureBelongsToDraft,
+  generationFailureFeedback,
+  providerHealthState,
+  workbenchImageFailureFeedback,
+} from "../src/generation-feedback.mjs";
 
 test("generation failures become persistent human-readable recovery states", () => {
   assert.equal(generationFailureFeedback(new Error("Ark function arguments are not valid JSON")).code, "MODEL_FORMAT_REJECTED");
@@ -132,6 +140,28 @@ test("UNKNOWN, IN_FLIGHT and READY response loss never tell the user to create a
   }
 });
 
+test("public image-step recovery codes stay on the zero-image-call status path", () => {
+  const cases = [
+    ["IMAGE_STEP_UNKNOWN", "UNKNOWN", "检查当前任务状态（不生成图片）"],
+    ["IMAGE_STEP_IN_FLIGHT", "IN_FLIGHT", "检查当前任务状态（不生成图片）"],
+  ];
+  for (const [providerCode, expectedCode, retryLabel] of cases) {
+    const feedback = generationFailureFeedback(Object.assign(
+      new Error(`provider request failed: ${providerCode}`),
+      { providerCode, providerStage: "image" },
+    ));
+    assert.equal(feedback.code, expectedCode);
+    assert.equal(feedback.technical_code, providerCode);
+    assert.equal(feedback.recovery_action, expectedCode === "UNKNOWN"
+      ? "DISCOVER_EXISTING_OPERATION"
+      : "WAIT_AND_DISCOVER_EXISTING_OPERATION");
+    assert.equal(feedback.expected_upstream_calls, 0);
+    assert.equal(feedback.direct_paid_retry_allowed, false);
+    assert.equal(feedback.retry_label, retryLabel);
+    assert.doesNotMatch(`${feedback.title}${feedback.retry_label}`, /重试图片|重新生成/);
+  }
+});
+
 test("raw media transport failures recover the cached operation without another paid image call", () => {
   for (const providerCode of ["IMAGE_MEDIA_FETCH_FAILED", "IMAGE_MEDIA_HEADER_HASH_MISMATCH", "IMAGE_MEDIA_BODY_HASH_MISMATCH"]) {
     const feedback = generationFailureFeedback({ providerCode, providerStage: "image" });
@@ -140,4 +170,147 @@ test("raw media transport failures recover the cached operation without another 
     assert.equal(feedback.expected_upstream_calls, 0);
     assert.equal(feedback.direct_paid_retry_allowed, false);
   }
+});
+
+test("every zero-paid image recovery renders a status action instead of a paid retry label", () => {
+  const feedback = generationFailureFeedback(Object.assign(new Error("MOTHER_SHEET_2_CALL_FAILED"), {
+    providerStage: "image",
+    providerDetails: {
+      resume_run_id: "images-2026-09-05T00-00-00-000Z-abcdef12",
+      completed_image_steps: 1,
+      total_image_steps: 3,
+      failed_image_step: 2,
+    },
+  }));
+  assert.equal(feedback.direct_paid_retry_allowed, false);
+  assert.equal(generationFailureActionLabel(feedback), "检查当前任务状态（不生成图片）");
+  assert.doesNotMatch(generationFailureActionLabel(feedback), /重试图片|重新生成/);
+});
+
+test("T=P while C differs explains both recovery and publication truth in one failure card", () => {
+  const feedback = workbenchImageFailureFeedback({
+    feedback: generationFailureFeedback({ providerCode: "IMAGE_STEP_UNKNOWN", providerStage: "image" }),
+    pendingRecoveryDiscoveryOnly: true,
+    publicationAuthorityCode: "CONTENT_LINEAGE_MISMATCH",
+    visiblePageCount: 2,
+  });
+  assert.match(feedback.detail, /配图任务.*当前文字/);
+  assert.match(feedback.detail, /画布.*另一稿/);
+  assert.match(feedback.detail, /发布.*锁定/);
+  assert.equal(feedback.retry_label, "检查当前任务状态（不生成图片）");
+  assert.equal(feedback.direct_paid_retry_allowed, false);
+});
+
+test("an unclassified image retry states that it may call the paid image upstream", () => {
+  const feedback = generationFailureFeedback({ providerCode: "UNCLASSIFIED_IMAGE_FAILURE", providerStage: "image" });
+  assert.match(generationFailureActionLabel(feedback), /可能产生图片调用/);
+  assert.doesNotMatch(generationFailureActionLabel(feedback), /^重试图片$/);
+});
+
+test("persisted failures restore only on their own DraftRecord", () => {
+  const pendingDraft = { draft_id: "draft-a", pending_image_operation: { operation_nonce: "a".repeat(64) } };
+  assert.equal(generationFailureBelongsToDraft({ stage: "image", draft_record_id: "draft-a" }, pendingDraft), true);
+  assert.equal(generationFailureBelongsToDraft({ stage: "image", draft_record_id: "draft-b" }, pendingDraft), false);
+  assert.equal(generationFailureBelongsToDraft({ stage: "image" }, pendingDraft), false, "pending existence cannot prove an unscoped failure belongs to this draft");
+  assert.equal(generationFailureBelongsToDraft({ stage: "image" }, { draft_id: "draft-a", pending_image_operation: null }), false);
+});
+
+test("blocked publication never becomes an export promise in recovery feedback", () => {
+  for (const code of ["TEXT_NOT_CONFIRMED", "CONTENT_LINEAGE_MISSING", "PUBLICATION_COPY_MISMATCH", "TEXT_NOT_ASSEMBLED"]) {
+    for (const visiblePageCount of [0, 1, 8]) {
+      const feedback = workbenchImageFailureFeedback({
+        feedback: generationFailureFeedback({ providerCode: "IMAGE_STEP_UNKNOWN", providerStage: "image" }),
+        pendingRecoveryDiscoveryOnly: true,
+        publicationAuthorityCode: code,
+        publicationAllowed: false,
+        visiblePageCount,
+      });
+      assert.doesNotMatch(feedback.detail, /仍可.*导出|0 页成品/);
+      assert.match(feedback.detail, /锁定|暂停|不可/);
+    }
+  }
+});
+
+test("recovery actions invoke only the promised handler, even without a pending operation", async () => {
+  const { runGenerationFailureAction } = await import("../src/generation-feedback.mjs");
+  const cases = [
+    ["IMAGE_STEP_UNKNOWN", true, "discover"],
+    ["IMAGE_STEP_UNKNOWN", false, "openRecoveryLibrary"],
+    ["LOCAL_MEDIA_MISSING", true, "openBackupRestore"],
+    ["REFERENCE_PAYLOAD_TOO_LARGE", false, "openReferenceSettings"],
+    ["REFERENCE_PAYLOAD_TOO_LARGE", true, "openReferenceSettings"],
+    ["IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS", true, "openReferenceSettings"],
+    ["EXPIRY_WINDOW_TOO_SHORT", true, "openAccessSettings"],
+    ["UNCLASSIFIED_IMAGE_FAILURE", true, "discover"],
+    ["UNCLASSIFIED_IMAGE_FAILURE", false, "generateImages"],
+  ];
+  for (const [providerCode, hasPendingOperation, expected] of cases) {
+    const calls = [];
+    const handlers = Object.fromEntries(["discover", "openRecoveryLibrary", "openBackupRestore", "openReferenceSettings", "openAccessSettings", "generateImages", "generateText"]
+      .map((key) => [key, () => calls.push(key)]));
+    await runGenerationFailureAction({ feedback: generationFailureFeedback({ providerCode, providerStage: "image" }), hasPendingOperation }, handlers);
+    assert.deepEqual(calls, [expected], `${providerCode}: pending=${hasPendingOperation}`);
+  }
+});
+
+test("reference recovery with pending work promises preservation instead of a locked destination", async () => {
+  const { generationFailureAction } = await import("../src/generation-feedback.mjs");
+  const feedback = generationFailureFeedback({ providerCode: "REFERENCE_PAYLOAD_TOO_LARGE", providerStage: "image" });
+  assert.match(generationFailureAction({ feedback, hasPendingOperation: true }).label, /保留原任务/);
+  assert.equal(generationFailureAction({ feedback, hasPendingOperation: false }).label, "调整参考图与画面设置");
+});
+
+test("reload never upgrades a saved zero-image recovery to a paid retry", async () => {
+  const { restoreGenerationFailure, generationFailureAction } = await import("../src/generation-feedback.mjs");
+  const before = generationFailureFeedback({
+    providerCode: "MOTHER_SHEET_2_CALL_FAILED", providerStage: "image",
+    providerDetails: { resume_run_id: "fixture-run", completed_image_steps: 1, total_image_steps: 3 },
+  });
+  const after = restoreGenerationFailure(JSON.parse(JSON.stringify({ ...before, draft_record_id: "draft-a" })));
+  assert.equal(after.direct_paid_retry_allowed, false);
+  assert.equal(after.draft_record_id, "draft-a");
+  assert.equal(generationFailureAction({ feedback: after }).handler, "openRecoveryLibrary");
+});
+
+test("recovery feedback agrees with real publication decisions across neighboring states", () => {
+  const content = generateContentPackage({ topic: "故障回归示例" });
+  const textDraft = {
+    draft_id: "text-fixture",
+    source_input: content.source_input, pillar: content.pillar, goal: content.goal,
+    selected_title: content.selectedTitle, body: content.body, tags: [...content.tags],
+  };
+  content.generation.source_draft_id = textDraft.draft_id;
+  const pair = { content, textDraft, textConfirmed: true, assembledDraftId: textDraft.draft_id };
+  const cases = [
+    pair,
+    { ...pair, textConfirmed: false },
+    { ...pair, content: { ...content, body: "正文已修改" } },
+    { ...pair, assembledDraftId: null },
+    { ...pair, content: { ...content, generation: {} } },
+    { ...pair, textDraft: { ...textDraft, draft_id: "other-text" } },
+  ];
+  for (const state of cases) {
+    const authority = derivePublicationAuthority(state);
+    const original = generationFailureFeedback({ providerCode: "IMAGE_STEP_UNKNOWN", providerStage: "image" });
+    const feedback = workbenchImageFailureFeedback({
+      feedback: original, pendingRecoveryDiscoveryOnly: true,
+      publicationAuthorityCode: authority.code, visiblePageCount: 5,
+    });
+    assert.equal(feedback.title, original.title, "canvas context must not erase UNKNOWN semantics");
+    assert.equal(feedback.direct_paid_retry_allowed, false);
+    if (!authority.allowed) assert.match(feedback.detail, /发布.*锁定/, authority.code);
+    assert.doesNotMatch(feedback.detail, /仍可.*导出|仍可.*下载/, "publication permission alone cannot promise media/export readiness");
+    assert.match(feedback.detail, /文字模型/, "missing-ledger planning is not read-only");
+  }
+});
+
+test("expired or unknown publication state is never presented as a live recovery window or permission", () => {
+  const original = generationFailureFeedback({ providerCode: "IMAGE_LEDGER_RUN_MISSING", providerStage: "image" });
+  const feedback = workbenchImageFailureFeedback({
+    feedback: original, pendingRecoveryDiscoveryOnly: true, visiblePageCount: 0,
+  });
+  assert.equal(feedback.title, original.title);
+  assert.equal(feedback.server_recoverable_within_7d, false);
+  assert.match(feedback.detail, /发布.*锁定/);
+  assert.doesNotMatch(`${feedback.title}${feedback.detail}`, /还在恢复窗|仍可.*导出/);
 });

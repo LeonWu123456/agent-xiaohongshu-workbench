@@ -100,6 +100,44 @@ function makeUiState() {
   };
 }
 
+test("reference recovery navigates only after durable copy adoption and never invokes generation", async () => {
+  const handlerSource = `async ${namedFunctionSource(mainSource, "openReferenceSettings")}`;
+  for (const scenario of ["success", "no-pending", "locked", "stale", "cas-failed", "media-failed", "unconfirmed"]) {
+    const events = [];
+    const dependency = {
+      draftMutationIsLocked: () => scenario === "locked",
+      workspaceEnvelopeRef: { current: { active_draft_id: "original" } },
+      activeDraftRecordV3: () => ({ pending_image_operation: scenario === "no-pending" ? null : { operation_nonce: "original-nonce" } }),
+      scrollCreatorStage: target => events.push(target),
+      mainAuthority: { capture: () => ({}), isCurrent: () => scenario !== "stale" },
+      workspaceEnvelopeV3Token: () => "captured-token",
+      contentRef: { current: { pages: ["original-canvas"] } },
+      currentAuthoringSession: () => ({ text_confirmed: scenario !== "unconfirmed" }),
+      materializeForWorkspace: async value => { if (scenario === "media-failed") throw Error("missing media"); return { value }; },
+      forkDraftForReferenceEditV3: () => { events.push("fork"); return { workspace: {}, activeDraft: { generation_session: { text_confirmed: scenario !== "unconfirmed" } }, previousDraftId: "original" }; },
+      crypto: { randomUUID: () => "copy" },
+      persistAndAdoptWorkspace: async (_workspace, options) => { assert.equal(options.expectedWorkspaceToken, "captured-token"); events.push("persist"); return scenario !== "cas-failed"; },
+      setView: () => {}, setToast: () => {}, console: { warn: () => {} },
+    };
+    const run = new Function(...Object.keys(dependency), `${handlerSource}; return openReferenceSettings;`)(...Object.values(dependency));
+    await run();
+    const expected = scenario === "success" ? ["fork", "persist", "creator-action-references"]
+      : scenario === "unconfirmed" ? ["fork", "persist", "creator-text"]
+      : scenario === "no-pending" ? ["creator-action-references"]
+      : scenario === "cas-failed" ? ["fork", "persist"] : [];
+    assert.deepEqual(events, expected, scenario);
+  }
+  assert.doesNotMatch(handlerSource, /provider\.|generateImageNode|generateTextNode/);
+  assert.match(mainSource, /openReferenceSettings:\s*openReferenceSettings/);
+  assert.doesNotMatch(handlerSource, /可用返回上一稿/);
+});
+
+test("hydrated asset library consumes the same recovery projection as persistent records", () => {
+  assert.match(mainSource, /libraryContentsFromNormalized as libraryContentsFromWorkspaceView/);
+  assert.doesNotMatch(mainSource, /function libraryContentsFromWorkspaceView\(/);
+  assert.ok(!mainSource.includes("文字、画布与发布来源同步恢复"), "activation must not promise publication alignment when the publication gate can still fail");
+});
+
 test("same-draft semantic edit invalidates text/autosave work before the 400ms save", () => {
   const target = { draftId: "draft-A", pageId: "page-A-1" };
   const authority = createMainAuthorityRuntime(() => target);
@@ -359,6 +397,30 @@ test("pending image authority freezes only the asset lane while text layout save
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: true, pendingImageOperation: null }), "WORKSPACE_MEDIA_READ_ONLY");
   assert.equal(authoringInputLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), null);
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: { operation_nonce: "a".repeat(64) } }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "ACTIVE",
+    pendingTextDraftId: "text-old",
+    currentTextDraftId: "text-current",
+  }), null, "a recovery for old text must not freeze the current text's image controls");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "RECOVERY",
+    pendingTextDraftId: "text-current",
+    currentTextDraftId: "text-current",
+  }), null, "a detached recovery holder must not freeze the active draft");
+  assert.equal(imageLaneLockReason({
+    workspaceReady: true,
+    workspaceReadOnly: false,
+    pendingImageOperation: { operation_nonce: "a".repeat(64) },
+    pendingLocation: "ACTIVE",
+    pendingTextDraftId: "text-current",
+    currentTextDraftId: "text-current",
+  }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-A", imageOperationDraftId: "draft-A" }), "PENDING_IMAGE_OPERATION_INPUT_FROZEN");
   assert.equal(imageLaneLockReason({ workspaceReady: true, workspaceReadOnly: false, pendingImageOperation: null, activeDraftId: "draft-B", imageOperationDraftId: "draft-A" }), null);
 
@@ -573,11 +635,18 @@ test("a visible-canvas lineage split has one explicit zero-provider repair that 
   assert.match(repairSource, /JSON\.stringify\(nextRecord\.content_package\.pages\) !== frozenPages/);
   assert.match(repairSource, /JSON\.stringify\(nextRecord\.pending_image_operation\) !== frozenPending/);
   assert.match(repairSource, /REPAIR_VISIBLE_CANVAS_LINEAGE/);
+  assert.doesNotMatch(repairSource, /!sourceRecord\.pending_image_operation/, "canvas lineage repair cannot disappear merely because no image operation is pending");
   assert.doesNotMatch(repairSource, /generateImages|generateText|provider\./);
-  assert.match(mainSource, /恢复当前两页对应文案（0 次图片调用）/);
   assert.match(mainSource, /data-last-image-request-modes=\{imageOperationReadback\?\.request_modes\?\.join\(","\) \|\| ""\}/);
   assert.match(mainSource, /data-last-image-response-status=\{imageOperationReadback\?\.response_status \|\| ""\}/);
   assert.match(mainSource, /data-last-image-upstream-calls=\{imageOperationReadback\?\.upstream_calls \?\? ""\}/);
+});
+
+test("a persisted generation failure restores the visible FAILED state after reload", () => {
+  assert.match(mainSource, /const \[generationError, setGenerationError\] = useState\(loadGenerationFailure\);/);
+  assert.match(mainSource, /const \[generationState, setGenerationState\] = useState\(generationError \? "FAILED" : "IDLE"\);/);
+  assert.match(mainSource, /preserveGenerationFailure: generationFailureBelongsToDraft\(generationError, finalRecord\)/);
+  assert.match(mainSource, /draft_record_id: workspaceEnvelopeRef\.current\?\.active_draft_id/);
 });
 
 test("workspace and draft mutations bind one pre-await base and converge after races", () => {
@@ -730,16 +799,21 @@ test("confirmed text without real pages is presented as text-ready, never as a t
 
 test("editing text never hides a durable paid image recovery task", () => {
   const imageSource = namedFunctionSource(mainSource, "generateImageNode");
-  assert.match(imageSource, /if \(!textConfirmed && !pendingImageOperation\)/, "an existing durable recovery must remain callable after text is edited");
+  assert.match(imageSource, /if \(recoveryOperation && !pendingImageOperation\)/, "an existing durable recovery must remain callable after text is edited");
+  assert.match(imageSource, /if \(!recoveryOperation && !textConfirmed\)/, "only a new current-text operation requires current confirmation");
   assert.match(imageSource, /baseRecord\.pending_image_operation\?\.operation_snapshot\?\.confirmed_draft \|\| textDraft/, "recovery must use the frozen confirmed text rather than the newly edited text");
   assert.match(mainSource, /textDraft && \(textConfirmed \|\| pendingImageOperation\)/, "the recovery panel cannot disappear merely because the current text is unconfirmed");
-  assert.match(mainSource, /旧文字的配图恢复/);
+  assert.match(mainSource, /旧配图任务/);
   assert.match(mainSource, /imageOperationAuthorityV3\(workspaceEnvelopeRef\.current/,
     "refresh must rediscover a moved recovery holder from the canonical workspace");
   assert.match(imageSource, /operationAuthority\?\.holder_draft_id \|\| sourceDraftId/);
   assert.match(imageSource, /operationAuthority\?\.location\?\.startsWith\("RECOVERY"\) \? targetDraftId/,
     "a recovery holder must advance in place rather than fork a second recovery draft");
   assert.match(mainSource, /effectiveImageResume/, "the recovery panel must render its durable cursor rather than a cleared React cursor");
+  assert.match(mainSource, /parkStalePendingImageOperationV3/, "old paid work must be detached atomically before the current draft starts a new operation");
+  assert.match(mainSource, /旧配图任务/, "old recovery must have a separate, user-visible control surface");
+  assert.match(mainSource, /保留旧任务并解锁当前配图/, "the zero-provider detach action must say exactly what it changes");
+  assert.match(mainSource, /recoveryOperation:\s*true/, "recovery checks must explicitly target the recovery authority instead of hijacking the current CTA");
 });
 
 test("deferred workspace transition blocks edits and stale NOOP preserves dirty UI with zero apply", async () => {
