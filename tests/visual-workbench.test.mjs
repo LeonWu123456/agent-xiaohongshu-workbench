@@ -260,3 +260,10 @@ test('browser-owned paragraph serialization preserves blank lines independent of
  assert.equal(readEditablePlainText(el('DIV',el('DIV',txt('a')),el('DIV',el('BR')))),'a\n');
  assert.equal(readEditablePlainText(el('DIV',txt('a'),el('SPAN',txt('b')),el('BR'),txt('c'))),'ab\nc');
 });
+
+
+test('split scenes retain their own action identity rather than the parent page action',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();c.pages[0]={...c.pages[0],visual_action:'parent action',image_prompt:'parent image',info_panels:[0,1,2].map(i=>({id:'p'+i,title:'Scene '+i,body:'Same scene copy.',visual_action:'unique action '+i,image_prompt:'unique scene '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'}}))};
+ const result=composeEditableContent(c,{force:true});assert.equal(result.pages.length,3);
+ result.pages.forEach((page,i)=>{assert.equal(page.visual_action,'unique action '+i);assert.equal(page.image_prompt,'unique scene '+i);});
+});

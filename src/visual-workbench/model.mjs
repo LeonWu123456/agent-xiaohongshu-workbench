@@ -134,7 +134,7 @@ function mobilePages(content,{force,pageIndex,measureText}){
 
    // The canonical panel contract requires 2-4 panels. A one-scene reading
    // page is therefore a normal body+hero page, not an invalid one-panel list.
-   const sub={...page,eyebrow:[page.eyebrow,page.title].filter(Boolean).join(' / '),title:panel.title,body:panel.body,info_panels:[],image_style:{...panel.image_style},visual:panel.image_style?.src&&!panel.image_style.hidden?'character':'none',layout_ir:null,layout_recipe:null,editor_mode:'html',html_state:undefined};
+   const sub={...page,eyebrow:[page.eyebrow,page.title].filter(Boolean).join(' / '),title:panel.title,body:panel.body,visual_action:panel.visual_action||'',image_prompt:panel.image_prompt||'',info_panels:[],image_style:{...panel.image_style},visual:panel.image_style?.src&&!panel.image_style.hidden?'character':'none',layout_ir:null,layout_recipe:null,editor_mode:'html',html_state:undefined};
    const state=normalizeHtmlState(null,sub,out.length),source=seedEditableObjects(sub,out.length);
    const previousBinding={title:`panel-${j}-title`,body:`panel-${j}-body`,hero:`panel-${j}`};
    const next=source.map(o=>{

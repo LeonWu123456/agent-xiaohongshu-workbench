@@ -3545,3 +3545,12 @@ test('short frozen image-variant copy is scoped and does not weaken normal full-
  assert.throws(()=>normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',text_draft:draft}),/BODY_INVALID/);
  assert.throws(()=>normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',text_draft:draft,image_variant_target:{...target,source_page_sha256:'bad'}}),/HASH_INVALID/);
 });
+
+
+test('manual draft empty tags remain legal only in the frozen single-image variant context',async()=>{
+ const {normalizeAuthoringSession}=await import('../src/workspace-state.mjs');const {createPageVariantSession}=await import('../src/visual-workbench/creator.mjs');const {createBlankContent,composeEditableContent}=await import('../src/visual-workbench/model.mjs');
+ const c=createBlankContent();c.pages[0].visual='character';c.pages[0].image_style={...c.pages[0].image_style,src:'/assets/xiaoshimei-character-full.png',hidden:false};
+ const session=await createPageVariantSession({draft_id:'manual-draft',content_package:composeEditableContent(c)},{pageIndex:0,objectId:'hero-image'});assert.deepEqual(session.text_draft.tags,['','','','','']);
+ const input=await d36StartInput({operationOverrides:{page_count:3,confirmed_draft:{...d36ConfirmedDraft(),tags:session.text_draft.tags},image_variant_target:session.image_variant_target}});assert.deepEqual(input.operation_snapshot.confirmed_draft.tags,c.tags);
+ assert.throws(()=>normalizeAuthoringSession({...session,image_variant_target:undefined}),/BODY_INVALID|TAGS_INVALID/);
+});

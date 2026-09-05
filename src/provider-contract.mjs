@@ -74,7 +74,7 @@ export function parseTextDraftResponse(value, { imageVariantTarget = null } = {}
   if (!Array.isArray(value.titles) || value.titles.length !== 3 || !value.titles.every((item) => typeof item === "string" && item.trim())) throw new TypeError("TEXT_DRAFT_TITLES_INVALID");
   if (!value.titles.includes(value.selected_title)) throw new TypeError("TEXT_DRAFT_SELECTED_TITLE_INVALID");
   if (typeof value.body !== "string" || value.body.replace(/\s/g, "").length < (frozenVariant ? 1 : 180)) throw new TypeError("TEXT_DRAFT_BODY_INVALID");
-  if (!Array.isArray(value.tags) || value.tags.length !== 5 || !value.tags.every((item) => typeof item === "string" && item.trim())) throw new TypeError("TEXT_DRAFT_TAGS_INVALID");
+  if (!Array.isArray(value.tags) || value.tags.length !== 5 || !value.tags.every((item) => typeof item === "string" && (frozenVariant || item.trim()))) throw new TypeError("TEXT_DRAFT_TAGS_INVALID");
   if (!Number.isInteger(value.recommended_image_count) || value.recommended_image_count < 1 || value.recommended_image_count > 8) throw new TypeError("TEXT_DRAFT_IMAGE_COUNT_INVALID");
   const contentType = value.content_type == null ? "knowledge_card" : normalizeXhsContentType(value.content_type, "TEXT_DRAFT_CONTENT_TYPE");
   const styleLock = value.style_lock == null ? null : normalizeStyleLock(value.style_lock, "TEXT_DRAFT_STYLE_LOCK");
@@ -115,17 +115,17 @@ function sha256String(value, code) {
   return value;
 }
 
-function exactStringArray(value, code, { length = null, maxItems = 40, maxItemLength = 2000 } = {}) {
+function exactStringArray(value, code, { length = null, maxItems = 40, maxItemLength = 2000, allowEmpty = false } = {}) {
   if (!Array.isArray(value) || (length != null && value.length !== length) || value.length > maxItems) throw new TypeError(code);
-  return value.map((item) => exactString(item, code, maxItemLength));
+  return value.map((item) => exactString(item, code, maxItemLength, { allowEmpty }));
 }
 
-function normalizeConfirmedImageDraft(value) {
+function normalizeConfirmedImageDraft(value, { allowEmptyTags = false } = {}) {
   assertExactFields(value, ["draft_id", "source_input", "pillar", "goal", "titles", "selected_title", "body", "tags", "recommended_image_count", "facts", "risks", "content_type", "style_lock", "prompt_context"], "IMAGE_GENERATION_CONFIRMED_DRAFT_FIELDS_INVALID");
   const titles = exactStringArray(value.titles, "IMAGE_GENERATION_TITLES_INVALID", { length: 3, maxItems: 3, maxItemLength: 120 });
   const selectedTitle = exactString(value.selected_title, "IMAGE_GENERATION_SELECTED_TITLE_INVALID", 120);
   if (!titles.includes(selectedTitle)) throw new TypeError("IMAGE_GENERATION_SELECTED_TITLE_INVALID");
-  const tags = exactStringArray(value.tags, "IMAGE_GENERATION_TAGS_INVALID", { length: 5, maxItems: 5, maxItemLength: 80 });
+  const tags = exactStringArray(value.tags, "IMAGE_GENERATION_TAGS_INVALID", { length: 5, maxItems: 5, maxItemLength: 80, allowEmpty: allowEmptyTags });
   const recommendedImageCount = Number(value.recommended_image_count);
   if (!Number.isInteger(recommendedImageCount) || recommendedImageCount < 1 || recommendedImageCount > 8) throw new TypeError("IMAGE_GENERATION_RECOMMENDED_COUNT_INVALID");
   return {
@@ -172,7 +172,7 @@ function normalizeImageOperationSnapshot(value) {
     schema: IMAGE_OPERATION_SNAPSHOT_SCHEMA,
     draft_record_id: safeId(value.draft_record_id, "IMAGE_GENERATION_DRAFT_RECORD_ID_INVALID"),
     mutation_epoch: mutationEpoch,
-    confirmed_draft: normalizeConfirmedImageDraft(value.confirmed_draft),
+    confirmed_draft: normalizeConfirmedImageDraft(value.confirmed_draft, { allowEmptyTags: hasVariant && Boolean(normalizePageImageVariantTarget(value.image_variant_target)) }),
     page_count: pageCount,
     production_mode: normalizeProductionMode(value.production_mode, "IMAGE_GENERATION_PRODUCTION_MODE_INVALID"),
     reference_note: exactString(value.reference_note, "IMAGE_GENERATION_REFERENCE_NOTE_INVALID", 1000, { allowEmpty: true }),
