@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  build: {rollupOptions: {input: {legacy: "index.html", studio: "studio.html"}}},
+  build: {rollupOptions: {input: {main: "index.html", studio: "studio.html", legacy: "legacy.html"}}},
   optimizeDeps: {
     include: ["react", "react-dom/client"],
   },

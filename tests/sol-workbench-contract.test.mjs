@@ -21,6 +21,15 @@ test("Vercel sends authenticated multi-segment image assets to the Provider befo
     source: "/api/provider/:route",
     destination: "/api/provider?route=:route",
   });
+  assert.equal(config.rewrites.length, 2);
+  const [rootHtml, studioHtml, legacyHtml] = await Promise.all([
+    readFile(new URL("../index.html", import.meta.url), "utf8"),
+    readFile(new URL("../studio.html", import.meta.url), "utf8"),
+    readFile(new URL("../legacy.html", import.meta.url), "utf8"),
+  ]);
+  assert.match(rootHtml, /src="\/src\/visual-workbench\/main\.jsx"/);
+  assert.match(studioHtml, /src="\/src\/visual-workbench\/main\.jsx"/);
+  assert.match(legacyHtml, /src="\/src\/main\.jsx"/);
   assert.equal(config.rewrites.filter((rule) => rule.source === "/api/provider/assets/:runId/:sha256").length, 1);
   assert.equal(config.rewrites.some((rule) => String(rule.source).includes(":route*")), false);
 });
