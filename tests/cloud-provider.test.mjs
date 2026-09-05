@@ -3516,3 +3516,20 @@ test('explicit Studio-auth Preview uses a fixed protected origin without inherit
  const invalid={...env,XIAOSHIMEI_PREVIEW_AUTH_MODE:'typo'};assert.equal(previewUsesVercelAuthentication(invalid),false);assert.equal(inspectServerAccessConfig(invalid).ready,false);
  assert.equal(inspectServerAccessConfig({...env,VERCEL_ENV:'production'}).appOrigin,env.XIAOSHIMEI_APP_ORIGIN);
 });
+
+
+test('single-image alternatives use the existing restartable image transaction with zero planner calls',async()=>{
+ const target={schema:'xiaoshimei.page-image-variants-target.v1',source_draft_id:'source-work',source_page_index:1,source_page_sha256:'b'.repeat(64),object_id:'hero-image',image_id:'hero',title:'雨天慢慢泡一杯茶',body:'保持原来的文字和版式。',visual_action:'小师妹右手持壶给桌上的茶杯注水',image_prompt:'保持小师妹角色；壶、茶杯、双手清晰完整'};
+ const input=await d36StartInput({operationOverrides:{page_count:3,image_variant_target:target}});
+ const ledger=new FakeD36ImageLedger(),transact=d36Transaction(),options={imageLedger:ledger,nowMs:1_788_192_000_000,accessExpiresAtMs:1_788_192_360_000,appScopeId:D36_APP_SCOPE};
+ const previous=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('PLANNER_MUST_NOT_RUN');};
+ try{
+  const ready=await transact(input,D36_SETTINGS,options);assert.equal(ready.status,'READY');assert.equal(ready.upstream_calls,0);assert.equal(ready.progress.actual_image_calls,0);
+  const run=ledger.runs.get(ready.run_id);assert.equal(run.compactRun.final_pages.length,3);assert.ok(run.compactRun.final_pages.every(p=>p.visualAction===target.visual_action));assert.equal(new Set(run.compactRun.final_pages.map(p=>p.imagePrompt)).size,3);
+  const discovery=await transact({mode:'DISCOVER',bootstrap_nonce:input.bootstrap_nonce,input_sha256:input.input_sha256},D36_SETTINGS,options);assert.equal(discovery.run_id,ready.run_id);assert.equal(calls,0);
+ }finally{globalThis.fetch=previous;}
+ const changed=await computeImageGenerationInputSha256({operation_snapshot:{...input.operation_snapshot,image_variant_target:{...target,source_page_sha256:'c'.repeat(64)}},reference_manifest:input.reference_manifest});assert.notEqual(changed,input.input_sha256);
+ await assert.rejects(()=>d36StartInput({operationOverrides:{page_count:1,image_variant_target:target}}),/VARIANT/);
+ const {normalizeAuthoringSession}=await import('../src/workspace-state.mjs');
+ const session=normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',topic:'雨天',image_variant_target:target});assert.deepEqual(session.image_variant_target,target);
+});

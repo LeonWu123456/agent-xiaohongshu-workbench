@@ -2139,11 +2139,16 @@ function advancePublicImageRun(checkpoint) {
 }
 
 async function createInitialPublicImageRun(input, settings, pageCount, draftSha256, referenceFingerprint, { runId = null } = {}) {
-  let pages;
+  const target=input.image_variant_target;
+  let pages=target?[
+    ['正面中景','镜头正面中景，主体与动作完整，背景简洁'],
+    ['侧面近景','镜头轻微侧面，强调双手与器具关系，主体完整'],
+    ['生活场景','镜头略宽，保留一处与动作相关的室内环境，主体清晰'],
+  ].map(([label,direction],i)=>({pageRole:'method',shotRole:'action',eyebrow:`配图方案 ${i+1}`,title:label,body:'同一个动作，换一种画面。',visualAction:target.visual_action,imagePrompt:`${target.image_prompt}。准确表现：${target.visual_action}。${direction}。不得改变人物身份、动作或器具关系，不画文字、水印或边框。`,panels:[],highlightPhrases:[]})):null;
   let planError;
   const planAttempts = [];
   const serverManaged = settings.credentialMode === "SERVER_MANAGED";
-  const maxPlanAttempts = serverManaged ? 1 : 3;
+  const maxPlanAttempts = target ? 0 : serverManaged ? 1 : 3;
   for (let attempt = 1; attempt <= maxPlanAttempts; attempt += 1) {
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
     const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
@@ -2217,7 +2222,7 @@ function assemblePublicImageContent(checkpoint, input, settings) {
   const assetMap = buildAssetMapFromMotherSheets(checkpoint.final_pages, checkpoint.illustration_units, [{ tiles: checkpoint.assets }]);
   const successfulMotherSheets = checkpoint.job_attempts.filter((attempt) => attempt.job_kind === "mother_sheet" && attempt.decision !== "FAILED_RESUMABLE").length;
   const initialMissing = new Set(checkpoint.job_attempts.filter((attempt) => attempt.job_index < groupIllustrationUnits(checkpoint.illustration_units).length).flatMap((attempt) => attempt.missing_unit_ids || []));
-  let content = assembleArkContentFromDraft(input.draft, checkpoint.final_pages, assetMap, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: successfulMotherSheets, illustrationUnitCount: checkpoint.illustration_units.length, enforcePublishQuality: true }, input.production_mode);
+  let content = assembleArkContentFromDraft(input.draft, checkpoint.final_pages, assetMap, { textModel: settings.textModel, imageModel: settings.imageModel, motherSheetCount: successfulMotherSheets, illustrationUnitCount: checkpoint.illustration_units.length, enforcePublishQuality: !input.image_variant_target }, input.production_mode);
   content = {
     ...content,
     generation: {
@@ -2289,6 +2294,7 @@ function d36LegacyInput(snapshot, referenceDataUrls = []) {
     image_count: snapshot.page_count,
     reference_images: referenceDataUrls,
     reference_note: snapshot.reference_note,
+    ...(snapshot.image_variant_target?{image_variant_target:structuredClone(snapshot.image_variant_target)}:{}),
   };
 }
 
@@ -2655,7 +2661,7 @@ export async function generateImagesTransaction(input, settings, { imageLedger, 
       const referenceFingerprint = sha256Json({ references: input.reference_manifest, note: input.operation_snapshot.reference_note });
       const run = await createInitialPublicImageRun(legacyInput, settings, input.operation_snapshot.page_count, draftSha256, referenceFingerprint, { runId });
       compactRun = compactPublicImageRun(run);
-      response = d36ResponseForCompactRun({ compactRun, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, apiKey: settings.apiKey, recoverableUntil: claim.recoverableUntil, upstreamCalls: 1, status: "READY" });
+      response = d36ResponseForCompactRun({ compactRun, bootstrapNonce: input.bootstrap_nonce, inputSha256: input.input_sha256, apiKey: settings.apiKey, recoverableUntil: claim.recoverableUntil, upstreamCalls: input.operation_snapshot.image_variant_target ? 0 : 1, status: "READY" });
     } catch (error) {
       return commitPlannerFailure(imageLedger, plannerOwner, input, error, claim.recoverableUntil);
     }

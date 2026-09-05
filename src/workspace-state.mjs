@@ -2,7 +2,7 @@ import { generateContentPackage, importLocalEditableDraft, parseContentPackage }
 import { assertActionReferenceManifestBatch } from "./action-reference-media.mjs";
 import { GENERATION_SESSION_SCHEMA, parseGenerationSession } from "./generation-session.mjs";
 import { normalizeProfileV2, parseProfileV2 } from "./profile-v2.mjs";
-import { canonicalImageGenerationInputPreimage } from "./provider-contract.mjs";
+import { canonicalImageGenerationInputPreimage, normalizePageImageVariantTarget } from "./provider-contract.mjs";
 
 export const WORKSPACE_BACKUP_SCHEMA = "xiaoshimei.workspace-backup.v1";
 export const WORKSPACE_BACKUP_V2_SCHEMA = "xiaoshimei.workspace-backup.v2";
@@ -58,6 +58,8 @@ function checkedGenerationSession(value, path) {
   }
   if (!source || typeof source !== "object" || Array.isArray(source)) throw new TypeError(`${path}: generation session is invalid`);
   try {
+    const variantTarget=normalizePageImageVariantTarget(source.image_variant_target);
+    const variantFields=variantTarget?{image_variant_target:variantTarget}:{};
     const actionReferenceManifest = normalizeAuthoringActionReferences(
       source.action_reference_manifest,
       `${path}.action_reference_manifest`,
@@ -70,6 +72,7 @@ function checkedGenerationSession(value, path) {
       const parsed = parseGenerationSession({ ...source, schema: GENERATION_SESSION_SCHEMA });
       return {
         ...parsed,
+        ...variantFields,
         schema: AUTHORING_SESSION_SCHEMA,
         action_reference_manifest: actionReferenceManifest,
         action_reference_note: actionReferenceNote,
@@ -81,6 +84,7 @@ function checkedGenerationSession(value, path) {
     if (source.image_resume != null) throw new TypeError("GENERATION_SESSION_RESUME_REQUIRES_TEXT_DRAFT");
     return {
       schema: AUTHORING_SESSION_SCHEMA,
+      ...variantFields,
       topic: String(source.topic || ""),
       pillar: String(source.pillar || "wellness"),
       goal: String(source.goal || "save"),

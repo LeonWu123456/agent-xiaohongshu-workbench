@@ -145,8 +145,23 @@ function normalizeConfirmedImageDraft(value) {
   };
 }
 
+export function normalizePageImageVariantTarget(value) {
+ if(value==null)return null;
+ const fields=['schema','source_draft_id','source_page_index','source_page_sha256','object_id','image_id','title','body','visual_action','image_prompt'];
+ assertExactFields(value,fields,'IMAGE_VARIANT_TARGET_FIELDS_INVALID');
+ if(value.schema!=='xiaoshimei.page-image-variants-target.v1')throw new TypeError('IMAGE_VARIANT_TARGET_SCHEMA_INVALID');
+ if(!Number.isInteger(value.source_page_index)||value.source_page_index<0||value.source_page_index>7)throw new TypeError('IMAGE_VARIANT_PAGE_INVALID');
+ const imageId=safeId(value.image_id,'IMAGE_VARIANT_IMAGE_INVALID');
+ if(!/^(?:hero|panel-\d+)$/.test(imageId))throw new TypeError('IMAGE_VARIANT_IMAGE_INVALID');
+ return {schema:value.schema,source_draft_id:safeId(value.source_draft_id,'IMAGE_VARIANT_SOURCE_INVALID'),source_page_index:value.source_page_index,
+  source_page_sha256:sha256String(value.source_page_sha256,'IMAGE_VARIANT_SOURCE_HASH_INVALID'),object_id:safeId(value.object_id,'IMAGE_VARIANT_OBJECT_INVALID'),image_id:imageId,
+  title:exactString(value.title,'IMAGE_VARIANT_TITLE_INVALID',120),body:exactString(value.body,'IMAGE_VARIANT_BODY_INVALID',2000,{allowEmpty:true}),
+  visual_action:exactString(value.visual_action,'IMAGE_VARIANT_ACTION_INVALID',400),image_prompt:exactString(value.image_prompt,'IMAGE_VARIANT_PROMPT_INVALID',1800,{allowEmpty:true})};
+}
+
 function normalizeImageOperationSnapshot(value) {
-  assertExactFields(value, ["schema", "draft_record_id", "mutation_epoch", "confirmed_draft", "page_count", "production_mode", "reference_note"], "IMAGE_GENERATION_OPERATION_SNAPSHOT_FIELDS_INVALID");
+  const hasVariant = Object.prototype.hasOwnProperty.call(value || {}, "image_variant_target");
+  assertExactFields(value, ["schema", "draft_record_id", "mutation_epoch", "confirmed_draft", "page_count", "production_mode", "reference_note", ...(hasVariant ? ["image_variant_target"] : [])], "IMAGE_GENERATION_OPERATION_SNAPSHOT_FIELDS_INVALID");
   if (value.schema !== IMAGE_OPERATION_SNAPSHOT_SCHEMA) throw new TypeError("IMAGE_GENERATION_OPERATION_SNAPSHOT_SCHEMA_INVALID");
   const mutationEpoch = Number(value.mutation_epoch);
   if (!Number.isSafeInteger(mutationEpoch) || mutationEpoch < 0) throw new TypeError("IMAGE_GENERATION_MUTATION_EPOCH_INVALID");
@@ -161,6 +176,11 @@ function normalizeImageOperationSnapshot(value) {
     production_mode: normalizeProductionMode(value.production_mode, "IMAGE_GENERATION_PRODUCTION_MODE_INVALID"),
     reference_note: exactString(value.reference_note, "IMAGE_GENERATION_REFERENCE_NOTE_INVALID", 1000, { allowEmpty: true }),
   };
+  if(hasVariant){
+    const target=normalizePageImageVariantTarget(value.image_variant_target);
+    if(!target||snapshot.page_count!==3||snapshot.production_mode!=='smart')throw new TypeError('IMAGE_VARIANT_OPERATION_INVALID');
+    snapshot.image_variant_target=target;
+  }
   if (jsonByteLength(snapshot, "IMAGE_GENERATION_OPERATION_SNAPSHOT_INVALID") > IMAGE_OPERATION_SNAPSHOT_MAX_BYTES) throw new TypeError("IMAGE_GENERATION_OPERATION_SNAPSHOT_TOO_LARGE");
   return snapshot;
 }
