@@ -47,6 +47,22 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/vite.config.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/studio.html",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/workbench.css",
+          "kind": "implementation"
         }
       ]
     },
@@ -107,6 +123,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -126,6 +146,10 @@
       "implementation_refs": [
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
         }
       ]
@@ -159,6 +183,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/generation-feedback.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -191,6 +219,18 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/model.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -219,6 +259,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -246,6 +290,14 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         }
       ]
@@ -315,6 +367,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -338,6 +394,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/generation-session.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
           "kind": "implementation"
         }
       ]
@@ -370,6 +430,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
           "kind": "implementation"
         }
       ]
@@ -427,6 +491,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -454,6 +522,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
           "kind": "implementation"
         }
       ]
@@ -607,6 +679,14 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/vercel.json",
           "kind": "contract"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -635,6 +715,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/MaturePageEditor.jsx",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -662,6 +746,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/download-transport.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
           "kind": "implementation"
         }
       ]
@@ -771,6 +859,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -827,6 +919,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -854,6 +950,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
           "kind": "implementation"
         }
       ]
@@ -1151,6 +1251,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/vercel.json",
           "kind": "contract"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench-creator.test.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -1247,6 +1351,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/sol-workbench-contract.test.mjs",
           "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench.test.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -1327,6 +1435,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/styles.css",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -1350,6 +1462,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
           "kind": "implementation"
         }
       ]
@@ -1427,6 +1543,14 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/current-logic-map.test.mjs",
           "kind": "test"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/logic/logic-model.json",
+          "kind": "implementation"
         }
       ]
     },
@@ -1451,6 +1575,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/generation-feedback.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "kind": "implementation"
         }
       ]
     },
@@ -1470,6 +1598,10 @@
       "implementation_refs": [
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
         }
       ]
@@ -1495,6 +1627,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -1518,6 +1654,10 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/public-image-run.mjs",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
           "kind": "implementation"
         }
       ]
@@ -2093,8 +2233,8 @@
       "id": "JOURNEY-CURRENT-GENERATION",
       "cap": "CAP-001",
       "page": "PAGE-001",
-      "ui": "UI-001",
-      "act": "ACT-001",
+      "ui": "UI-003",
+      "act": "ACT-003",
       "flow": "FLOW-002",
       "api": "API-001",
       "store": "STORE-001",
