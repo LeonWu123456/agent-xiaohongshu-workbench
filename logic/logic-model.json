@@ -63,6 +63,14 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/workbench.css",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/index.html",
+          "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/legacy.html",
+          "kind": "compatibility"
         }
       ]
     },
