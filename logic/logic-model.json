@@ -49,11 +49,7 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/vite.config.mjs",
           "kind": "implementation"
         },
         {
@@ -61,7 +57,7 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/vite.config.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
         },
         {
@@ -155,10 +151,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
         }
       ]
     },
@@ -195,10 +187,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
         }
       ]
     },
@@ -233,11 +221,11 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         },
         {
@@ -275,10 +263,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
-          "kind": "implementation"
         }
       ]
     },
@@ -309,11 +293,11 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
+          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/publish-package.mjs",
+          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         }
       ]
@@ -479,10 +463,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
-          "kind": "implementation"
         }
       ]
     },
@@ -542,10 +522,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/media-asset-store.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         },
         {
@@ -622,18 +598,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/main.jsx",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
           "kind": "implementation"
         }
       ]
@@ -717,10 +681,6 @@
           "kind": "contract"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
-        },
-        {
           "path": "Products/Xiaoshimei-Studio-v2/src/provider-client.mjs",
           "kind": "implementation"
         },
@@ -757,10 +717,6 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
-          "kind": "implementation"
-        },
-        {
           "path": "Products/Xiaoshimei-Studio-v2/src/HtmlPageEditor.jsx",
           "kind": "implementation"
         }
@@ -790,10 +746,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/download-transport.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         },
         {
@@ -931,10 +883,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/download-transport.mjs",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
-          "kind": "implementation"
         }
       ]
     },
@@ -973,10 +921,6 @@
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
-        },
-        {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
           "kind": "implementation"
         }
@@ -1010,10 +954,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/main.jsx",
           "kind": "implementation"
         }
       ]
@@ -1314,7 +1254,7 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench-creator.test.mjs",
-          "kind": "test"
+          "kind": "implementation"
         }
       ]
     },
@@ -1350,10 +1290,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/editor-history.test.mjs",
-          "kind": "test"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench.test.mjs",
           "kind": "test"
         }
       ]
@@ -1418,7 +1354,7 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench.test.mjs",
-          "kind": "test"
+          "kind": "implementation"
         }
       ]
     },
@@ -1503,10 +1439,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
-          "kind": "implementation"
         }
       ]
     },
@@ -1558,14 +1490,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/storage.mjs",
           "kind": "implementation"
         }
       ]
@@ -1621,15 +1545,11 @@
           "kind": "test"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench-creator.test.mjs",
-          "kind": "test"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/logic/logic-model.json",
+          "path": "Products/Xiaoshimei-Studio-v2/XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md",
           "kind": "implementation"
         },
         {
-          "path": "Products/Xiaoshimei-Studio-v2/XIAOSHIMEI_WORKBENCH_FULL_LOGIC_MAP.md",
+          "path": "Products/Xiaoshimei-Studio-v2/logic/logic-model.json",
           "kind": "implementation"
         }
       ]
@@ -1659,10 +1579,6 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
           "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
-          "kind": "implementation"
         }
       ]
     },
@@ -1686,10 +1602,6 @@
         },
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/CreatorPanel.jsx",
-          "kind": "implementation"
-        },
-        {
-          "path": "Products/Xiaoshimei-Studio-v2/src/visual-workbench/creator.mjs",
           "kind": "implementation"
         }
       ]
