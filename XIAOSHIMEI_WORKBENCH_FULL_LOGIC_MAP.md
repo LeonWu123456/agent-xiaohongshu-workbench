@@ -215,14 +215,14 @@ flowchart LR
 | 层级 | 回读 |
 |---|---|
 | 产品意图 | 以上九问图 |
-| 本地机制 | 2026-09-05：583/583 测试、生产构建和 PR #5 质量检查通过；含参考图目的地可编辑、同稿保存和原操作保留反例 |
-| 本地页面 | 最终构建使用本地服务替身回放：三页错稿点击检查仅发 DISCOVER；三页及八页恢复文案后刷新保持同稿；缺媒体/无原任务/参考图/验证入口点击分流；无归属旧故障不显示为当前稿故障，原 pending 仍可检查。替身不证明线上生成服务恢复 |
-| 已发布源码 | 干净候选 `613b57c57aaa4b13f09af9393c596c7e9c383994`；PR #5 已合并为 `99bcc25f47af6eb370ba2d468076e38a9b6f86ec`。后续发布记录提交不改变这个运行制品身份 |
-| Preview 现实 | 同一版本实际走过参考图编辑副本、保存/重载、原任务找回、同稿文案恢复；1440px 与 360px 画面已检查。新稿真实文字生成、改标题和刷新保持通过。三页 ZIP 已落盘并通过 CRC，PNG 均 1080×1440；恢复夹具不证明新生图质量，复制内容仍未取得可靠回读 |
-| 线上运行证明 | 正式域名已指向 `dpl_7Yz8Po8TfcH6anUVYBjrGo6tUWNQ`，HTML/JS/CSS 与干净构建逐字节一致；健康接口返回 SERVER_MANAGED、访问码保护及图片账本 READY，绑定 613b57c，核验有效至 2026-09-12 |
-| 消费者现实 | 正式站原稿仍可见，但当前浏览器访问会话已失效，须在原访问验证入口输入已有访问码后完成整套旅程。尚未取得 HANDOFF_READY、小师妹独立设备反馈或本轮新付费配图验收，不能称为可投入生产 |
+| 本地机制 | 2026-09-05：新工作台主链 599/599 全回归 + build PASS；默认入口补丁另有 scoped 19/19 + 599/599 + build PASS。文字确认前图片调用 0、checkpoint 前置、同稿恢复、旧 pending 零 Provider 打开和导出 identity guard 均有机械与浏览器证据 |
+| 本地页面 | 新工作台采用左页 / 中画布 / 右属性结构，复用同一 DraftRecord v3、Provider、media store 与导出链；默认 `index.html` 与 `studio.html` 进入新工作台，旧 UI 仅保留在 `legacy.html`。本地与 Preview/Production 均验证 1440px/360px、保存刷新、PNG 导出与恢复协议 |
+| 已发布源码 | 默认入口功能候选 `d069c63a3dd2700e6806cd5a233e3d9fee06fde8`；PR #8 的运行时合并提交为 `aa7eccbb4c264b1fd4d4138f2b6dcf51a53aa8be`；promote 时它是 GitHub main，后续仅文档提交不改变运行制品；候选与运行提交 tree 同为 `caa584841c65e65107118ee0303863e10030b8e2` |
+| Preview 现实 | `dpl_6wuFvwKzP964uJic9xEKGnc8XkxR` READY：根 `/` 与 `/studio.html` 为同一新工作台，`/legacy.html` 保留旧 UI；Provider API 路由仍通。更早新工作台 Preview 的文字、配图 mock、恢复三条 Journey、1440/360 与资产 Hash 已通过，真实付费图片调用 0 |
+| 线上运行证明 | 正式域名已 promote 到同一 Production-staging `dpl_E3SiFox5dtUpYk4mJdT1uFSRcD1E`，gitCommitSha=`aa7eccbb...`；根 `/` 与 `/studio.html` 同一新工作台，`/legacy.html` 保留旧 UI；主 JS/CSS 与本地 build SHA-256 逐字节一致；health 返回 SERVER_MANAGED、STUDIO_ACCESS_SESSION、图片账本 READY，attestation candidate 精确绑定 `aa7eccbb...` |
+| 消费者现实 | Production 与默认入口切换已经完成；稳定根路径三条自动浏览器 Journey 与 1440/360 Reality 均 PASS，真实付费图片调用 0。health 当前仍 `authenticated=false`，尚未取得小师妹本人独立设备直接反馈或已认证 Studio 会话的真实 server-managed fresh-user 旅程，因此 `HANDOFF_READY` / `CONSUMER_VALIDATED` 仍未证明 |
 
-发布、续签及已核验回退点见 [正式发布记录](deployment/PRODUCTION_RUNBOOK.md#2026-09-05-参考图恢复修复正式发布)。部署完成和用户生产可用是两个不同事实；源头 Skills 的可信消费与正式激活也不由这次产品部署代签。
+发布、续签及已核验回退点见 [正式发布记录](deployment/PRODUCTION_RUNBOOK.md#2026-09-05-新可编辑工作台默认入口正式发布)。部署完成和用户生产可用是两个不同事实；源头 Skills 的可信消费与正式激活也不由这次产品部署代签。
 
 ## 使用方式
 
