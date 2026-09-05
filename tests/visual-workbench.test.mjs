@@ -130,4 +130,15 @@ test('v3 backup restores the display name and old nameless records still load',a
  const backup=await a.backup(),b=adapter(memoryStorage());await b.load();await b.importFile(JSON.stringify(backup));
  assert.equal(b.activeRecord().display_name,'备份中的作品名');assert.equal(b.activeRecord().content_package.selectedTitle,'未命名作品');
  a.dispose();b.dispose();
+
+test('direct gesture cancellation restores transient DOM and empty edits commit visible fallbacks',async()=>{
+ const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');
+ assert.match(editor,/if \(!commit\) \{\s*drag\.target\.style\.setProperty\("--object-x", `\$\{drag\.start\.x\}cqw`\);\s*drag\.target\.style\.setProperty\("--object-y", `\$\{drag\.start\.y\}cqh`\);/s);
+ assert.match(editor,/if \(!commit\) drag\.target\.style\.setProperty\("--object-scale", drag\.start\.scale\);/);
+ assert.match(editor,/captureTarget: event\.currentTarget/);
+ assert.match(editor,/onLostPointerCapture=\{\(event\)=>finishObjectMove\(event,objectId,false\)\}/);
+ assert.match(editor,/const next = cleaned \|\| String\(emptyFallback \|\| "点击输入文字"\)\.trim\(\);/);
+ assert.match(editor,/emptyFallback="点击输入标题"/);
+ assert.match(editor,/emptyFallback="点击输入正文"/);
+ assert.doesNotMatch(editor,/if \(next && next !== String\(value \|\| ""\)\.trim\(\)\) onCommit\(next\)/);
 });

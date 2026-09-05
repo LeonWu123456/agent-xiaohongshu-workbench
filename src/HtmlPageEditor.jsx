@@ -263,7 +263,7 @@ function PhraseSafeTitle({ value, phrases = [], maxUnbrokenLength = 10 }) {
   });
 }
 
-function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, multiline = true, highlightPhrases = [], phraseSafe = false, phraseSafeMaxLength = 10 }) {
+function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, multiline = true, highlightPhrases = [], phraseSafe = false, phraseSafeMaxLength = 10, emptyFallback = "点击输入文字" }) {
   return <Tag
     className={className}
     contentEditable
@@ -280,8 +280,11 @@ function EditableText({ as: Tag = "div", value, className, onCommit, onSelect, m
       }
     }}
     onBlur={(event) => {
-      const next = cleanEditableText(event.currentTarget, phraseSafe);
-      if (next && next !== String(value || "").trim()) onCommit(next);
+      const previous = String(value || "").trim();
+      const cleaned = cleanEditableText(event.currentTarget, phraseSafe);
+      const next = cleaned || String(emptyFallback || "点击输入文字").trim();
+      if (!cleaned) event.currentTarget.textContent = next;
+      if (next !== previous) onCommit(next);
     }}
   >{phraseSafe ? <PhraseSafeTitle value={value} phrases={highlightPhrases} maxUnbrokenLength={phraseSafeMaxLength} /> : <HighlightedText value={value} phrases={highlightPhrases} />}</Tag>;
 }
@@ -413,6 +416,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
       start: objectEditFor(state, objectId),
       next: null,
       target,
+      captureTarget: event.currentTarget,
     };
   };
   const continueObjectMove = (event, objectId) => {
@@ -441,9 +445,12 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
   const finishObjectMove = (event, objectId, commit = true) => {
     const drag = directMoveRef.current;
     if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
-    drag.target.releasePointerCapture?.(event.pointerId);
     directMoveRef.current = null;
-    if (commit && drag.next) onObjectEdit?.(objectId, drag.next);
+    if (!commit) {
+      drag.target.style.setProperty("--object-x", `${drag.start.x}cqw`);
+      drag.target.style.setProperty("--object-y", `${drag.start.y}cqh`);
+    } else if (drag.next) onObjectEdit?.(objectId, drag.next);
+    drag.captureTarget?.releasePointerCapture?.(event.pointerId);
   };
   const beginObjectResize = (event, objectId) => {
     event.stopPropagation();
@@ -454,7 +461,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     if (!target || !pageRect) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    directResizeRef.current = { objectId, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY, pageWidth:pageRect.width, pageHeight:pageRect.height, start:objectEditFor(state, objectId), target, next:null };
+    directResizeRef.current = { objectId, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY, pageWidth:pageRect.width, pageHeight:pageRect.height, start:objectEditFor(state, objectId), target, next:null, captureTarget:event.currentTarget };
   };
   const continueObjectResize = (event, objectId) => {
     const drag = directResizeRef.current;
@@ -477,13 +484,14 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
   const finishObjectResize = (event, objectId, commit = true) => {
     const drag = directResizeRef.current;
     if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
     directResizeRef.current = null;
-    if (commit && drag.next) onObjectEdit?.(objectId, drag.next);
+    if (!commit) drag.target.style.setProperty("--object-scale", drag.start.scale);
+    else if (drag.next) onObjectEdit?.(objectId, drag.next);
+    drag.captureTarget?.releasePointerCapture?.(event.pointerId);
   };
   const directControls = (objectId) => renderOnly || interactionMode !== "direct" || selectedObject !== objectId ? null : <span className="html-editor-direct-controls" aria-label="对象直接调整">
-    <button type="button" className="html-editor-direct-handle is-move" aria-label="拖动模块" title="拖动模块" onPointerDown={(event)=>beginObjectMove(event,objectId,true)} onPointerMove={(event)=>continueObjectMove(event,objectId)} onPointerUp={(event)=>finishObjectMove(event,objectId)} onPointerCancel={(event)=>finishObjectMove(event,objectId,false)}>↕</button>
-    <button type="button" className="html-editor-direct-handle is-resize" aria-label="缩放模块" title="缩放模块" onPointerDown={(event)=>beginObjectResize(event,objectId)} onPointerMove={(event)=>continueObjectResize(event,objectId)} onPointerUp={(event)=>finishObjectResize(event,objectId)} onPointerCancel={(event)=>finishObjectResize(event,objectId,false)}>↘</button>
+    <button type="button" className="html-editor-direct-handle is-move" aria-label="拖动模块" title="拖动模块" onPointerDown={(event)=>beginObjectMove(event,objectId,true)} onPointerMove={(event)=>continueObjectMove(event,objectId)} onPointerUp={(event)=>finishObjectMove(event,objectId)} onPointerCancel={(event)=>finishObjectMove(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectMove(event,objectId,false)}>↕</button>
+    <button type="button" className="html-editor-direct-handle is-resize" aria-label="缩放模块" title="缩放模块" onPointerDown={(event)=>beginObjectResize(event,objectId)} onPointerMove={(event)=>continueObjectResize(event,objectId)} onPointerUp={(event)=>finishObjectResize(event,objectId)} onPointerCancel={(event)=>finishObjectResize(event,objectId,false)} onLostPointerCapture={(event)=>finishObjectResize(event,objectId,false)}>↘</button>
   </span>;
   const objectMoveHandlers = (objectId) => renderOnly ? {} : interactionMode === "direct" ? {
     onClick: (event) => { event.stopPropagation(); onSelectObject?.(objectId); },
@@ -520,17 +528,17 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     >
       {renderOnly
         ? <p className="html-page__eyebrow">{page.eyebrow}</p>
-        : <EditableText key={`eyebrow-${page.eyebrow}`} as="p" className="html-page__eyebrow" value={page.eyebrow} multiline={false} onSelect={() => onSelectObject?.("title-block")} onCommit={(eyebrow) => onPagePatch?.({ eyebrow })} />}
+        : <EditableText key={`eyebrow-${page.eyebrow}`} as="p" className="html-page__eyebrow" value={page.eyebrow} multiline={false} onSelect={() => onSelectObject?.("title-block")} emptyFallback="小标题" onCommit={(eyebrow) => onPagePatch?.({ eyebrow })} />}
       {renderOnly
         ? <h1 className="html-page__title"><PhraseSafeTitle value={page.title} phrases={page.highlight_phrases} maxUnbrokenLength={isPrimaryCover ? 7 : 10} /></h1>
-        : <EditableText key={`title-${page.title}`} as="h1" className="html-page__title" value={page.title} highlightPhrases={page.highlight_phrases} phraseSafe phraseSafeMaxLength={isPrimaryCover ? 7 : 10} onSelect={() => onSelectObject?.("title-block")} onCommit={(title) => onPagePatch?.({ title })} />}
+        : <EditableText key={`title-${page.title}`} as="h1" className="html-page__title" value={page.title} highlightPhrases={page.highlight_phrases} phraseSafe phraseSafeMaxLength={isPrimaryCover ? 7 : 10} onSelect={() => onSelectObject?.("title-block")} emptyFallback="点击输入标题" onCommit={(title) => onPagePatch?.({ title })} />}
       {directControls("title-block")}
     </header>
 
     {state.layout_id === "cover-poster" && <div className={`html-page__cover-lede html-editor-object ${selectedObject === "cover-lede" ? "is-object-selected" : ""}`} data-editor-object-id="cover-lede" style={objectTransformStyle(state, "cover-lede")} {...objectMoveHandlers("cover-lede")}>
       {renderOnly
         ? <p>{paragraphs[0]}</p>
-        : <EditableText key={`cover-lede-${paragraphs[0]}`} as="p" value={paragraphs[0]} onSelect={() => onSelectObject?.("cover-lede")} onCommit={(next) => patchParagraph(0, next)} />}
+        : <EditableText key={`cover-lede-${paragraphs[0]}`} as="p" value={paragraphs[0]} onSelect={() => onSelectObject?.("cover-lede")} emptyFallback="点击输入引言" onCommit={(next) => patchParagraph(0, next)} />}
       {directControls("cover-lede")}
     </div>}
 
@@ -539,10 +547,10 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
         <div className={`html-page__panel-copy html-editor-object ${selectedObject === `panel-${index}-copy` ? "is-object-selected" : ""}`} data-editor-object-id={`panel-${index}-copy`} style={objectTransformStyle(state, `panel-${index}-copy`)} {...objectMoveHandlers(`panel-${index}-copy`)}>
           {renderOnly
             ? <h2><HighlightedText value={panel.title} phrases={panelMeta[index].highlightPhrases} /></h2>
-            : <EditableText key={`panel-title-${panel.title}`} as="h2" value={panel.title} highlightPhrases={panelMeta[index].highlightPhrases} multiline={false} onSelect={() => onSelectObject?.(`panel-${index}-copy`)} onCommit={(title) => patchPanel(index, { title })} />}
+            : <EditableText key={`panel-title-${panel.title}`} as="h2" value={panel.title} highlightPhrases={panelMeta[index].highlightPhrases} multiline={false} onSelect={() => onSelectObject?.(`panel-${index}-copy`)} emptyFallback="段落标题" onCommit={(title) => patchPanel(index, { title })} />}
           {renderOnly
             ? <p><HighlightedText value={panel.body} phrases={panelMeta[index].highlightPhrases} /></p>
-            : <EditableText key={`panel-body-${panel.body}`} as="p" value={panel.body} highlightPhrases={panelMeta[index].highlightPhrases} onSelect={() => onSelectObject?.(`panel-${index}-copy`)} onCommit={(body) => patchPanel(index, { body })} />}
+            : <EditableText key={`panel-body-${panel.body}`} as="p" value={panel.body} highlightPhrases={panelMeta[index].highlightPhrases} onSelect={() => onSelectObject?.(`panel-${index}-copy`)} emptyFallback="点击输入正文" onCommit={(body) => patchPanel(index, { body })} />}
           {directControls(`panel-${index}-copy`)}
         </div>
         <PageImage
@@ -572,7 +580,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
       <div className={`html-page__body html-editor-object ${selectedObject === "body-block" ? "is-object-selected" : ""}`} data-editor-object-id="body-block" style={objectTransformStyle(state, "body-block")} {...objectMoveHandlers("body-block")}>
         {paragraphs.map((paragraph, index) => renderOnly
           ? <p key={`${index}-${paragraph.slice(0, 12)}`}><HighlightedText value={paragraph} phrases={page.highlight_phrases} /></p>
-          : <EditableText key={`${index}-${paragraph.slice(0, 12)}`} as="p" value={paragraph} highlightPhrases={page.highlight_phrases} onSelect={() => onSelectObject?.("body-block")} onCommit={(next) => patchParagraph(index, next)} />)}
+          : <EditableText key={`${index}-${paragraph.slice(0, 12)}`} as="p" value={paragraph} highlightPhrases={page.highlight_phrases} onSelect={() => onSelectObject?.("body-block")} emptyFallback="点击输入正文" onCommit={(next) => patchParagraph(index, next)} />)}
         {directControls("body-block")}
       </div>
       {page.visual !== "none" && <PageImage
