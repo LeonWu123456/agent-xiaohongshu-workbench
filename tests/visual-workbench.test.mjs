@@ -100,3 +100,34 @@ test('direct resize controls use the same 72 percent floor as the persistent obj
  assert.match(editor,/Math\.max\(\.72, drag\.start\.scale/);assert.match(editor,/Math\.max\(\.72, scale \* fitFactor\)/);
  assert.doesNotMatch(editor,/Math\.max\(\.65, (?:drag\.start\.scale|scale \* fitFactor)/);
 });
+
+
+test('draft display name is independent of content and survives save, reload and copy',async()=>{
+ const storage=memoryStorage(),a=adapter(storage);await a.load();await a.createDraft(createBlankContent());
+ const original=structuredClone(a.activeRecord().content_package),first=a.activeRecord().draft_id;
+ await a.renameActiveDraft('我的第一份作品');
+ assert.equal(a.drafts()[0].title,'我的第一份作品');assert.deepEqual(a.activeRecord().content_package,original);
+ await a.save(changePage(original,0,{title:'封面改字不改变作品名'}));
+ const b=adapter(storage);await b.load();assert.equal(b.activeRecord().display_name,'我的第一份作品');
+ await b.duplicateActiveDraft();assert.notEqual(b.activeRecord().draft_id,first);
+ assert.match(b.activeRecord().display_name,/副本/);await b.renameActiveDraft('独立副本');
+ await b.activateDraft(first);assert.equal(b.activeRecord().display_name,'我的第一份作品');assert.equal(storage.data.size,1);
+ a.dispose();b.dispose();
+});
+
+test('rename rejects blank names and stale writes without altering saved content',async()=>{
+ const storage=memoryStorage(),a=adapter(storage);await a.load();await a.createDraft(createBlankContent());
+ await assert.rejects(()=>a.renameActiveDraft('   '),/名称/);await assert.rejects(()=>a.renameActiveDraft('长'.repeat(121)),/名称/);
+ const b=adapter(storage);await b.load();await a.renameActiveDraft('新窗口名称');
+ await assert.rejects(()=>b.renameActiveDraft('旧窗口名称'),/另一个标签页/);
+ const c=adapter(storage);await c.load();assert.equal(c.activeRecord().display_name,'新窗口名称');
+ a.dispose();b.dispose();c.dispose();
+});
+
+test('v3 backup restores the display name and old nameless records still load',async()=>{
+ const storage=memoryStorage(),a=adapter(storage);await a.load();await a.createDraft(createBlankContent());
+ assert.equal(a.activeRecord().display_name,undefined);await a.renameActiveDraft('备份中的作品名');
+ const backup=await a.backup(),b=adapter(memoryStorage());await b.load();await b.importFile(JSON.stringify(backup));
+ assert.equal(b.activeRecord().display_name,'备份中的作品名');assert.equal(b.activeRecord().content_package.selectedTitle,'未命名作品');
+ a.dispose();b.dispose();
+});
