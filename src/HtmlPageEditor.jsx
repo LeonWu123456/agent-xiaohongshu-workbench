@@ -461,7 +461,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
     const normalized = ((event.clientX-drag.startX)/Math.max(1,drag.pageWidth) + (event.clientY-drag.startY)/Math.max(1,drag.pageHeight));
-    let scale = Math.min(1.4, Math.max(.65, drag.start.scale + normalized * 1.25));
+    let scale = Math.min(1.4, Math.max(.72, drag.start.scale + normalized * 1.25));
     drag.target.style.setProperty("--object-scale", scale);
     const pageRect = drag.target.closest?.(".html-page")?.getBoundingClientRect();
     const rect = drag.target.getBoundingClientRect();
@@ -470,7 +470,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
       const maxWidth = Math.max(1, 2 * Math.min(centerX - pageRect.left, pageRect.right - centerX));
       const maxHeight = Math.max(1, 2 * Math.min(centerY - pageRect.top, pageRect.bottom - centerY));
       const fitFactor = Math.min(1, maxWidth / rect.width, maxHeight / rect.height);
-      if (fitFactor < 1) { scale = Math.max(.65, scale * fitFactor); drag.target.style.setProperty("--object-scale", scale); }
+      if (fitFactor < 1) { scale = Math.max(.72, scale * fitFactor); drag.target.style.setProperty("--object-scale", scale); }
     }
     drag.next = { ...drag.start, scale };
   };

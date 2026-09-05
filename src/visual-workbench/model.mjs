@@ -69,7 +69,7 @@ export function createBlankContent() {
     editor_mode: 'html',
     html_state: undefined,
   };
-  return parseContentPackage(JSON.stringify({ ...base, pages:[page], visible_pages:1, selectedTitle:'未命名作品', titles:['未命名作品','新的表达','我的新作品'], stage:'LOCAL_DRAFT', scale_permission:'UNVERIFIED' }));
+  return parseContentPackage(JSON.stringify({ ...base, body:'', tags:['','','','',''], pages:[page], visible_pages:1, selectedTitle:'未命名作品', titles:['未命名作品','新的表达','我的新作品'], stage:'LOCAL_DRAFT', scale_permission:'UNVERIFIED' }));
 }
 
 export function importEditableContent(raw) {

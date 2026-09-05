@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { publishCopy } from '../src/content-engine.mjs';
 import { generateContentPackage } from '../src/content-engine.mjs';
 import { changePage, replacePageImage, listPageObjects, importEditableContent, createBlankContent, addContentPage, duplicateContentPage, deleteContentPage, reorderContentPage, clampPageIndex } from '../src/visual-workbench/model.mjs';
 test('visual editor changes real content, keeps unrelated pages and original immutable',()=>{
@@ -84,4 +85,18 @@ test('blank page image absence survives schema round-trip and upload re-enables 
 
 test('page index clamps after undo, delete or any page-count contraction',()=>{
  assert.equal(clampPageIndex({visible_pages:1,pages:[{}]},1),0);assert.equal(clampPageIndex({visible_pages:4,pages:[{},{},{},{}]},9),3);assert.equal(clampPageIndex({visible_pages:4,pages:[{},{},{},{}]},2),2);
+});
+
+
+test('blank draft never inherits demo publish copy',()=>{
+ const blank=createBlankContent();const copy=publishCopy(blank);
+ assert.equal(blank.body,'');assert.deepEqual(blank.tags,['','','','','']);
+ assert.doesNotMatch(copy,/忙起来时|古法养生|传统文化|自我照顾/);
+});
+
+test('direct resize controls use the same 72 percent floor as the persistent object model',async()=>{
+ const [main,editor]=await Promise.all([readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'),readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8')]);
+ assert.match(main,/aria-label="模块大小" type="range" min="\.72" max="1\.4"/);
+ assert.match(editor,/Math\.max\(\.72, drag\.start\.scale/);assert.match(editor,/Math\.max\(\.72, scale \* fitFactor\)/);
+ assert.doesNotMatch(editor,/Math\.max\(\.65, (?:drag\.start\.scale|scale \* fitFactor)/);
 });
