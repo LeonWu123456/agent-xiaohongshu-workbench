@@ -219,3 +219,24 @@ test('empty-origin complete backup restore rejects incompatible Fabric edits bef
  const storage=memoryStorage(),service=storageAdapter(storage);await service.load();await service.save(createDemo());const backup=await service.backup();backup.workspace.drafts[0].content_package.pages[0].editor_mode='fabric';
  const empty=memoryStorage(),target=storageAdapter(empty);await target.load();await assert.rejects(()=>target.importFile(JSON.stringify(backup)));assert.equal(empty.data.size,0);assert.equal(target.workspace(),null);service.dispose();target.dispose();
 });
+
+
+test('single-image alternatives preserve source and restore one selected image with stale-page protection',async()=>{
+ const {createPageVariantSession,applyPageVariant}=await import('../src/visual-workbench/creator.mjs');
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');
+ const storage=memoryStorage(),service=storageAdapter(storage);await service.load();
+ const seed=createDemo();seed.body=textDraft().body;seed.pages[1].visual="character";seed.pages[1].image_style.hidden=false;await service.save(composeEditableContent(seed));const original=structuredClone(service.activeRecord());
+ const session=await createPageVariantSession(original,{pageIndex:1,objectId:'hero-image'});
+ await service.save(original.content_package,{asNew:true,generationSession:session,displayName:'配图方案'});
+ const candidate=structuredClone(service.activeRecord().content_package);candidate.generation={...candidate.generation,mode:'PROVIDER',provider:'volcengine-ark',source_draft_id:session.text_draft.draft_id};
+ const bytes=new Uint8Array([255,216,255,217]);const {putVerifiedMedia}=await import('../src/media-asset-store.mjs');const asset=await putVerifiedMedia(service.mediaStore,{bytes,mime:'image/jpeg',name:'test-variant'});
+ candidate.pages=candidate.pages.slice(0,3).map(p=>({...p,image_style:{...p.image_style,src:asset.media_ref}}));candidate.visible_pages=3;
+ await service.save(candidate,{generationSession:{...session,assembled_draft_id:session.text_draft.draft_id}});
+ assert.deepEqual(service.workspace().drafts.find(d=>d.draft_id===original.draft_id),original);
+ const output=await applyPageVariant({service,candidateIndex:1});assert.equal(service.activeRecord().draft_id,original.draft_id);
+ const after=service.activeRecord().content_package;assert.deepEqual(after.pages[0],original.content_package.pages[0]);assert.deepEqual(after.pages[2],original.content_package.pages[2]);
+ assert.deepEqual(after.pages[1].html_state,original.content_package.pages[1].html_state);assert.equal(after.pages[1].body,original.content_package.pages[1].body);assert.equal(after.pages[1].image_style.src,asset.media_ref);
+ assert.equal(output.target.source_page_index,1);
+ const variants=service.workspace().drafts.find(d=>d.generation_session?.image_variant_target);await service.activateDraft(variants.draft_id);
+ await assert.rejects(()=>applyPageVariant({service,candidateIndex:0}),/原页.*变化/);
+});

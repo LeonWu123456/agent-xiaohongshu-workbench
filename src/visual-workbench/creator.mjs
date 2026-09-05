@@ -1,3 +1,5 @@
+import {replacePageImage} from './model.mjs';
+import {normalizePageImageVariantTarget} from '../provider-contract.mjs';
 import { createLocalHttpProvider } from '../provider-client.mjs';
 import { buildGenerationContract } from '../profile-v2.mjs';
 import { defaultPromptValues, promptContextForProvider } from '../prompt-context.mjs';
@@ -109,11 +111,12 @@ function confirmedImageDraftSnapshot(draft) {
   };
 }
 
-function imageOperationSnapshot({ recordId, draft, pageCount, productionMode, referenceNote = '' }) {
+function imageOperationSnapshot({ recordId, draft, pageCount, productionMode, referenceNote = '', variantTarget = null }) {
   return {
     schema: 'xiaoshimei.image-operation-snapshot.v1', draft_record_id: recordId,
     mutation_epoch: Date.now(), confirmed_draft: confirmedImageDraftSnapshot(draft), page_count: pageCount,
     production_mode: productionMode, reference_note: referenceNote,
+    ...(variantTarget?{image_variant_target:variantTarget}:{}),
   };
 }
 
@@ -152,7 +155,7 @@ async function persistBootstrap({ service, session, pageCount, productionMode, c
   const operationNonce=nonce64(cryptoApi);
   const pending=await createRestartablePendingImageOperationV3({
     operationNonce,
-    operationSnapshot:imageOperationSnapshot({recordId:record.draft_id,draft:session.text_draft,pageCount,productionMode,referenceNote:session.action_reference_note||''}),
+    operationSnapshot:imageOperationSnapshot({recordId:record.draft_id,draft:session.text_draft,pageCount,productionMode,referenceNote:session.action_reference_note||'',variantTarget:session.image_variant_target}),
     orderedReferenceManifest:session.action_reference_manifest||[], protocolState:'BOOTSTRAP', updatedAt:new Date().toISOString(),
   });
   const desired=createDraftRecordV3({draftId:record.draft_id,displayName:record.display_name,contentPackage:record.content_package,generationSession:session,pendingImageOperation:pending,createdAt:record.created_at,updatedAt:new Date().toISOString()});
@@ -272,4 +275,41 @@ export async function readReferenceFiles(files){
   out.push({name:file.name,type:file.type,size:file.size,bytes:new Uint8Array(await file.arrayBuffer())});
  }
  return out;
+}
+
+
+async function pageIdentity(page) {
+ const bytes=new TextEncoder().encode(JSON.stringify(page));const hash=await crypto.subtle.digest('SHA-256',bytes);
+ return [...new Uint8Array(hash)].map(n=>n.toString(16).padStart(2,'0')).join('');
+}
+export async function createPageVariantSession(record,{pageIndex,objectId}={}) {
+ if(record?.pending_image_operation)throw new Error('请先完成当前配图任务。');
+ const content=record?.content_package,page=content?.pages?.[pageIndex],object=page?.html_state?.free_objects?.find(o=>o.id===objectId);
+ if(!page||object?.kind!=='image'||!/^(hero|panel-\d+)$/.test(object.binding||''))throw new Error('请选择一张已排版的主图或插图。');
+ const imageId=object.binding,panel=imageId==='hero'?page:page.info_panels?.[Number(imageId.slice(6))];
+ if(!panel)throw new Error('原插图对应的场景不存在。');
+ const target=normalizePageImageVariantTarget({schema:'xiaoshimei.page-image-variants-target.v1',source_draft_id:record.draft_id,source_page_index:pageIndex,source_page_sha256:await pageIdentity(page),object_id:objectId,image_id:imageId,
+  title:String(panel.title||page.title).slice(0,120),body:String(panel.body||'').slice(0,2000),visual_action:String(panel.visual_action||page.visual_action||`小师妹在日常生活中演示${panel.title||page.title}`).slice(0,400),image_prompt:String(panel.image_prompt||page.image_prompt||'').slice(0,1800)});
+ const old=record.generation_session||emptyAuthoringSession({topic:content.source_input,pillar:content.pillar,goal:content.goal});
+ const draft={schema:'xiaoshimei.text-draft-response.v1',draft_id:'image-variants-'+crypto.randomUUID(),created_at:new Date().toISOString(),source_input:content.source_input||target.title,text_requirements:'保持原文和版式，只生成同一动作的三个配图方案',pillar:content.pillar,goal:content.goal,titles:content.titles,selected_title:content.selectedTitle,body:content.body||target.body||target.title,tags:content.tags,recommended_image_count:3,facts:[],risks:[],content_type:'knowledge_card',style_lock:old.text_draft?.style_lock||null,prompt_context:old.text_draft?.prompt_context||{},generation:{mode:'USER_FROZEN_COPY',notice:'来自已保存的原稿，未重新生成文字'}};
+ return normalizeAuthoringSession({...old,schema:AUTHORING_SESSION_SCHEMA,topic:draft.source_input,text_draft:draft,text_confirmed:true,assembled_draft_id:null,image_count_mode:'CUSTOM',custom_image_count:3,production_mode:'smart',image_resume:null,image_variant_target:target});
+}
+export async function applyPageVariant({service,candidateIndex}={}) {
+ const candidate=service.activeRecord(),session=candidate?.generation_session,target=normalizePageImageVariantTarget(session?.image_variant_target);
+ if(!target||candidate.pending_image_operation||session.assembled_draft_id!==session.text_draft?.draft_id)throw new Error('配图方案尚未完成，请先恢复生成。');
+ if(!Number.isInteger(candidateIndex)||candidateIndex<0||candidateIndex>2)throw new Error('请选择一个配图方案。');
+ const sourceImage=candidate.content_package.pages[candidateIndex]?.image_style?.src;
+ if(!/^xiaoshimei-media:\/\/sha256\/[a-f0-9]{64}$/.test(sourceImage||''))throw new Error('配图方案没有可验证的本地素材。');
+ await service.mediaStore.readVerifiedMedia(sourceImage);
+ const snapshot=service.coordinator.snapshot();if(!snapshot.ok)throw new Error('原稿无法读取，未替换。');
+ const source=snapshot.workspace?.drafts.find(d=>d.draft_id===target.source_draft_id),page=source?.content_package.pages[target.source_page_index];
+ if(!page||source.pending_image_operation||await pageIdentity(page)!==target.source_page_sha256)throw new Error('原页已经变化，为保护新编辑，本次未替换。请从原页重新生成方案。');
+ const object=page.html_state?.free_objects?.find(o=>o.id===target.object_id);
+ if(object?.kind!=='image'||object.binding!==target.image_id)throw new Error('原图片对象已变化，未替换。');
+ const previousImage=target.image_id==='hero'?page.image_style?.src:page.info_panels?.[Number(target.image_id.slice(6))]?.image_style?.src;
+ const nextPage=replacePageImage(page,target.image_id,sourceImage),content={...source.content_package,pages:source.content_package.pages.map((p,i)=>i===target.source_page_index?nextPage:p)};
+ const receipt=await service.coordinator.mergeDraftCas({draftId:source.draft_id,expectedDraftToken:draftRecordToken(source),buildDraft:()=>createDraftRecordV3({draftId:source.draft_id,displayName:source.display_name,contentPackage:content,generationSession:source.generation_session,pendingImageOperation:null,createdAt:source.created_at,updatedAt:new Date().toISOString()}),reason:'VISUAL_APPLY_SINGLE_IMAGE_VARIANT'});
+ if(!receipt.ok)throw new Error('原稿刚被其他标签页更新，未覆盖：'+receipt.code);
+ await service.sync();const result=await service.activateDraft(source.draft_id);
+ return {...result,target,previousImage};
 }
