@@ -218,7 +218,19 @@ export async function runImageGeneration({ provider, service, session, pageCount
     return { action:'CONTINUE', request };
   };
   try {
-    const result = await provider.generateImages(initialRequest, consume);
+    let result = await provider.generateImages(initialRequest, consume);
+    // A preflight rejection may leave a durable local BOOTSTRAP but no server
+    // run. Check-only stays read-only. Explicit retry reuses the frozen nonce,
+    // snapshot and verified reference bytes; never recreate an expired run.
+    const age=Date.now()-Number(pending.operation_snapshot?.mutation_epoch);
+    const freshUnstarted=bootstrap.resumed && pending.protocol_state==='BOOTSTRAP'
+      && !pending.run_id && !pending.checkpoint_preimage_hash && !pending.attempt_nonce
+      && Number(pending.completed_image_steps||0)===0 && Number.isFinite(age) && age>=0 && age<7*86400000;
+    if(!discoveryOnly && freshUnstarted && result.status==='ERROR' && result.error?.code==='IMAGE_LEDGER_RUN_MISSING'){
+      const request=await rebuildPendingImageStartV3({pendingImageOperation:pending,mediaStore:service.mediaStore});
+      requestModes.push('START');
+      result=await provider.generateImages(request,consume);
+    }
     if (result.status === 'ERROR' && result.error?.code === 'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS') {
       const release = await commitDraftImagePlannerFailureV3({
         coordinator:service.coordinator, draftId:operationRecord.draft_id, expectedDraftToken:expectedToken, operationSnapshot:operationRecord,

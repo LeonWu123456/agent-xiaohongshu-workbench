@@ -249,3 +249,22 @@ test('discovery ERROR is never reported as saved recovery and never releases or 
  const provider={fetchImageMediaDelta:async()=>[],generateImages:async input=>{calls++;assert.equal(input.mode,'DISCOVER');return {...readyImageResponse(),status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'},upstream_calls:0};}};
  await assert.rejects(()=>runImageGeneration({provider,service,session:service.session(),discoveryOnly:true}),/IMAGE_LEDGER_RUN_MISSING/);assert.equal(calls,1);assert.deepEqual(service.activeRecord(),before);
 });
+
+
+test('explicit retry resubmits exactly the same fresh BOOTSTRAP only after missing-run discovery',async()=>{
+ const {service,session}=await confirmedService();const first=[];
+ await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async request=>{first.push(request);throw new Error('IMAGE_LEDGER_CAPACITY_EXHAUSTED');}}}),/CAPACITY_EXHAUSTED/);
+ const frozen=structuredClone(service.pending());assert.equal(frozen.protocol_state,'BOOTSTRAP');
+ const missing={status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'}};const calls=[];
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async(request,consume)=>{calls.push(request);if(request.mode==='DISCOVER')return missing;await consume(readyImageResponse());throw Object.assign(new Error('test checkpoint stop'),{intentionalStop:true,checkpointPersisted:true});}};
+ await assert.rejects(()=>runImageGeneration({service,session,provider,discoveryOnly:true}),/IMAGE_LEDGER_RUN_MISSING/);assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);
+ calls.length=0;const result=await runImageGeneration({service,session,provider});assert.equal(result.status,'CHECKPOINTED');assert.deepEqual(calls.map(x=>x.mode),['DISCOVER','START']);assert.deepEqual(calls[1],first[0]);assert.equal(service.pending().operation_nonce,frozen.operation_nonce);assert.equal(service.pending().protocol_state,'READY');
+});
+test('unknown or expired BOOTSTRAP cannot be treated as a safe new START',async()=>{
+ const {service,session}=await confirmedService();await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{throw new Error('network');}}}),/network/);
+ const calls=[];let response={status:'UNKNOWN'};const provider={fetchImageMediaDelta:async()=>[],generateImages:async request=>{calls.push(request);return response;}};
+ await assert.rejects(()=>runImageGeneration({service,session,provider}),/UNKNOWN/);assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);calls.length=0;
+ response={status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'}};const originalNow=Date.now;
+ try{Date.now=()=>originalNow()+8*86400000;await assert.rejects(()=>runImageGeneration({service,session,provider}),/IMAGE_LEDGER_RUN_MISSING/);}finally{Date.now=originalNow;}
+ assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);
+});
