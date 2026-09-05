@@ -597,6 +597,12 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     control_config_hash: controlConfigHash,
     relevant_audit_set_hash: relevantAuditSetHash,
     audit_entry_count: audits.length,
+    // These counters were already read back above. Reporting them must never
+    // reset reservations or imply that a valid signature admits a new run.
+    capacity_snapshot: {
+      ...Object.fromEntries(["capacity_limit_bytes", "headroom_bytes", "worst_case_run_bytes", "reserved_bytes", "live_reservations", "unfinalized_inventory"].map(key => [key, Number(installedCapacity[key])])),
+      database_reported_storage_bytes: control.current_storage_bytes,
+    },
   };
 }
 
@@ -618,6 +624,7 @@ async function main() {
     control_config_hash: result.control_config_hash,
     relevant_audit_set_hash: result.relevant_audit_set_hash,
     audit_entry_count: result.audit_entry_count,
+    capacity_snapshot: result.capacity_snapshot,
     attestation_generation: result.envelope.payload.attestation_generation,
     capacity_generation: result.envelope.payload.capacity_generation,
     renew_at_ms: result.envelope.payload.renew_at_ms,

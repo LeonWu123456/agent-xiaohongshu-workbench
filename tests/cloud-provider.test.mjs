@@ -3554,3 +3554,24 @@ test('manual draft empty tags remain legal only in the frozen single-image varia
  const input=await d36StartInput({operationOverrides:{page_count:3,confirmed_draft:{...d36ConfirmedDraft(),tags:session.text_draft.tags},image_variant_target:session.image_variant_target}});assert.deepEqual(input.operation_snapshot.confirmed_draft.tags,c.tags);
  assert.throws(()=>normalizeAuthoringSession({...session,image_variant_target:undefined}),/BODY_INVALID|TAGS_INVALID/);
 });
+
+
+test('real capacity rejection exposes already measured numeric diagnostics without changing the guard',async()=>{
+ const fixture=runtimeLedgerFixture({mode:'START'});
+ const fetchImpl=async(url,options)=>{const body=JSON.parse(options.body);if(body[0]==='MEMORY')return {ok:true,json:async()=>({result:100_000_000})};return fixture.fetchImpl(url,options);};
+ const ledger=createUpstashImageLedgerFromEnv(fixture.env,{fetchImpl});
+ await assert.rejects(()=>ledger.assertProductionReady({mode:'START',appScopeId:fixture.appScope,runId:fixture.runId}),error=>{
+  assert.equal(error.message,'IMAGE_LEDGER_CAPACITY_EXHAUSTED');assert.equal(error.details.physical_bytes,200_000_000);assert.equal(error.details.reserved_bytes,0);assert.equal(error.details.next_run_bytes,fixture.envelope.payload.worst_case_run_bytes);assert.equal(error.details.capacity_limit_bytes,fixture.envelope.payload.capacity_limit_bytes);return true;
+ });assert.equal(fixture.commands.some(c=>c[0]==='EVAL'),false);
+});
+
+
+test('attestation report exposes existing capacity counters without resetting live reservations',async()=>{
+ const fixture=attestorFixture();await buildAndInstallAttestation({env:fixture.env,fetchImpl:fixture.fetchImpl});
+ fixture.state.capacity.reserved_bytes=2800000;fixture.state.capacity.live_reservations=2;fixture.state.capacity.unfinalized_inventory=2;
+ const result=await buildAndInstallAttestation({env:fixture.env,fetchImpl:fixture.fetchImpl});
+ assert.equal(result.capacity_snapshot.reserved_bytes,2800000);assert.equal(result.capacity_snapshot.live_reservations,2);
+ assert.equal(result.capacity_snapshot.capacity_limit_bytes,100000000);assert.equal(result.capacity_snapshot.database_reported_storage_bytes,1000000);
+ assert.equal(fixture.state.capacity.reserved_bytes,2800000);
+ assert.ok(!JSON.stringify(result.capacity_snapshot).includes(fixture.env.UPSTASH_REDIS_REST_TOKEN));
+});
