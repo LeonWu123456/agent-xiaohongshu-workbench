@@ -1,6 +1,6 @@
 import {createProfileV2} from '../profile-v2.mjs';
 import {createMediaAssetStore} from '../media-asset-store.mjs';
-import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
+import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,beginNewDraftV3,forkDraftForReferenceEditV3,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
 import {importEditableContent} from './model.mjs';
 export const STORAGE_KEYS={envelope:'xiaoshimei-studio.workspace.v2',envelopeV3:WORKSPACE_ENVELOPE_V3_STORAGE_KEY};
 export function createVisualStorage({storage=globalThis.localStorage,mediaStore=createMediaAssetStore(),lockManager=globalThis.navigator?.locks}={}) {
@@ -66,6 +66,30 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
     // A backup enters as a new editable draft, never as a replacement authority.
     return save(parsed,{asNew:true,profile:importedProfile,generationSession:importedSession});
   }
+  const drafts=()=>base?.workspace?.drafts.map(record=>({
+    draft_id:record.draft_id,
+    title:record.content_package?.selectedTitle||record.content_package?.pages?.[0]?.title||'未命名作品',
+    updated_at:record.updated_at,
+    created_at:record.created_at,
+    page_count:record.content_package?.visible_pages||record.content_package?.pages?.length||0,
+    pending:Boolean(record.pending_image_operation),
+    active:record.draft_id===base.workspace.active_draft_id,
+  }))||[];
+  async function createDraft(content){
+    if(!base)await load();
+    if(base?.workspace&&activeDraftRecordV3(base.workspace).pending_image_operation)throw new Error('当前稿有未完成的配图任务；请先检查或切换作品。');
+    return save(content,{asNew:true,generationSession:null});
+  }
+  async function duplicateActiveDraft(){
+    if(!base)await load();
+    if(!base?.workspace)throw new Error('当前还没有可复制的作品。');
+    if(activeDraftRecordV3(base.workspace).pending_image_operation)throw new Error('当前稿有未完成的配图任务；不能复制这个运行中的稿件。');
+    const fork=forkDraftForReferenceEditV3(base.workspace,{newDraftId:crypto.randomUUID()});
+    const receipt=await coordinator.fullCas({expectedWorkspaceToken:base.workspace_token,workspace:fork.workspace,reason:'VISUAL_DUPLICATE_DRAFT'});
+    if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新作品库；未复制。':'复制作品失败：'+receipt.code);
+    base=coordinator.snapshot();
+    return {content:await viewOf(base.workspace),workspace:base.workspace,receipt};
+  }
   const activeRecord=()=>base?.workspace?activeDraftRecordV3(base.workspace):null;
   const recoveryDrafts=()=>base?.workspace?.drafts?.filter(d=>d.draft_id!==base.workspace.active_draft_id&&d.pending_image_operation).map(d=>({draft_id:d.draft_id,title:d.content_package?.selectedTitle||d.content_package?.pages?.[0]?.title||'恢复稿',protocol_state:d.pending_image_operation.protocol_state,updated_at:d.updated_at}))||[];
   async function activateDraft(draftId){
@@ -75,7 +99,7 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
     if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新草稿；未切换。':'恢复稿切换失败：'+receipt.code);
     return sync({allowPending:true});
   }
-  return {load,save,importFile,sync,activateDraft,recoveryDrafts,mediaStore,coordinator,workspace:()=>base?.workspace,activeRecord,
+  return {load,save,importFile,sync,activateDraft,recoveryDrafts,drafts,createDraft,duplicateActiveDraft,mediaStore,coordinator,workspace:()=>base?.workspace,activeRecord,
     session:()=>activeRecord()?.generation_session||null,
     pending:()=>activeRecord()?.pending_image_operation||null,
     profile:()=>base?.workspace?.profile||createProfileV2(),

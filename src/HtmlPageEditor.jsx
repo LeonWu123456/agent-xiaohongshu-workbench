@@ -303,7 +303,7 @@ function pageDisplayAccentColor(page) {
   return formerSystemAccents.includes(color) ? "#fd8502" : page.accent;
 }
 
-function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAspect, state, alt, selected, objectSelected, interactionMode, onSelect, onSelectObject, onEdit, onObjectPointerDown, onObjectPointerMove, onObjectPointerUp, onObjectPointerCancel, renderOnly = false }) {
+function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAspect, state, alt, selected, objectSelected, interactionMode, onSelect, onSelectObject, onEdit, onObjectPointerDown, onObjectPointerMove, onObjectPointerUp, onObjectPointerCancel, directControls = null, renderOnly = false }) {
   const dragRef = useRef(null);
   const [orientation, setOrientation] = useState("unknown");
   const src = String(imageStyle?.src || "").trim();
@@ -336,7 +336,7 @@ function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAs
         onObjectPointerMove?.(event, objectId);
         return;
       }
-      const drag = interactionMode === "edit" ? dragRef.current : null;
+      const drag = (interactionMode === "edit" || interactionMode === "direct") ? dragRef.current : null;
       if (!drag) return;
       const rect = event.currentTarget.getBoundingClientRect();
       onEdit?.(id, {
@@ -370,11 +370,13 @@ function PageImage({ id, objectId, imageStyle, mediaRole, fitPolicy, preferredAs
         setOrientation(image.naturalHeight > image.naturalWidth * 1.08 ? "portrait" : image.naturalWidth > image.naturalHeight * 1.08 ? "landscape" : "square");
       }}
     />
+    {directControls}
   </figure>;
 }
 
 export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedImage, selectedObject, interactionMode = "edit", onSelectImage, onSelectObject, onImageEdit, onObjectEdit, onPagePatch, renderOnly = false }) {
   const directMoveRef = useRef(null);
+  const directResizeRef = useRef(null);
   const panels = Array.isArray(page.info_panels) ? page.info_panels : [];
   const panelMeta = editorialPanelMeta(page);
   const paragraphs = bodyParagraphs(page.body);
@@ -391,11 +393,12 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
   const patchPanel = (index, patch) => onPagePatch?.({
     info_panels: panels.map((panel, panelIndex) => panelIndex === index ? { ...panel, ...patch } : panel),
   });
-  const beginObjectMove = (event, objectId) => {
+  const beginObjectMove = (event, objectId, force = false) => {
     event.stopPropagation();
     onSelectObject?.(objectId);
-    if (interactionMode !== "move" || (Number.isFinite(event.button) && event.button !== 0)) return;
-    const pageElement = event.currentTarget.closest(".html-page");
+    if ((!force && interactionMode !== "move") || (Number.isFinite(event.button) && event.button !== 0)) return;
+    const target = event.currentTarget.closest?.("[data-editor-object-id]") || event.currentTarget;
+    const pageElement = target.closest?.(".html-page");
     const pageRect = pageElement?.getBoundingClientRect();
     if (!pageRect) return;
     event.preventDefault();
@@ -409,16 +412,30 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
       pageHeight: pageRect.height,
       start: objectEditFor(state, objectId),
       next: null,
-      target: event.currentTarget,
+      target,
     };
   };
   const continueObjectMove = (event, objectId) => {
     const drag = directMoveRef.current;
     if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    const next = objectDragEdit(drag.start, event.clientX - drag.startX, event.clientY - drag.startY, drag.pageWidth, drag.pageHeight);
+    let next = objectDragEdit(drag.start, event.clientX - drag.startX, event.clientY - drag.startY, drag.pageWidth, drag.pageHeight);
     drag.target.style.setProperty("--object-x", `${next.x}cqw`);
     drag.target.style.setProperty("--object-y", `${next.y}cqh`);
+    const pageRect = drag.target.closest?.(".html-page")?.getBoundingClientRect();
+    const rect = drag.target.getBoundingClientRect();
+    if (pageRect) {
+      let correctionX = 0, correctionY = 0;
+      if (rect.left < pageRect.left) correctionX += (pageRect.left - rect.left) / Math.max(1, pageRect.width) * 100;
+      if (rect.right > pageRect.right) correctionX -= (rect.right - pageRect.right) / Math.max(1, pageRect.width) * 100;
+      if (rect.top < pageRect.top) correctionY += (pageRect.top - rect.top) / Math.max(1, pageRect.height) * 100;
+      if (rect.bottom > pageRect.bottom) correctionY -= (rect.bottom - pageRect.bottom) / Math.max(1, pageRect.height) * 100;
+      if (correctionX || correctionY) {
+        next = { ...next, x: next.x + correctionX, y: next.y + correctionY };
+        drag.target.style.setProperty("--object-x", `${next.x}cqw`);
+        drag.target.style.setProperty("--object-y", `${next.y}cqh`);
+      }
+    }
     drag.next = next;
   };
   const finishObjectMove = (event, objectId, commit = true) => {
@@ -428,7 +445,49 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
     directMoveRef.current = null;
     if (commit && drag.next) onObjectEdit?.(objectId, drag.next);
   };
-  const objectMoveHandlers = (objectId) => renderOnly ? {} : {
+  const beginObjectResize = (event, objectId) => {
+    event.stopPropagation();
+    onSelectObject?.(objectId);
+    if (Number.isFinite(event.button) && event.button !== 0) return;
+    const target = event.currentTarget.closest?.("[data-editor-object-id]");
+    const pageRect = target?.closest?.(".html-page")?.getBoundingClientRect();
+    if (!target || !pageRect) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    directResizeRef.current = { objectId, pointerId:event.pointerId, startX:event.clientX, startY:event.clientY, pageWidth:pageRect.width, pageHeight:pageRect.height, start:objectEditFor(state, objectId), target, next:null };
+  };
+  const continueObjectResize = (event, objectId) => {
+    const drag = directResizeRef.current;
+    if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const normalized = ((event.clientX-drag.startX)/Math.max(1,drag.pageWidth) + (event.clientY-drag.startY)/Math.max(1,drag.pageHeight));
+    let scale = Math.min(1.4, Math.max(.65, drag.start.scale + normalized * 1.25));
+    drag.target.style.setProperty("--object-scale", scale);
+    const pageRect = drag.target.closest?.(".html-page")?.getBoundingClientRect();
+    const rect = drag.target.getBoundingClientRect();
+    if (pageRect && rect.width > 0 && rect.height > 0) {
+      const centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
+      const maxWidth = Math.max(1, 2 * Math.min(centerX - pageRect.left, pageRect.right - centerX));
+      const maxHeight = Math.max(1, 2 * Math.min(centerY - pageRect.top, pageRect.bottom - centerY));
+      const fitFactor = Math.min(1, maxWidth / rect.width, maxHeight / rect.height);
+      if (fitFactor < 1) { scale = Math.max(.65, scale * fitFactor); drag.target.style.setProperty("--object-scale", scale); }
+    }
+    drag.next = { ...drag.start, scale };
+  };
+  const finishObjectResize = (event, objectId, commit = true) => {
+    const drag = directResizeRef.current;
+    if (!drag || drag.objectId !== objectId || drag.pointerId !== event.pointerId) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    directResizeRef.current = null;
+    if (commit && drag.next) onObjectEdit?.(objectId, drag.next);
+  };
+  const directControls = (objectId) => renderOnly || interactionMode !== "direct" || selectedObject !== objectId ? null : <span className="html-editor-direct-controls" aria-label="对象直接调整">
+    <button type="button" className="html-editor-direct-handle is-move" aria-label="拖动模块" title="拖动模块" onPointerDown={(event)=>beginObjectMove(event,objectId,true)} onPointerMove={(event)=>continueObjectMove(event,objectId)} onPointerUp={(event)=>finishObjectMove(event,objectId)} onPointerCancel={(event)=>finishObjectMove(event,objectId,false)}>↕</button>
+    <button type="button" className="html-editor-direct-handle is-resize" aria-label="缩放模块" title="缩放模块" onPointerDown={(event)=>beginObjectResize(event,objectId)} onPointerMove={(event)=>continueObjectResize(event,objectId)} onPointerUp={(event)=>finishObjectResize(event,objectId)} onPointerCancel={(event)=>finishObjectResize(event,objectId,false)}>↘</button>
+  </span>;
+  const objectMoveHandlers = (objectId) => renderOnly ? {} : interactionMode === "direct" ? {
+    onClick: (event) => { event.stopPropagation(); onSelectObject?.(objectId); },
+  } : {
     onPointerDown: (event) => beginObjectMove(event, objectId),
     onPointerMove: (event) => continueObjectMove(event, objectId),
     onPointerUp: (event) => finishObjectMove(event, objectId),
@@ -465,12 +524,14 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
       {renderOnly
         ? <h1 className="html-page__title"><PhraseSafeTitle value={page.title} phrases={page.highlight_phrases} maxUnbrokenLength={isPrimaryCover ? 7 : 10} /></h1>
         : <EditableText key={`title-${page.title}`} as="h1" className="html-page__title" value={page.title} highlightPhrases={page.highlight_phrases} phraseSafe phraseSafeMaxLength={isPrimaryCover ? 7 : 10} onSelect={() => onSelectObject?.("title-block")} onCommit={(title) => onPagePatch?.({ title })} />}
+      {directControls("title-block")}
     </header>
 
     {state.layout_id === "cover-poster" && <div className={`html-page__cover-lede html-editor-object ${selectedObject === "cover-lede" ? "is-object-selected" : ""}`} data-editor-object-id="cover-lede" style={objectTransformStyle(state, "cover-lede")} {...objectMoveHandlers("cover-lede")}>
       {renderOnly
         ? <p>{paragraphs[0]}</p>
         : <EditableText key={`cover-lede-${paragraphs[0]}`} as="p" value={paragraphs[0]} onSelect={() => onSelectObject?.("cover-lede")} onCommit={(next) => patchParagraph(0, next)} />}
+      {directControls("cover-lede")}
     </div>}
 
     {panels.length ? <section className="html-page__panels">
@@ -482,6 +543,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
           {renderOnly
             ? <p><HighlightedText value={panel.body} phrases={panelMeta[index].highlightPhrases} /></p>
             : <EditableText key={`panel-body-${panel.body}`} as="p" value={panel.body} highlightPhrases={panelMeta[index].highlightPhrases} onSelect={() => onSelectObject?.(`panel-${index}-copy`)} onCommit={(body) => patchPanel(index, { body })} />}
+          {directControls(`panel-${index}-copy`)}
         </div>
         <PageImage
           id={`panel-${index}`}
@@ -502,6 +564,7 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
           onObjectPointerMove={continueObjectMove}
           onObjectPointerUp={finishObjectMove}
           onObjectPointerCancel={(event, objectId) => finishObjectMove(event, objectId, false)}
+          directControls={directControls(`panel-${index}-image`)}
           renderOnly={renderOnly}
         />
       </article>)}
@@ -510,8 +573,9 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
         {paragraphs.map((paragraph, index) => renderOnly
           ? <p key={`${index}-${paragraph.slice(0, 12)}`}><HighlightedText value={paragraph} phrases={page.highlight_phrases} /></p>
           : <EditableText key={`${index}-${paragraph.slice(0, 12)}`} as="p" value={paragraph} highlightPhrases={page.highlight_phrases} onSelect={() => onSelectObject?.("body-block")} onCommit={(next) => patchParagraph(index, next)} />)}
+        {directControls("body-block")}
       </div>
-      <PageImage
+      {page.visual !== "none" && <PageImage
         id={primaryImageId}
         objectId="hero-image"
         imageStyle={primaryImageStyle}
@@ -530,8 +594,9 @@ export function HtmlPageCanvas({ page, pageIndex, totalPages, state, selectedIma
         onObjectPointerMove={continueObjectMove}
         onObjectPointerUp={finishObjectMove}
         onObjectPointerCancel={(event, objectId) => finishObjectMove(event, objectId, false)}
+        directControls={directControls("hero-image")}
         renderOnly={renderOnly}
-      />
+      />}
     </section>}
 
   </article>;

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { generateContentPackage } from '../src/content-engine.mjs';
-import { changePage, replacePageImage, listPageObjects, importEditableContent } from '../src/visual-workbench/model.mjs';
+import { changePage, replacePageImage, listPageObjects, importEditableContent, createBlankContent, addContentPage, duplicateContentPage, deleteContentPage, reorderContentPage, clampPageIndex } from '../src/visual-workbench/model.mjs';
 test('visual editor changes real content, keeps unrelated pages and original immutable',()=>{
  const before=generateContentPackage({topic:'生活有自己的节奏'});
  const after=changePage(before,0,{title:'改后的标题'});
@@ -48,4 +49,39 @@ test('import creates a new editable draft and preserves the existing draft',asyn
  const imported=changePage(createDemo(),0,{title:'旧格式导入测试'});
  const result=await a.importFile(JSON.stringify(imported));assert.equal(result.workspace.drafts.length,2);
  assert.equal(result.content.pages[0].title,'旧格式导入测试');assert.equal(result.workspace.drafts[0].content_package.pages[0].title,'给生活，留一点空白');
+});
+
+
+test('direct production editor has no edit/move mode switch and exposes direct handles',async()=>{
+ const [main,editor]=await Promise.all([readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'),readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8')]);
+ assert.match(main,/interactionMode="direct"/);assert.doesNotMatch(main,/setMode\(|改字 \/ 取景|移动布局/);
+ assert.match(editor,/html-editor-direct-handle is-move/);assert.match(editor,/html-editor-direct-handle is-resize/);
+});
+
+test('page management adds a blank page, duplicates, reorders and never deletes the last page',()=>{
+ let content=createBlankContent();assert.equal(content.visible_pages,1);
+ content=addContentPage(content,0);assert.equal(content.visible_pages,2);assert.equal(content.pages[1].title,'点击输入标题');assert.equal(content.pages[1].visual,'none');assert.equal(listPageObjects(content.pages[1],1).some(x=>x.kind==='image'),false);
+ content=duplicateContentPage(content,0);assert.equal(content.visible_pages,3);
+ content=reorderContentPage(content,0,2);assert.equal(content.pages[2].title,'未命名作品');
+ content=deleteContentPage(content,1);assert.equal(content.visible_pages,2);
+ const one=createBlankContent();assert.throws(()=>deleteContentPage(one,0),/page cannot be deleted/);
+});
+
+test('workspace v3 library creates, duplicates and opens drafts without a second store',async()=>{
+ const storage=memoryStorage(),a=adapter(storage);await a.load();
+ await a.createDraft(createBlankContent());assert.equal(a.drafts().length,1);const first=a.drafts()[0].draft_id;
+ const duplicated=await a.duplicateActiveDraft();assert.equal(duplicated.workspace.drafts.length,2);assert.equal(a.drafts().filter(x=>x.active).length,1);
+ await a.activateDraft(first);assert.equal(a.drafts().find(x=>x.active).draft_id,first);assert.equal(storage.data.size,1);
+ a.dispose();
+});
+
+
+test('blank page image absence survives schema round-trip and upload re-enables the hero image',()=>{
+ const content=addContentPage(createBlankContent(),0);const roundtrip=importEditableContent(content);const page=roundtrip.pages[1];
+ assert.equal(page.visual,'none');assert.equal(listPageObjects(page,1).some(x=>x.kind==='image'),false);
+ const withImage=replacePageImage(page,'hero','/assets/xiaoshimei-character-full.png');assert.equal(withImage.visual,'character');assert.ok(listPageObjects(withImage,1).some(x=>x.id==='hero-image'));
+});
+
+test('page index clamps after undo, delete or any page-count contraction',()=>{
+ assert.equal(clampPageIndex({visible_pages:1,pages:[{}]},1),0);assert.equal(clampPageIndex({visible_pages:4,pages:[{},{},{},{}]},9),3);assert.equal(clampPageIndex({visible_pages:4,pages:[{},{},{},{}]},2),2);
 });
