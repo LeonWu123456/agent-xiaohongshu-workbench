@@ -235,3 +235,28 @@ test('mobile cover continuation preserves the complete opening text across pages
  const p={...structuredClone(c.pages[0]),body:'Context stays too.',page_role:'method',info_panels:[0,1,2].map(i=>({title:'Step '+i,body:'Original step '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'}}))};c.pages.push(p);c.visible_pages=2;
  const result=composeEditableContent(c,{force:true});assert.equal(result.pages.length,4);const again=composeEditableContent(result,{force:true});assert.equal(again.pages.length,4);assert.deepEqual(result.pages.map(p=>p.body),again.pages.map(p=>p.body));
 });
+
+
+test('mobile reflow does not move a panel scene body into another source page',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();
+ const makePage=n=>({...structuredClone(c.pages[0]),page_role:'method',title:'Method '+n,body:'Page context '+n,info_panels:[0,1,2].map(i=>({id:'p'+i,title:'Scene '+n+i,body:'First scene sentence。'+('Exact explanation '+n+i+' ').repeat(4),image_style:{src:'/assets/xiaoshimei-character-full.png'}}))});
+ c.pages=[makePage(0),makePage(1)];c.visible_pages=2;const result=composeEditableContent(c,{force:true});
+ assert.equal(result.pages[0].body,c.pages[0].info_panels[0].body);assert.equal(result.pages[3].body,c.pages[1].info_panels[0].body);
+ assert.ok(result.pages.every(p=>!p.html_state.free_objects.some(o=>o.id==='opening-continuation')));
+});
+test('short text-only panel pages keep fitting instead of manufacturing a ninth page',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();
+ const p={...c.pages[0],title:'Three short notes',body:'',info_panels:[0,1,2].map(i=>({id:'p'+i,title:'Note '+i,body:'Keep '+i,image_style:{src:'',hidden:true}}))};c.pages=[p,structuredClone(p),structuredClone(p)];c.visible_pages=3;
+ const before=structuredClone(c),result=composeEditableContent(c,{force:true});assert.equal(result.pages.length,3);assert.deepEqual(c,before);
+ for(const page of result.pages)assert.equal(page.info_panels.length,3);
+});
+
+
+test('browser-owned paragraph serialization preserves blank lines independent of visual margins',async()=>{
+ const {readEditablePlainText}=await import('../src/html-layout.mjs');
+ const txt=nodeValue=>({nodeType:3,nodeValue}),el=(tagName,...childNodes)=>({nodeType:1,tagName,childNodes});
+ assert.equal(readEditablePlainText(el('DIV',txt('a'),el('DIV',el('BR')),el('DIV',txt('b')),el('DIV',el('BR')),el('DIV',txt('c')))),'a\n\nb\n\nc');
+ for(const text of ['a\nb','a\n\nb','a\n\n\nb','\na\n','', 'a\n\n'])assert.equal(readEditablePlainText(el('DIV',txt(text))),text);
+ assert.equal(readEditablePlainText(el('DIV',el('DIV',txt('a')),el('DIV',el('BR')))),'a\n');
+ assert.equal(readEditablePlainText(el('DIV',txt('a'),el('SPAN',txt('b')),el('BR'),txt('c'))),'ab\nc');
+});

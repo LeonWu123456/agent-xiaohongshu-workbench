@@ -3502,3 +3502,17 @@ test("cloud response budget fails closed before a browser receives an oversized 
   assert.ok(publicTileBudgetForResponse(24) < publicTileBudgetForResponse(4));
   assert.ok(publicTileBudgetForResponse(24) * 24 <= 2_300_000);
 });
+
+
+test('explicit Studio-auth Preview uses a fixed protected origin without inheriting Vercel session admission',async()=>{
+ const env={...accessEnv(),VERCEL_ENV:'preview',VERCEL_URL:'immutable-build.vercel.app',XIAOSHIMEI_PREVIEW_AUTH_MODE:'STUDIO_ACCESS_SESSION'};
+ assert.equal(previewUsesVercelAuthentication(env),false);assert.equal(inspectServerAccessConfig(env).appOrigin,'https://studio.example');
+ const handle=createProviderHandler({env,sessionId:'fixed-preview-test'}),health=responseProbe();
+ await handle({method:'GET',query:{route:'config'},headers:{}},health);assert.equal(health.body.authentication_mode,'STUDIO_ACCESS_SESSION');assert.equal(health.body.authenticated,false);
+ const unauthorized=responseProbe();await handle({method:'POST',query:{route:'text-draft'},headers:sameOriginHeaders(env),body:{}},unauthorized);assert.equal(unauthorized.statusCode,401);
+ const stale=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers:sameOriginHeaders({XIAOSHIMEI_APP_ORIGIN:'https://immutable-build.vercel.app'}),body:{code:'open-sesame'}},stale);assert.equal(stale.statusCode,403);
+ const login=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers:sameOriginHeaders(env),body:{code:'open-sesame'}},login);assert.equal(login.statusCode,200);
+ const cookie=cookiePairFromSetCookie(setCookieValues(login).at(-1));const authenticated=responseProbe();await handle({method:'GET',query:{route:'config'},headers:{cookie}},authenticated);assert.equal(authenticated.body.authenticated,true);
+ const invalid={...env,XIAOSHIMEI_PREVIEW_AUTH_MODE:'typo'};assert.equal(previewUsesVercelAuthentication(invalid),false);assert.equal(inspectServerAccessConfig(invalid).ready,false);
+ assert.equal(inspectServerAccessConfig({...env,VERCEL_ENV:'production'}).appOrigin,env.XIAOSHIMEI_APP_ORIGIN);
+});

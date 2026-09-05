@@ -160,14 +160,19 @@ function configuredPreviewOrigin(env = process.env) {
 }
 
 export function previewUsesVercelAuthentication(env = process.env) {
-  return configuredServerManaged(env) && Boolean(configuredPreviewOrigin(env));
+  return configuredServerManaged(env) && Boolean(configuredPreviewOrigin(env))
+    && (!env.XIAOSHIMEI_PREVIEW_AUTH_MODE || env.XIAOSHIMEI_PREVIEW_AUTH_MODE === "VERCEL_AUTHENTICATION");
 }
 
 export function inspectServerAccessConfig(env = process.env) {
   const accessCodeSha256 = String(env?.XIAOSHIMEI_ACCESS_CODE_SHA256 || "").trim().toLowerCase();
   const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
-  const appOrigin = configuredPreviewOrigin(env) || configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
-  const ready = /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
+  const mode = String(env?.XIAOSHIMEI_PREVIEW_AUTH_MODE || "VERCEL_AUTHENTICATION");
+  const studioPreview = env?.VERCEL_ENV === "preview" && mode === "STUDIO_ACCESS_SESSION";
+  const modeValid = env?.VERCEL_ENV !== "preview" || ["VERCEL_AUTHENTICATION", "STUDIO_ACCESS_SESSION"].includes(mode);
+  const appOrigin = studioPreview ? configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN)
+    : configuredPreviewOrigin(env) || configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
+  const ready = modeValid && /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
   const appScope = appOrigin ? `xiaoshimei-studio:${createHash("sha256").update(appOrigin).digest("hex").slice(0, 32)}` : "";
   return { ready, accessCodeSha256, sessionSecret, appOrigin, appScope };
 }

@@ -396,3 +396,26 @@ export function freeResizeGeometry(item,before,after,direction,pageWidth,pageHei
  const a=rot(ax*before.width/2,ay*before.height/2),b=rot(ax*after.width/2,ay*after.height/2);
  return {x:(item.x*pageWidth/100+before.width/2+a[0]-b[0]-after.width/2)/pageWidth*100,y:(item.y*pageHeight/100+before.height/2+a[1]-b[1]-after.height/2)/pageHeight*100};
 }
+
+
+// Serialize browser editing structure, never CSS-aware innerText. An empty
+// <div><br></div> is one empty line, not both a paragraph break and a BR.
+export function readEditablePlainText(root) {
+ const blocks=new Set(['DIV','P','LI','H1','H2','H3','PRE','BLOCKQUOTE']);
+ const read=node=>{
+  if(node.nodeType===3)return node.nodeValue||'';
+  if(node.nodeType!==1)return '';
+  if(node.tagName==='BR')return '\n';
+  const children=Array.from(node.childNodes||[]);
+  if(blocks.has(node.tagName)&&children.length===1&&children[0].tagName==='BR')return '';
+  let text='',previousBlock=false,seen=false;
+  for(const child of children){
+   if(child.nodeType!==1&&child.nodeType!==3)continue;
+   const block=blocks.has(child.tagName),value=read(child);
+   if(seen&&(previousBlock||block))text+='\n';
+   text+=value;previousBlock=block;seen=true;
+  }
+  return text;
+ };
+ return read(root).replace(/\u00a0/g,' ');
+}

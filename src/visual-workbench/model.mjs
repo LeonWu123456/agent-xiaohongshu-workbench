@@ -118,7 +118,7 @@ function layoutOverflow(pageIndex,code='EDITABLE_LAYOUT_NEEDS_SPLIT'){
 }
 // Pagination reuses the existing page/undo contract. Only complete, canonical
 // multi-panel groups can be split automatically; custom/deleted objects stay put.
-function mobilePages(content,{force,pageIndex}){
+function mobilePages(content,{force,pageIndex,measureText}){
  const out=[],touched=new Set(),splitStarts=new Map();let changed=false;
  content.pages.forEach((page,i)=>{
   if(i>=content.visible_pages||(pageIndex!==null&&pageIndex!==i)||(!force&&page.html_state?.free_objects)){out.push(page);return;}
@@ -126,6 +126,9 @@ function mobilePages(content,{force,pageIndex}){
   const canonical=new Set(['eyebrow','title',...panels.flatMap((_,j)=>[`panel-${j}-title`,`panel-${j}-body`,`panel-${j}`])]);
   const intact=!objects||(objects.some(o=>o.binding==='title')&&(!page.eyebrow?.trim()||objects.some(o=>o.binding==='eyebrow'))&&objects.every(o=>canonical.has(o.binding))&&panels.every((p,j)=>objects.some(o=>o.binding===`panel-${j}-body`)&&objects.some(o=>o.binding===`panel-${j}-title`)&&(!p.image_style?.src||p.image_style.hidden||objects.some(o=>o.binding===`panel-${j}`))));
   if(panels.length<3||!intact){touched.add(out.length);out.push(page);return;}
+  // Split only when the current page actually cannot fit at readable type.
+  try{arrangeEditablePage(page,i,{measureText});touched.add(out.length);out.push(page);return;}
+  catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;}
   changed=true;splitStarts.set(i,out.length);
   panels.forEach((panel,j)=>{
 
@@ -150,7 +153,7 @@ function mobilePages(content,{force,pageIndex}){
  // This only runs in explicit whole-work reflow/new composition, never on load
  // or on a manually edited/deleted object set. A second reflow is idempotent.
  const cover=out[0],coverObjects=cover?.html_state?.free_objects;
- if(pageIndex===null&&splitStarts.has(1)&&content.visible_pages>1&&(force||!coverObjects)&&!cover.info_panels?.length&&cover.image_style?.src&&cover.body?.length>60&&(!coverObjects||(coverObjects.some(o=>o.binding==='body')&&coverObjects.every(o=>['title','eyebrow','body','hero'].includes(o.binding))))){
+ if(!content.pages[0]?.info_panels?.length&&pageIndex===null&&splitStarts.has(1)&&content.visible_pages>1&&(force||!coverObjects)&&!cover.info_panels?.length&&cover.image_style?.src&&cover.body?.length>60&&(!coverObjects||(coverObjects.some(o=>o.binding==='body')&&coverObjects.every(o=>['title','eyebrow','body','hero'].includes(o.binding))))){
   const parts=/^([\s\S]*?[。！？!?])([\s\S]+)$/.exec(cover.body);
   if(parts&&parts[2].trim()){
    out[0]={...cover,body:parts[1]};const target=splitStarts.get(1),next=out[target];
@@ -202,7 +205,7 @@ export function mobileReadability(page){
 }
 export function composeEditableContent(content,{force=false,pageIndex=null,measureText}={}){
  if(!content?.pages?.length)throw new TypeError('EDITABLE_CONTENT_MISSING');
- const prepared=mobilePages(content,{force,pageIndex});
+ const prepared=mobilePages(content,{force,pageIndex,measureText});
  const pages=applySmartLayoutSequence(prepared.pages).map((page,i)=>prepared.touched.has(i)?arrangeEditablePage(page,i,{measureText}):prepared.pages[i]);
  return invalidateVisualReview({...content,pages,...(prepared.changed?{visible_pages:content.visible_pages+pages.length-content.pages.length,stage:'LOCAL_DRAFT'}:{})});
 }
