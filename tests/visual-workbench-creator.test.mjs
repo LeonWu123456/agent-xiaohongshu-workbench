@@ -213,3 +213,9 @@ test('full backup to empty origin preserves named pending recovery and all draft
  const occupied=storageAdapter(memoryStorage());await occupied.load();await occupied.save(createDemo());const before=JSON.stringify(occupied.workspace());await assert.rejects(()=>occupied.importFile(JSON.stringify(backup)),/PENDING_BACKUP_REQUIRES_EMPTY_WORKSPACE/);assert.equal(JSON.stringify(occupied.workspace()),before);
  service.dispose();restored.dispose();occupied.dispose();
 });
+
+
+test('empty-origin complete backup restore rejects incompatible Fabric edits before any workspace write',async()=>{
+ const storage=memoryStorage(),service=storageAdapter(storage);await service.load();await service.save(createDemo());const backup=await service.backup();backup.workspace.drafts[0].content_package.pages[0].editor_mode='fabric';
+ const empty=memoryStorage(),target=storageAdapter(empty);await target.load();await assert.rejects(()=>target.importFile(JSON.stringify(backup)));assert.equal(empty.data.size,0);assert.equal(target.workspace(),null);service.dispose();target.dispose();
+});

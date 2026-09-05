@@ -54,13 +54,14 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
   async function importFile(raw){
     let value=JSON.parse(raw);let content=value;let importedProfile=null;let importedSession=undefined;let importedDisplayName;
     if(value.schema==='xiaoshimei.workspace-backup.v3'){
+      const backup=await parseWorkspaceBackupV3(raw);
+      for(const record of backup.workspace.drafts)importEditableContent(record.content_package);
       if(!base)await load();
       if(!base.workspace){
         const receipt=await restoreWorkspaceBackupV3({serialized:raw,coordinator,mediaStore,expectedWorkspaceToken:base.workspace_token});
         if(!receipt.ok)throw new Error('BACKUP_RESTORE_NOT_COMMITTED:'+receipt.code);
         return {...await sync({allowPending:true}),restoredWorkspace:true,receipt};
       }
-      const backup=await parseWorkspaceBackupV3(raw);
       if(backup.workspace.drafts.some(record=>record.pending_image_operation))throw new Error('PENDING_BACKUP_REQUIRES_EMPTY_WORKSPACE: \u8fd9\u4efd\u5907\u4efd\u542b\u5f85\u6062\u590d\u4efb\u52a1\uff0c\u8bf7\u5728\u7a7a\u767d\u6d4f\u89c8\u5668\u5de5\u4f5c\u533a\u5bfc\u5165\u5b8c\u6574\u5907\u4efd\uff1b\u73b0\u6709\u4f5c\u54c1\u672a\u6539\u52a8\u3002');
       await mediaStore.importMediaAssets(backup.media_assets,{expectedRefs:backup.media_assets.map(a=>a.media_ref)});
       const record=activeDraftRecordV3(backup.workspace);content=record.content_package;importedSession=record.generation_session;importedProfile=backup.workspace.profile;importedDisplayName=record.display_name;

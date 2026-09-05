@@ -199,3 +199,8 @@ test('paragraph font and spacing survive free-object schema and persistence',asy
  assert.equal(state.free_objects[0].paragraph_gap,24);assert.equal(state.free_objects[0].font_size,42.66);
  const content=importEditableContent({...createBlankContent(),pages:[{...page,html_state:state}]});assert.equal(content.pages[0].html_state.free_objects[0].paragraph_gap,24);
 });
+
+
+test('editable browser descendants are not React-managed paragraph nodes',async()=>{
+ const editor=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');assert.match(editor,/ref=\{element=>syncFreeText\(element,item,page,editing===item.id\)\}/);assert.match(editor,/if\(!element\|\|isEditing\)return/);assert.match(editor,/element.replaceChildren/);assert.doesNotMatch(editor,/bodyParagraphs\(freeObjectText\(page,item\)\)\.map\(\(text,i\)=><div/);
+});
