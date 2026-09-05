@@ -1,6 +1,6 @@
 import {createProfileV2} from '../profile-v2.mjs';
 import {createMediaAssetStore} from '../media-asset-store.mjs';
-import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,forkDraftForReferenceEditV3,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
+import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,restoreWorkspaceBackupV3,forkDraftForReferenceEditV3,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
 import {importEditableContent} from './model.mjs';
 export const STORAGE_KEYS={envelope:'xiaoshimei-studio.workspace.v2',envelopeV3:WORKSPACE_ENVELOPE_V3_STORAGE_KEY};
 export function createVisualStorage({storage=globalThis.localStorage,mediaStore=createMediaAssetStore(),lockManager=globalThis.navigator?.locks}={}) {
@@ -54,7 +54,14 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
   async function importFile(raw){
     let value=JSON.parse(raw);let content=value;let importedProfile=null;let importedSession=undefined;let importedDisplayName;
     if(value.schema==='xiaoshimei.workspace-backup.v3'){
+      if(!base)await load();
+      if(!base.workspace){
+        const receipt=await restoreWorkspaceBackupV3({serialized:raw,coordinator,mediaStore,expectedWorkspaceToken:base.workspace_token});
+        if(!receipt.ok)throw new Error('BACKUP_RESTORE_NOT_COMMITTED:'+receipt.code);
+        return {...await sync({allowPending:true}),restoredWorkspace:true,receipt};
+      }
       const backup=await parseWorkspaceBackupV3(raw);
+      if(backup.workspace.drafts.some(record=>record.pending_image_operation))throw new Error('PENDING_BACKUP_REQUIRES_EMPTY_WORKSPACE: \u8fd9\u4efd\u5907\u4efd\u542b\u5f85\u6062\u590d\u4efb\u52a1\uff0c\u8bf7\u5728\u7a7a\u767d\u6d4f\u89c8\u5668\u5de5\u4f5c\u533a\u5bfc\u5165\u5b8c\u6574\u5907\u4efd\uff1b\u73b0\u6709\u4f5c\u54c1\u672a\u6539\u52a8\u3002');
       await mediaStore.importMediaAssets(backup.media_assets,{expectedRefs:backup.media_assets.map(a=>a.media_ref)});
       const record=activeDraftRecordV3(backup.workspace);content=record.content_package;importedSession=record.generation_session;importedProfile=backup.workspace.profile;importedDisplayName=record.display_name;
     }else if(value.schema==='xiaoshimei.workspace-backup.v2'){

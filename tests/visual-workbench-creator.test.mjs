@@ -203,3 +203,13 @@ test('failed editable layout preserves the completed paid-result record instead 
  const result=await runImageGeneration({provider,service,session,prepareContent:()=>{throw new Error('LAYOUT_REQUIRES_SPLIT');}});
  assert.equal(count,1);assert.equal(result.status,'COMPLETE');assert.equal(result.layout_error,'LAYOUT_REQUIRES_SPLIT');assert.equal(service.activeRecord().display_name,'Preserve result');assert.equal(service.activeRecord().content_package.body,session.text_draft.body);assert.equal(service.pending(),null);service.dispose();
 });
+
+
+test('full backup to empty origin preserves named pending recovery and all draft identities',async()=>{
+ const {service,session}=await confirmedService();await service.renameActiveDraft('Pending named work');
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async(input,consume)=>{await consume(readyImageResponse());return readyImageResponse();}};
+ await runImageGeneration({provider,service,session,discoveryOnly:true});const record=structuredClone(service.activeRecord());const backup=await service.backup();const restored=storageAdapter(memoryStorage());await restored.load();
+ await restored.importFile(JSON.stringify(backup));assert.equal(restored.activeRecord().draft_id,record.draft_id);assert.equal(restored.activeRecord().display_name,'Pending named work');assert.deepEqual(restored.pending(),record.pending_image_operation);assert.equal(restored.session().image_resume.resume_run_id,'run-mock-1');
+ const occupied=storageAdapter(memoryStorage());await occupied.load();await occupied.save(createDemo());const before=JSON.stringify(occupied.workspace());await assert.rejects(()=>occupied.importFile(JSON.stringify(backup)),/PENDING_BACKUP_REQUIRES_EMPTY_WORKSPACE/);assert.equal(JSON.stringify(occupied.workspace()),before);
+ service.dispose();restored.dispose();occupied.dispose();
+});
