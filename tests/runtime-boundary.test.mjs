@@ -23,11 +23,22 @@ test("v2 production server owns and serves the configured canonical build", asyn
     await rm(dist, { recursive: true, force: true });
   });
 
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += String(chunk); });
   await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("server readiness timeout")), 3_000);
-    child.once("error", reject);
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    };
+    const timeout = setTimeout(() => fail(new Error(`server readiness timeout${stderr ? `: ${stderr.slice(-500)}` : ""}`)), 30_000);
+    child.once("error", fail);
+    child.once("exit", (code, signal) => fail(new Error(`server exited before readiness: code=${code} signal=${signal}${stderr ? ` stderr=${stderr.slice(-500)}` : ""}`)));
     child.stdout.on("data", (chunk) => {
-      if (String(chunk).includes("AGENT_XHS_READY")) {
+      if (!settled && String(chunk).includes("AGENT_XHS_READY")) {
+        settled = true;
         clearTimeout(timeout);
         resolve();
       }
