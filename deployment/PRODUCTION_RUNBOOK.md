@@ -24,7 +24,36 @@ npm run verify:shareable-delivery -- \
 
 判定器不生成旅程证据，也不授予推送、Preview、Production、回滚或外部发布 Authority。完整回执 schema 由 `tests/shareable-delivery.test.mjs` 锁定；其中 `new_draft=true` 与 `generate_text=true` 证明 fresh user 不是只在修旧稿。
 
-更新时间：2026-08-31
+更新时间：2026-09-05
+
+## 2026-09-05 参考图恢复修复正式发布
+
+本记录只确认部署已应用，不宣称正式交付或小师妹已经可生产。
+
+| 项目 | 真实回读 |
+|---|---|
+| 发布源码 | `613b57c57aaa4b13f09af9393c596c7e9c383994`，PR #5 合并提交 `99bcc25f47af6eb370ba2d468076e38a9b6f86ec` |
+| 构建与检查 | 干净源码，583 项测试通过，质量 workflow `33935613681` SUCCESS |
+| Preview | `dpl_Dujh77VCWSNjpUjDnzRpagFdLD5f`，Vercel Authentication 保护；编辑副本、原任务找回、保存重载、桌面/窄屏、ZIP 实物和新稿文字生成已验收 |
+| Production | `dpl_7Yz8Po8TfcH6anUVYBjrGo6tUWNQ`，先使用 production 环境暂存，再 promote 同一 deployment；不是直接拿 Preview 环境交付 |
+| 正式入口 | `https://xiaoshimei-full-workbench.vercel.app/` 已回读到新部署，页面实际加载 `index-EpFaKShc.js` |
+| 制品身份 | HTML、JS、CSS 均与干净候选一致；JS SHA-256 `3fdcea36dd3a35119fdc23926c14b7930b164d67a55884fe8833a6129bcce335` |
+| 生成服务 | SERVER_MANAGED、STUDIO_ACCESS_SESSION、图片账本 READY；核验绑定 613b57c，有效至 `2026-09-12T01:12:45.420Z`；签发 workflow `33935461161` SUCCESS |
+| 已验证回退点 | `dpl_A1n3g6ha7AFSVF7hN8dxiyZXLEGx`，来源 d8482 与运行时核验一致；真实回滚探针通过，可 promote 已有部署 |
+| 定时续签 | 仓库 `XIAOSHIMEI_PRODUCTION_COMMIT=613b57c57aaa4b13f09af9393c596c7e9c383994`；`XIAOSHIMEI_ROLLBACK_COMMIT=d8482ab4b26ef58f2497947724ae50670f18fc58`，修改后同源回读一致；未读取或更改秘密 |
+| 当前交付缺口 | 正式浏览器需要重新输入已有 Studio 访问码，之后才可验证新建、生成文字、修改、保存/重开、复制、下载；当前无完整正式站回执，因此交付判定仍 BLOCKED |
+
+Preview ZIP 实物：7 个条目 CRC 通过，3 张 PNG 均为 1080×1440，SHA-256 `de19dd77e8726a61797f357f9ab4d7bc629d90a27dd64840854aa415442fe066`。它来自合成恢复夹具，不冒充新付费图片或内容质量验收。浏览器把文件存到 Desktop；下载事件超时不应被直接判断为未下载，应回读实际文件。
+
+回退命令（只在确有运行回归时执行）：
+
+```sh
+vercel promote dpl_A1n3g6ha7AFSVF7hN8dxiyZXLEGx --scope 892350620-5733s-projects
+```
+
+若回退，须把生产续签变量同步到实际运行提交，并回读稳定域名、服务核验和稿件行为。之前的 e007578 部署来源与其运行时核验不一致，不能凭“最近一版”代替这个已知匹配回退点。
+
+尚未进行本轮新/续付费图片步骤；保持既有明确费用授权边界。不得自行提取访问码、取消访问保护或把原稿恢复检查改成收费重试。
 
 ## 单一权威链
 
