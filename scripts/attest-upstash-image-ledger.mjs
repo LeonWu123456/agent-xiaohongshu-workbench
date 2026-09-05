@@ -616,8 +616,8 @@ export async function inspectCapacityMetadata({env=process.env,fetchImpl=globalT
  let physicalBytes=0;const runs=[],capacity=hashObject(await store.command(['HGETALL',productCapacityKey()]));
  for(const key of keys){const bytes=Number(await store.command(['MEMORY','USAGE',key]));if(!Number.isSafeInteger(bytes)||bytes<0)throw new Error('CAPACITY_DIAGNOSTIC_USAGE_INVALID');physicalBytes+=bytes;
   if(!/:run:images-[^:]+:meta$/.test(key))continue;
-  const v=await store.command(['HMGET',key,'status','recoverable_until_ms','physical_expire_at_ms','capacity_reservation_bytes','capacity_released','reservation_count']);
-  runs.push({key_sha256:sha256(Buffer.from(key)),status:v[0],recoverable_until_ms:Number(v[1]),physical_expire_at_ms:Number(v[2]),reservation_bytes:Number(v[3]),released:Number(v[4]),image_reservations:Number(v[5]),recovery_expired:Number(v[1])>0&&Number(v[1])<now,own_scope:key.startsWith(appRoot(env.XIAOSHIMEI_APP_SCOPE||'xiaoshimei-test-scope')+':')});
+  const v=await store.command(['HMGET',key,'status','recoverable_until_ms','physical_expire_at_ms','capacity_reservation_bytes','capacity_released','reservation_count','cached_response_json']);
+  runs.push({key_sha256:sha256(Buffer.from(key)),status:v[0],recoverable_until_ms:Number(v[1]),physical_expire_at_ms:Number(v[2]),reservation_bytes:Number(v[3]),released:Number(v[4]),image_reservations:Number(v[5]),cached_response_sha256:typeof v[6]==='string'?sha256(Buffer.from(v[6])):null,recovery_expired:Number(v[1])>0&&Number(v[1])<now,own_scope:key.startsWith(appRoot(env.XIAOSHIMEI_APP_SCOPE||'xiaoshimei-test-scope')+':')});
  }
  return {observed_at_ms:now,physical_bytes:physicalBytes,key_count:keys.size,capacity:Object.fromEntries(['reserved_bytes','live_reservations','unfinalized_inventory','headroom_bytes','capacity_limit_bytes','worst_case_run_bytes'].map(k=>[k,Number(capacity[k])])),runs};
 }
