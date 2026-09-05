@@ -86,7 +86,7 @@ test("one page state can use HTML smart flow and Fabric precision editing withou
   assert.match(source, /智能版式/);
   assert.match(source, /精细画布/);
   assert.match(htmlEditor, /contentEditable/);
-  assert.match(htmlEditor, /React\.lazy\(\(\) => import\("react-moveable"\)\)/);
+  assert.match(htmlEditor, /import Moveable from "react-moveable"/);
   assert.match(htmlEditor, /改字 \/ 取景/);
   assert.match(htmlEditor, /裁剪 \/ 取景/);
   assert.match(htmlEditor, /HTML_IMAGE_ZOOM_MAX/);
