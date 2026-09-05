@@ -273,3 +273,65 @@ test('interactive canvas does not defer manipulation controls past early edits',
  const {readFile}=await import('node:fs/promises');const source=await readFile(new URL('../src/HtmlPageEditor.jsx',import.meta.url),'utf8');
  assert.match(source,/import Moveable from "react-moveable"/);assert.equal(source.includes('const Moveable = React.lazy('),false);
 });
+
+
+test('confirmed copy audit sees visible text, not merely retained publication body or image metadata',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');assert.equal(typeof api.confirmedCopyCoverage,'function');
+ const original=api.createDemo();const missing='先找一处能听见雨声的位置坐下，把空间里多余的声响关掉，让周围只剩下窗外雨落的声音。';
+ original.body=[original.pages[0].body,original.pages[1].body,missing,original.pages[2].body].join('\n');original.pages[1].visual_action=missing;
+ const before=api.composeEditableContent(original);assert.ok(api.confirmedCopyCoverage(before).missing.some(x=>x.text===missing));
+ const untouched=structuredClone(before),fixed=api.reconcileConfirmedCopy(before);assert.deepEqual(before,untouched);assert.equal(fixed.body,before.body);assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);
+ const {freeObjectText}=await import('../src/html-layout.mjs');const text=c=>c.pages.slice(0,c.visible_pages).flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text').map(o=>freeObjectText(p,o))).join('\n');
+ assert.ok(text(fixed).includes(missing));for(const page of before.pages){assert.ok(text(fixed).includes(page.title));assert.ok(text(fixed).includes(page.body));}
+ assert.deepEqual(api.reconcileConfirmedCopy(fixed),fixed);
+});
+
+test('confirmed copy repair fails atomically rather than shrinking text or exceeding eight pages',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');assert.equal(typeof api.reconcileConfirmedCopy,'function');const source=api.createDemo();
+ source.pages=Array.from({length:8},(_,i)=>({...structuredClone(source.pages[0]),title:'Page '+i,body:'A'.repeat(150),html_state:undefined}));source.visible_pages=8;source.body='B'.repeat(2000);const frozen=structuredClone(source);
+ assert.throws(()=>api.reconcileConfirmedCopy(source),error=>['CONFIRMED_COPY_PAGE_LIMIT','EDITABLE_LAYOUT_NEEDS_SPLIT'].includes(error.code));assert.deepEqual(source,frozen);
+});
+
+test('source coverage does not count invisible text and ordinary reflow never silently restores deleted copy',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');assert.equal(typeof api.confirmedCopyCoverage,'function');const source=api.composeEditableContent(api.createDemo());source.body='用户主动删掉的这一句。';source.pages[0].html_state.free_objects.push({id:'invisible-copy',kind:'text',text:source.body,x:0,y:0,width:60,height:12,font_size:54,font_family:'pingfang',line_height:1.5,opacity:0});
+ assert.equal(api.confirmedCopyCoverage(source).missing.length,1);const reflow=api.composeEditableContent(source,{force:true});assert.equal(api.confirmedCopyCoverage(reflow).missing.length,1);
+});
+
+
+test('coverage preserves decimal and ratio meaning instead of matching collapsed numbers',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');
+ for(const [source,wrong] of [['等待1.5分钟。','等待15分钟。'],['比例为2/3。','比例为23。']]){
+  const c=api.createDemo();c.body=source;c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body=wrong;c.pages[0].title='数值说明';c.pages[0].eyebrow='说明';assert.equal(api.confirmedCopyCoverage(api.composeEditableContent(c)).missing.length,1);
+ }
+});
+
+test('filling a short missing sentence never repositions previously editable objects',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');const c=api.composeEditableContent(api.createDemo());
+ c.body=c.pages.map(p=>p.body).join('\n')+'\n新增的一句。';const image=c.pages[0].html_state.free_objects.find(o=>o.kind==='image');image.rotation=8;image.x=11;
+ const before=structuredClone(c),after=api.reconcileConfirmedCopy(c);assert.deepEqual(c,before);
+ for(const page of before.pages){const found=after.pages.find(p=>p.title===page.title);assert.deepEqual(found.html_state,page.html_state);assert.equal(found.body,page.body);}
+ assert.equal(api.confirmedCopyCoverage(after).missing.length,0);
+});
+
+
+test('confirmed sentences cannot be matched inside a negation, longer number or compatibility numeral',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');
+ for(const [source,wrong] of [['需要加糖。','不需要加糖。'],['1.5分钟。','11.5分钟。'],['计算结果是2³。','计算结果是23。']]){
+  const c=api.createDemo();c.body=source;c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body=wrong;c.pages[0].title='说明';c.pages[0].eyebrow='说明';assert.equal(api.confirmedCopyCoverage(api.composeEditableContent(c)).missing.length,1);
+ }
+});
+
+test('missing opening sentences precede their following anchor for both new and already editable work',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');
+ for(const editable of [false,true]){
+  let c=api.createDemo();c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body='再揉面。';c.body='先洗手。备好面粉。再揉面。';if(editable)c=api.composeEditableContent(c);
+  const {freeObjectText}=await import('../src/html-layout.mjs');const fixed=api.reconcileConfirmedCopy(c);const all=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&o.binding!=='title'&&o.binding!=='eyebrow').map(o=>freeObjectText(p,o))).join('\n');
+  assert.ok(all.indexOf('先洗手。')<all.indexOf('备好面粉。'));assert.ok(all.indexOf('备好面粉。')<all.indexOf('再揉面。'));assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);
+ }
+});
+
+
+test('source gap inside one already arranged paragraph refuses atomically instead of shuffling its order',async()=>{
+ const api=await import('../src/visual-workbench/model.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body='先洗手。再揉面。';c.body='先洗手。备好面粉。再揉面。';c=api.composeEditableContent(c);const before=structuredClone(c);
+ assert.throws(()=>api.reconcileConfirmedCopy(c),e=>e.code==='CONFIRMED_COPY_SEQUENCE_CONFLICT');assert.deepEqual(c,before);
+});

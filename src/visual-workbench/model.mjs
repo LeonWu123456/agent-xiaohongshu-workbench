@@ -1,6 +1,6 @@
 import {applySmartLayoutSequence} from '../smart-layout.mjs';
 import {generateContentPackage, parseContentPackage, importLocalEditableDraft, reorderPage, duplicatePage, deletePage,invalidateVisualReview} from '../content-engine.mjs';
-import {normalizeHtmlState,freeObjectText,normalizeFreeObjects} from '../html-layout.mjs';
+import {normalizeHtmlState,freeObjectText,freeObjectImage,normalizeFreeObjects} from '../html-layout.mjs';
 export function changePage(content, index, patch) {
   if (!content?.pages?.[index]) throw new TypeError('页面不存在');
   const next={...content,pages:content.pages.map((p,i)=>i===index?{...p,...patch}:p)};
@@ -208,4 +208,66 @@ export function composeEditableContent(content,{force=false,pageIndex=null,measu
  const prepared=mobilePages(content,{force,pageIndex,measureText});
  const pages=applySmartLayoutSequence(prepared.pages).map((page,i)=>prepared.touched.has(i)?arrangeEditablePage(page,i,{measureText}):prepared.pages[i]);
  return invalidateVisualReview({...content,pages,...(prepared.changed?{visible_pages:content.visible_pages+pages.length-content.pages.length,stage:'LOCAL_DRAFT'}:{})});
+}
+
+
+// The publication body remaining in storage does not prove it reached the cards.
+// This check is deliberately literal (normalizing whitespace only),
+// not a claim of semantic equivalence between a model summary and the source.
+const copyKey=value=>String(value||'').replace(/\s+/gu,' ').trim();
+function visibleCopy(page,index){
+ const objects=page.html_state?.free_objects||seedEditableObjects(page,index);
+ return objects.filter(o=>o.kind==='text'&&o.opacity!==0&&o.x<100&&o.y<100&&o.x+o.width>0&&o.y+o.height>0).map(o=>freeObjectText(page,o)).join('\n');
+}
+export function confirmedCopyCoverage(content){
+ const pages=(content?.pages||[]).slice(0,content?.visible_pages||0).map((p,i)=>new Set([...visibleCopy(p,i).matchAll(/[^。！？\r\n]+[。！？]?/gu)].map(m=>copyKey(m[0]))));
+ const seen=new Set(),segments=[];
+ for(const match of String(content?.body||'').matchAll(/[^。！？\r\n]+[。！？]?/gu)){
+  const text=match[0].trim(),key=copyKey(text);if(!key||seen.has(key))continue;seen.add(key);
+  segments.push({index:segments.length,text,key,page_indexes:pages.flatMap((p,i)=>p.has(key)?[i]:[])});
+ }
+ return {checked_segments:segments.length,segments,missing:segments.filter(s=>!s.page_indexes.length)};
+}
+export function reconcileConfirmedCopy(content,{measureText}={}){
+ const repairPages=new Set();
+ let result=composeEditableContent(content,{measureText});
+ const first=confirmedCopyCoverage(result);if(!first.missing.length)return result;
+ for(const missing of first.missing){
+  const audit=confirmedCopyCoverage(result),gap=audit.segments.find(x=>x.key===missing.key);
+  if(!gap||gap.page_indexes.length)continue;
+  const previous=audit.segments.slice(0,gap.index).reverse().find(s=>s.page_indexes.length);
+  const following=audit.segments.slice(gap.index+1).find(s=>s.page_indexes.length);
+  const anchor=previous?previous.page_indexes.at(-1):following?following.page_indexes[0]:0;
+  const page=result.pages[anchor],state=normalizeHtmlState(page.html_state,page,anchor);
+
+  const insertBefore=!previous&&Boolean(following);
+  if(repairPages.has(page)){
+   const body=state.free_objects?.find(o=>o.binding==='body'&&o.opacity!==0);let patched;
+   if(body){
+    const raw=String(page.body||''),nextSpan=following?[...raw.matchAll(/[^。！？\r\n]+[。！？]?/gu)].find(m=>copyKey(m[0])===following.key):null;
+    const position=nextSpan?nextSpan.index:insertBefore?0:raw.length;
+    patched={...page,body:[raw.slice(0,position),gap.text,raw.slice(position)].filter(Boolean).join('\n\n')};
+   }
+   else{
+    let id='confirmed-copy-'+gap.index;while(state.free_objects.some(o=>o.id===id))id+='-copy';
+    const node={id,kind:'text',text:gap.text,x:5,y:50,width:90,height:12,font_size:54,font_family:'pingfang',line_height:1.5};
+    const nodes=insertBefore?[node,...state.free_objects]:[...state.free_objects,node];
+    patched={...page,html_state:{...state,free_objects:normalizeFreeObjects(nodes)}};
+   }
+   try{const arranged=arrangeEditablePage(patched,anchor,{measureText});repairPages.delete(page);repairPages.add(arranged);result={...result,pages:result.pages.map((p,i)=>i===anchor?arranged:p)};continue;}
+   catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;}
+  }
+  if(previous&&following&&previous.page_indexes.some(i=>following.page_indexes.includes(i))&&!repairPages.has(page)){const error=new Error('缺句位于同一已有文本框中间，请先拆页再补齐；未改变原文顺序或已有排版。');error.code='CONFIRMED_COPY_SEQUENCE_CONFLICT';throw error;}
+  if(result.pages.length>=8){const error=new Error('已确认全文还有内容未进入画布，但已达8页。请先腾出页面；未缩小字号、未删除图文。');error.code='CONFIRMED_COPY_PAGE_LIMIT';error.missing=gap.text;throw error;}
+  // Keep the neighbouring illustration, including its source/scene identity.
+  // The continuation is a normal page, not a hidden transcript or second draft.
+  const image=state.free_objects.find(o=>o.kind==='image'&&o.opacity!==0),imageStyle=image?freeObjectImage(page,image):null;
+  const heading=gap.text.split(/[，,；;：:]/u)[0].replace(/^(?:先|接着|然后|最后)\s*/u,'').slice(0,24)||'原文补充';
+  const continuation={...page,title:heading,eyebrow:'原文补充',body:gap.text,info_panels:[],highlight_phrases:[],layout_ir:null,layout_recipe:null,editor_state:undefined,editor_mode:'html',html_state:undefined,page_role:'method',visual:imageStyle?.src?'character':'none',image_style:{...(imageStyle||page.image_style),hidden:!imageStyle?.src}};
+  const position=insertBefore?anchor:anchor+1;const added=arrangeEditablePage(continuation,position,{measureText}),pages=[...result.pages];pages.splice(position,0,added);repairPages.add(added);
+  result={...result,pages,visible_pages:result.visible_pages+1,stage:'LOCAL_DRAFT'};
+ }
+ const remaining=confirmedCopyCoverage(result).missing;
+ if(remaining.length){const error=new Error('全文校对没有通过，已保留原稿，未提交不完整排版。');error.code='CONFIRMED_COPY_COVERAGE_INCOMPLETE';throw error;}
+ return invalidateVisualReview(result);
 }

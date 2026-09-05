@@ -268,3 +268,12 @@ test('unknown or expired BOOTSTRAP cannot be treated as a safe new START',async(
  try{Date.now=()=>originalNow()+8*86400000;await assert.rejects(()=>runImageGeneration({service,session,provider}),/IMAGE_LEDGER_RUN_MISSING/);}finally{Date.now=originalNow;}
  assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);
 });
+
+
+test('paid media readback failure points to the non-generating recovery action, preserving other errors',async()=>{
+ const {imageRecoveryMessage}=await import('../src/visual-workbench/creator.mjs');
+ for(const code of ['IMAGE_MEDIA_FETCH_FAILED','IMAGE_MEDIA_FETCH_HTTP_401','IMAGE_MEDIA_BODY_READ_FAILED']){
+  const message=imageRecoveryMessage({providerCode:code,message:code});assert.ok(message.includes('检查任务（不生成图片）'));assert.ok(message.includes('不要重新生图'));
+ }
+ assert.equal(imageRecoveryMessage(new Error('SOURCE_CAS_CONFLICT')),'SOURCE_CAS_CONFLICT');
+});

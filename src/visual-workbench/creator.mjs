@@ -325,3 +325,10 @@ export async function applyPageVariant({service,candidateIndex}={}) {
  await service.sync();const result=await service.activateDraft(source.draft_id);
  return {...result,target,previousImage};
 }
+
+
+export function imageRecoveryMessage(error){
+ const code=String(error?.providerCode||error?.message||'');
+ if(/^IMAGE_MEDIA_(?:FETCH|BODY_READ)/.test(code))return '图片素材暂未读回，任务和已生成结果仍保留。先恢复工作台访问，再点“检查任务（不生成图片）”取回结果；不要重新生图。';
+ return String(error?.message||error||'操作失败');
+}
