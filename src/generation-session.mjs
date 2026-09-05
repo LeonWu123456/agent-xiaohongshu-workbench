@@ -2,10 +2,10 @@ import { parseTextDraftResponse } from "./provider-contract.mjs";
 
 export const GENERATION_SESSION_SCHEMA = "xiaoshimei.generation-session.v1";
 
-export function parseGenerationSession(value) {
+export function parseGenerationSession(value, { imageVariantTarget = null } = {}) {
   const source = typeof value === "string" ? JSON.parse(value) : value;
   if (!source || typeof source !== "object" || Array.isArray(source) || source.schema !== GENERATION_SESSION_SCHEMA) throw new TypeError("GENERATION_SESSION_INVALID");
-  const textDraft = parseTextDraftResponse(source.text_draft);
+  const textDraft = parseTextDraftResponse(source.text_draft, { imageVariantTarget });
   const resume = source.image_resume == null ? null : source.image_resume;
   if (resume && (typeof resume !== "object" || typeof resume.resume_run_id !== "string" || !resume.resume_run_id)) throw new TypeError("GENERATION_SESSION_RESUME_INVALID");
   const imageCountMode = source.image_count_mode === "CUSTOM" ? "CUSTOM" : "AUTO";

@@ -3533,3 +3533,15 @@ test('single-image alternatives use the existing restartable image transaction w
  const {normalizeAuthoringSession}=await import('../src/workspace-state.mjs');
  const session=normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',topic:'雨天',image_variant_target:target});assert.deepEqual(session.image_variant_target,target);
 });
+
+
+test('short frozen image-variant copy is scoped and does not weaken normal full-text validation',async()=>{
+ const {normalizeAuthoringSession}=await import('../src/workspace-state.mjs');
+ const {parseTextDraftResponse}=await import('../src/provider-contract.mjs');
+ const target={schema:'xiaoshimei.page-image-variants-target.v1',source_draft_id:'source',source_page_index:0,source_page_sha256:'a'.repeat(64),object_id:'hero-image',image_id:'hero',title:'Tea',body:'Keep exact.',visual_action:'Pouring tea',image_prompt:''};
+ const draft={...d36ConfirmedDraft(),schema:'xiaoshimei.text-draft-response.v1',body:'Keep exact.',text_requirements:''};
+ assert.throws(()=>parseTextDraftResponse(draft),/BODY_INVALID/);
+ const session=normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',text_draft:draft,image_variant_target:target});assert.equal(session.text_draft.body,draft.body);
+ assert.throws(()=>normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',text_draft:draft}),/BODY_INVALID/);
+ assert.throws(()=>normalizeAuthoringSession({schema:'xiaoshimei.authoring-session.v2',text_draft:draft,image_variant_target:{...target,source_page_sha256:'bad'}}),/HASH_INVALID/);
+});

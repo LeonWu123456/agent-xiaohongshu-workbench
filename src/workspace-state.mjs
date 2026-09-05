@@ -69,7 +69,7 @@ function checkedGenerationSession(value, path) {
       `${path}.action_reference_note`,
     );
     if (source.text_draft != null) {
-      const parsed = parseGenerationSession({ ...source, schema: GENERATION_SESSION_SCHEMA });
+      const parsed = parseGenerationSession({ ...source, schema: GENERATION_SESSION_SCHEMA }, { imageVariantTarget: variantTarget });
       return {
         ...parsed,
         ...variantFields,
