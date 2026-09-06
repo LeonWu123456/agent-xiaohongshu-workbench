@@ -699,6 +699,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/src/workspace-state.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/src/text-draft-policy.mjs",
+          "kind": "implementation"
         }
       ]
     },
@@ -1267,6 +1271,10 @@
         {
           "path": "Products/Xiaoshimei-Studio-v2/tests/visual-workbench-creator.test.mjs",
           "kind": "implementation"
+        },
+        {
+          "path": "Products/Xiaoshimei-Studio-v2/tests/text-draft-policy.test.mjs",
+          "kind": "test"
         }
       ]
     },
