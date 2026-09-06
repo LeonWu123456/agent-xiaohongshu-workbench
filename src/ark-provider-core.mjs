@@ -258,7 +258,12 @@ export function textQualityRetryGuidance(error, { finalAttempt = false } = {}) {
     return `${measured}${finalRepair}只改写正文为4到8个短段落：用具体场景开头，接着写读者困扰、3到5个可执行要点、必要解释与边界，最后自然收束。不得虚构亲身经历、人物、品牌、数字、效果或来源；不用重复句子凑字数。${rejectedDraftForRepair(error)}`;
   }
   if (/body:source_expansion/.test(code)) {
-    return "这是一段完整原文，上一版扩写过头了。下一版只做压缩、重组和润色，正文长度贴近原文；删除原文没有的额外建议、反例、器物、去处、风险和品牌收尾，不为凑字数增加任何信息。";
+    const details = error?.qualityDetails;
+    const measured = details?.kind === "source_expansion"
+      ? `上一版正文是${details.observed}个有效字符，后台验收区间是${details.minimum}–${details.maximum}个；必须压缩到区间内。`
+      : "这是一段完整原文，上一版扩写过头了。";
+    const finalRepair = finalAttempt ? "这是系统最后一次有界自动修稿，按上述上限自检后调用工具。" : "这是后台自动修稿，不要求用户补充材料。";
+    return `${measured}${finalRepair}下一版只做压缩、重组和润色，正文长度贴近原文；删除原文没有的额外建议、反例、器物、去处、风险和品牌收尾，不为凑字数增加任何信息。${rejectedDraftForRepair(error)}`;
   }
   if (/needs_readable_paragraphs/.test(code)) {
     return "正文结构不够易读。下一版必须用4到8个短段落组织，每段只承担一个任务，不要把所有步骤粘成一整段。";
@@ -454,7 +459,11 @@ export function validateArkTextDraft(value, context = {}) {
   if (bodyLength < validationMinimum || (!lengthBounds.fullSource && bodyLength > generationBounds.maximum) || bodyLength > 900) {
     throw textLengthFailure(bodyLength, validationMinimum, generationBounds.maximum, bodyLength > generationBounds.maximum ? "compress" : "expand");
   }
-  if (lengthBounds.fullSource && bodyLength > lengthBounds.maximum) throw new TypeError(`TEXT_QUALITY_GATE_FAILED:body:source_expansion:${bodyLength}/${lengthBounds.maximum}`);
+  if (lengthBounds.fullSource && bodyLength > lengthBounds.maximum) {
+    const error = new TypeError(`TEXT_QUALITY_GATE_FAILED:body:source_expansion:${bodyLength}/${lengthBounds.maximum}`);
+    error.qualityDetails = { kind: "source_expansion", observed: bodyLength, minimum: validationMinimum, maximum: lengthBounds.maximum, direction: "compress" };
+    throw error;
+  }
   if ((body.match(/\n/g) || []).length < 3) throw new TypeError("TEXT_QUALITY_GATE_FAILED:body:needs_readable_paragraphs");
   assertNoCheapHooks(`${selectedTitle}${body}`, "publish_copy");
   assertNoEditorialSludge(`${titles.join("｜")}\n${body}`, "publish_copy");
@@ -502,6 +511,7 @@ export function buildArkDraftTextRequest(input, model) {
     `用户填写的文字上下文：\n${promptContextLines(input.prompt_context, [...TEXT_CONTEXT_FIELDS, REALITY_CONTEXT_FIELD]).join("\n") || "无"}`,
     `上一次质量检查反馈（首次为空）：${String(input.quality_feedback || "").trim() || "无"}`,
     `相关Profile合同：${JSON.stringify(scoped)}`,
+    `最终可提交的正文范围：${generationBounds.minimum}–${generationBounds.maximum}个有效字符（不计空白）。此前的字数建议仅在这个范围内适用，不得突破此范围来满足较长的用户建议或上下文模板；保留原有事实和步骤，不删核心信息、不编造内容。提交前按本段和工具参数的相同范围自检。`,
   ].join("\n\n");
   const parameters = structuredClone(TEXT_DRAFT_PARAMETERS);
   parameters.properties.body.minLength = generationBounds.minimum;
