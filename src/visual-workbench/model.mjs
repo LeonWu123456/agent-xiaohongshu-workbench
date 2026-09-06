@@ -142,10 +142,34 @@ function mobilePages(content,{force,pageIndex,measureText}){
     if(old)return{...old,id:o.id,binding:o.binding,...(o.kind==='image'?{image_id:o.image_id}:{})};return o;
    });
    // Page-level copy that the old multi-panel renderer hid is not discarded.
-   if(j===panels.length-1&&page.body?.trim()&&page.body!==panel.body)next.push({id:'context-copy',kind:'text',text:page.body,x:5,y:70,width:90,height:10,font_size:54,font_family:'pingfang',font_weight:400,line_height:1.5,color:'#292720'});
+
    const originalCrop=page.html_state?.image_edits?.[`panel-${j}`];sub.html_state={...state,free_objects:normalizeFreeObjects(next),...(originalCrop?{image_edits:{...state.image_edits,hero:{...originalCrop}}}:{})};
    touched.add(out.length);out.push(sub);
   });
+  // Preserve the old last-child placement when it fits. Otherwise only the
+  // parent's exact ordered sentence spans flow across this same sibling group.
+  if(page.body?.trim()&&page.body!==panels.at(-1).body){
+   const start=splitStarts.get(i),children=out.slice(start),context=text=>({id:'context-copy',kind:'text',text,x:5,y:70,width:90,height:10,font_size:54,font_family:'pingfang',font_weight:400,line_height:1.5,color:'#292720'});
+   const append=(child,text)=>({...child,html_state:{...child.html_state,free_objects:normalizeFreeObjects([...child.html_state.free_objects,context(text)])}});
+   const last=append(children.at(-1),page.body);
+   try{arrangeEditablePage(last,start+children.length-1,{measureText});out[out.length-1]=last;}
+   catch(error){
+    if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;
+    const spans=String(page.body).match(/[^。！？\r\n]*(?:[。！？]|\r\n|\r|\n|$)/gu).filter(Boolean);
+    if(spans.join('')!==page.body)throw error;
+    let cursor=0;
+    for(let c=0;c<children.length&&cursor<spans.length;c++){
+     let accepted=null,next=cursor;
+     for(let n=cursor+1;n<=spans.length;n++){
+      const candidate=append(children[c],spans.slice(cursor,n).join(''));
+      try{arrangeEditablePage(candidate,start+c,{measureText});accepted=candidate;next=n;}
+      catch(e){if(e.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw e;break;}
+     }
+     if(accepted){out[start+c]=accepted;cursor=next;}
+    }
+    if(cursor!==spans.length)throw error;
+   }
+  }
  });
 
  // A reading cover gets one opening sentence, not a reduced-size paragraph.
@@ -239,6 +263,9 @@ export function confirmedCopyCoverage(content){
 export function reconcileConfirmedCopy(content,{measureText}={}){
  const repairPages=new Set();
  let result=composeEditableContent(content,{measureText});
+ // Only pages materialized in this invocation may be repacked to fit trailing
+ // missing copy. Previously edited pages retain the append-a-page contract.
+ const freshPages=new Set(result.pages.filter(p=>!content.pages.includes(p)&&!p.info_panels?.length));
  const first=confirmedCopyCoverage(result);if(first.unsupported){const error=new Error('全文或画布句子过多，请先拆分作品；原稿未改变。');error.code='CONFIRMED_COPY_AUDIT_LIMIT';throw error;}if(!first.missing.length)return result;
  for(const missing of first.missing){
   const audit=confirmedCopyCoverage(result),gap=audit.segments[missing.index];
@@ -249,12 +276,28 @@ export function reconcileConfirmedCopy(content,{measureText}={}){
   const page=result.pages[anchor],state=normalizeHtmlState(page.html_state,page,anchor);
 
   const insertBefore=!previous&&Boolean(following);
+  if(freshPages.has(page)&&previous&&!following?.page_indexes.includes(anchor)){
+   const matches=(object,key)=>[...freeObjectText(page,object).matchAll(/[^。！？\r\n]+[。！？]?/gu)].some(m=>copyKey(m[0])===key);
+   const prev=previous?state.free_objects.map((o,i)=>o.kind==='text'&&matches(o,previous.key)?i:-1).filter(i=>i>=0):[];
+   const next=following?state.free_objects.map((o,i)=>o.kind==='text'&&matches(o,following.key)?i:-1).filter(i=>i>=0):[];
+   const safe=prev.length<=1&&next.length<=1&&(!prev.length||!next.length||prev[0]<next[0]);
+   if(safe){
+    let id='confirmed-copy-'+gap.index;while(state.free_objects.some(o=>o.id===id))id+='-copy';
+    const node={id,kind:'text',text:gap.text,x:5,y:50,width:90,height:12,font_size:54,font_family:'pingfang',line_height:1.5};
+    const nodes=[...state.free_objects],position=prev.length?prev[0]+1:next.length?next[0]:nodes.length;nodes.splice(position,0,node);
+    try{const arranged=arrangeEditablePage({...page,html_state:{...state,free_objects:normalizeFreeObjects(nodes)}},anchor,{measureText});freshPages.delete(page);freshPages.add(arranged);result={...result,pages:result.pages.map((p,i)=>i===anchor?arranged:p)};continue;}
+    catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;}
+   }
+  }
+
   if(repairPages.has(page)){
    const body=state.free_objects?.find(o=>o.binding==='body'&&o.opacity!==0);let patched;
    if(body){
     const raw=String(page.body||''),nextSpan=following?[...raw.matchAll(/[^。！？\r\n]+[。！？]?/gu)].find(m=>copyKey(m[0])===following.key):null;
     const position=nextSpan?nextSpan.index:insertBefore?0:raw.length;
-    patched={...page,body:[raw.slice(0,position),gap.text,raw.slice(position)].filter(Boolean).join('\n\n')};
+    // These are newly-created continuation paragraphs, not user-authored spacing.
+    // A single separator avoids spending a full empty text line per restored sentence.
+    patched={...page,body:[raw.slice(0,position),gap.text,raw.slice(position)].filter(Boolean).join('\n')};
    }
    else{
     let id='confirmed-copy-'+gap.index;while(state.free_objects.some(o=>o.id===id))id+='-copy';

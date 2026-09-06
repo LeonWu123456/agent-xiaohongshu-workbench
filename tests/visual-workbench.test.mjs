@@ -345,7 +345,7 @@ test('free-object text owns letter spacing so editor chrome cannot change export
 
 test('derived page headings never count as proof that a missing body instruction was delivered',async()=>{
  const api=await import('../src/visual-workbench/model.mjs');const {freeObjectText}=await import('../src/html-layout.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,1);c.visible_pages=1;c.pages[0].body='再揉面。';c.body='先洗手。洗手。再揉面。';c=api.composeEditableContent(c);const fixed=api.reconcileConfirmedCopy(c);
- const text=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)).map(o=>freeObjectText(p,o))).join('\n');assert.ok(text.includes('先洗手。\n\n洗手。'));assert.ok(text.indexOf('先洗手。')<text.indexOf('再揉面。'));assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);
+ const text=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)).map(o=>freeObjectText(p,o))).join('\n');assert.ok(text.includes('先洗手。\n洗手。'));assert.equal(c.body,'先洗手。洗手。再揉面。');assert.ok(text.indexOf('先洗手。')<text.indexOf('再揉面。'));assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);
  const headingOnly=structuredClone(c);headingOnly.pages[0].title='先洗手。';assert.ok(api.confirmedCopyCoverage(headingOnly).missing.some(x=>x.text==='先洗手。'));
 });
 
@@ -354,4 +354,34 @@ test('repeated source actions each require their own ordered visible occurrence'
  const api=await import('../src/visual-workbench/model.mjs');const {freeObjectText}=await import('../src/html-layout.mjs');let c=api.createDemo();c.pages=c.pages.slice(0,2);c.visible_pages=2;c.pages[0].body='搅拌。';c.pages[1].body='装盘。';c.body='搅拌。静置。搅拌。装盘。';c=api.composeEditableContent(c);
  const audit=api.confirmedCopyCoverage(c);assert.equal(audit.checked_segments,4);assert.deepEqual(audit.missing.map(x=>x.text),['静置。','搅拌。']);
  const fixed=api.reconcileConfirmedCopy(c);const text=fixed.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.kind==='text'&&!['title','eyebrow'].includes(o.binding)).map(o=>freeObjectText(p,o))).join('');assert.equal(text.replace(/\s/g,''),c.body);assert.deepEqual(api.confirmedCopyCoverage(fixed).missing,[]);assert.deepEqual(api.reconcileConfirmedCopy(fixed),fixed);
+});
+
+
+test('overflowing parent context flows only across its own split scenes without shrinking or dropping text',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');
+ const c=createBlankContent(),page=c.pages[0];page.title='三个阅读步骤';page.eyebrow='阅读练习';page.page_role='method';
+ const parts=[0,1,2].map(i=>`第${i+1}步，`+'这一段原始说明必须完整保留，不可以把正文缩小或者删掉。'.repeat(2));page.body=parts.join('\n');
+ page.info_panels=[0,1,2].map(i=>({id:'p'+i,title:'原来场景'+i,body:'该场景的短说明不能被换走。',visual_action:'scene action '+i,image_prompt:'scene image '+i,image_style:{src:'/assets/xiaoshimei-character-full.png'}}));
+ const before=structuredClone(c),out=composeEditableContent(c,{force:true});assert.equal(out.pages.length,3);assert.deepEqual(c,before);
+ const contexts=out.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.id==='context-copy').map(o=>o.text));assert.equal(contexts.join(''),page.body);
+ out.pages.forEach((p,i)=>{assert.equal(p.body,page.info_panels[i].body);assert.equal(p.visual_action,page.info_panels[i].visual_action);assert.equal(p.image_style.src,page.info_panels[i].image_style.src);assert.ok(p.html_state.free_objects.filter(o=>o.kind==='text').every(o=>o.font_size>=42));assert.ok(p.html_state.free_objects.find(o=>o.kind==='image').height>=25);});
+ assert.deepEqual(composeEditableContent(out,{force:true}).pages.map(p=>p.html_state.free_objects.filter(o=>o.id==='context-copy').map(o=>o.text)),out.pages.map(p=>p.html_state.free_objects.filter(o=>o.id==='context-copy').map(o=>o.text)));
+ const tooLong=structuredClone(c);tooLong.pages[0].body='无法拆开的长句'.repeat(800);const untouched=structuredClone(tooLong);assert.throws(()=>composeEditableContent(tooLong,{force:true}),e=>e.code==='EDITABLE_LAYOUT_NEEDS_SPLIT');assert.deepEqual(tooLong,untouched);
+});
+
+test('confirmed-copy tail can fit a newly composed scene but never repacks an existing manual page',async()=>{
+ const {composeEditableContent,reconcileConfirmedCopy,confirmedCopyCoverage}=await import('../src/visual-workbench/model.mjs');
+ const c=createBlankContent();c.pages[0].title='保留阅读顺序';c.pages[0].eyebrow='短说明';c.pages[0].body='第一段已经显示在画面里。';c.pages[0].visual='character';c.pages[0].image_style={...c.pages[0].image_style,src:'/assets/xiaoshimei-character-full.png',hidden:false};c.body=c.pages[0].body+'\n下一段需要作为独立文字保留下来。';
+ const before=structuredClone(c),fresh=reconcileConfirmedCopy(c);assert.equal(fresh.pages.length,1);assert.equal(fresh.pages[0].body,c.pages[0].body);assert.equal(fresh.body,c.body);assert.deepEqual(c,before);assert.deepEqual(confirmedCopyCoverage(fresh).missing,[]);assert.deepEqual(reconcileConfirmedCopy(fresh),fresh);
+ const manual=composeEditableContent(c);manual.pages[0].html_state.free_objects.find(o=>o.kind==='image').x=8;const original=structuredClone(manual);const repaired=reconcileConfirmedCopy(manual);assert.equal(repaired.pages.length,2);assert.deepEqual(repaired.pages[0],original.pages[0]);assert.deepEqual(manual,original);assert.deepEqual(confirmedCopyCoverage(repaired).missing,[]);
+});
+
+
+
+test('parent context packing does not reject a feasible uneven four-one-one sentence distribution',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent(),p=c.pages[0];
+ Object.assign(p,{title:'步骤',eyebrow:'说明',page_role:'method',body:'',info_panels:[0,1,2].map(i=>({title:'场景'+i,body:'说明。',image_style:{src:'/assets/x.png'}}))});
+ const chunks=[...Array(4).fill('短'.repeat(5)+'。'),'长'.repeat(65)+'。','尾'.repeat(65)+'。'];p.body=chunks.join('');
+ const before=structuredClone(c),out=composeEditableContent(c);assert.equal(out.pages.length,3);assert.deepEqual(c,before);
+ assert.equal(out.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.id==='context-copy').map(o=>o.text)).join(''),p.body);
 });
