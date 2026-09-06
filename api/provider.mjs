@@ -1581,6 +1581,76 @@ redis.call('ZREM', KEYS[3], member)
 return {'RELEASED', amount_text}
 `;
 
+
+// Completed runs cannot create new assets or reserve a new image STEP. Their
+// unused worst-case future-write budget is separate from actual retained bytes,
+// which START still measures. This CAS never deletes paid results or alters TTL.
+const D37_RELEASE_COMPLETED_PREALLOCATION_LUA = `
+local function exact_uint(value)
+  if type(value) ~= 'string' or not string.match(value, '^%d+$')
+    or (#value > 1 and string.sub(value,1,1) == '0') then return nil end
+  local n=tonumber(value)
+  if not n or n < 0 or n > 9007199254740991 or n ~= math.floor(n) then return nil end
+  return n
+end
+local function key_type(key)
+  local t=redis.call('TYPE',key)
+  if type(t)=='table' then return t.ok else return t end
+end
+if key_type(KEYS[2]) == 'none' then return {'NOT_ELIGIBLE'} end
+if key_type(KEYS[1]) ~= 'hash' or key_type(KEYS[2]) ~= 'hash' then return {'CAPACITY_ACCOUNTING_INVALID'} end
+if redis.call('HGET',KEYS[1],'schema') ~= 'xiaoshimei.image-ledger-capacity.v2'
+ or redis.call('HGET',KEYS[1],'capacity_generation') ~= ARGV[1] then return {'CAPACITY_GENERATION_DRIFT'} end
+if redis.call('HGET',KEYS[2],'app_scope') ~= ARGV[2]
+ or redis.call('HGET',KEYS[2],'status') ~= 'COMPLETE'
+ or redis.call('HGET',KEYS[2],'capacity_generation') ~= ARGV[1] then return {'NOT_ELIGIBLE'} end
+if redis.call('HGET',KEYS[2],'capacity_released') == '1' then return {'ALREADY_RELEASED'} end
+if redis.call('HGET',KEYS[2],'capacity_released') ~= '0' then return {'CAPACITY_ACCOUNTING_INVALID'} end
+local ok_run, run=pcall(cjson.decode,redis.call('HGET',KEYS[2],'run_json') or '')
+local ok_response, response=pcall(cjson.decode,redis.call('HGET',KEYS[2],'cached_response_json') or '')
+if not ok_run or not ok_response or type(run)~='table' or type(response)~='table'
+ or run.schema~='xiaoshimei.public-image-run.v1' or run.run_id~=ARGV[3]
+ or run.status~='COMPLETE' or run.phase~='COMPLETE'
+ or type(run.jobs)~='table' or #run.jobs<1 or run.next_job_index~=#run.jobs
+ or type(run.assets)~='table' or #run.assets<1
+ or response.schema~='xiaoshimei.image-generation-response.v1' or response.run_id~=ARGV[3]
+ or response.status~='COMPLETE' or (response.error~=nil and response.error~=cjson.null)
+ or type(response.progress)~='table' or type(run.actual_image_calls)~='number'
+ or run.actual_image_calls<1 or run.actual_image_calls>6 or run.actual_image_calls~=math.floor(run.actual_image_calls)
+ or response.progress.actual_image_calls~=run.actual_image_calls then return {'NOT_ELIGIBLE'} end
+local count=exact_uint(redis.call('HGET',KEYS[2],'reservation_count'))
+if not count or count<run.actual_image_calls or count>6 then return {'NOT_ELIGIBLE'} end
+if key_type(KEYS[4])~='set'
+ or redis.call('HGET',KEYS[2],'inventory_schema')~='xiaoshimei.d36-key-inventory.v1'
+ or redis.call('SISMEMBER',KEYS[4],KEYS[2])~=1 or redis.call('SISMEMBER',KEYS[4],KEYS[4])~=1 then return {'INVENTORY_INCOMPLETE'} end
+local members=redis.call('SMEMBERS',KEYS[4])
+if #members~=exact_uint(redis.call('HGET',KEYS[2],'inventory_count')) then return {'INVENTORY_INCOMPLETE'} end
+local step_count=0
+for _,key in ipairs(members) do
+ if string.sub(key,1,#ARGV[4])~=ARGV[4] or redis.call('EXISTS',key)~=1 then return {'INVENTORY_INCOMPLETE'} end
+ if string.sub(key,1,#ARGV[4]+5)==ARGV[4]..'step:' then
+  if key_type(key)~='hash' or redis.call('HGET',key,'status')~='COMMITTED' then return {'NOT_ELIGIBLE'} end
+  step_count=step_count+1
+ end
+end
+if step_count~=count then return {'NOT_ELIGIBLE'} end
+if key_type(KEYS[3])~='zset' then return {'CAPACITY_ACCOUNTING_INVALID'} end
+local amount_text=redis.call('HGET',KEYS[2],'capacity_reservation_bytes') or ''
+local amount=exact_uint(amount_text)
+local member=KEYS[2]..'|'..ARGV[1]..'|'..amount_text
+if not amount or amount<1 or redis.call('ZSCORE',KEYS[3],member)==false then return {'CAPACITY_ACCOUNTING_INVALID'} end
+local reserved=exact_uint(redis.call('HGET',KEYS[1],'reserved_bytes'))
+local live=exact_uint(redis.call('HGET',KEYS[1],'live_reservations'))
+local inventories=exact_uint(redis.call('HGET',KEYS[1],'unfinalized_inventory'))
+if not reserved or not live or not inventories or reserved<amount or live<1 or inventories<1 then return {'CAPACITY_ACCOUNTING_INVALID'} end
+redis.call('HINCRBY',KEYS[1],'reserved_bytes',-amount)
+redis.call('HINCRBY',KEYS[1],'live_reservations',-1)
+redis.call('HINCRBY',KEYS[1],'unfinalized_inventory',-1)
+redis.call('HSET',KEYS[2],'capacity_released','1','capacity_release_reason','COMPLETE_IMMUTABLE')
+redis.call('ZREM',KEYS[3],member)
+return {'RELEASED',amount_text}
+`;
+
 const D36_RELEASE_CAPACITY_LUA = `
 if redis.call('HGET', KEYS[1], 'schema') ~= 'xiaoshimei.image-ledger-capacity.v2'
   or redis.call('HGET', KEYS[1], 'capacity_generation') ~= ARGV[2] then return {'CAPACITY_GENERATION_DRIFT'} end
@@ -1798,6 +1868,11 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     if(!match||!(/^[0-9a-f]{64}$/).test(String(capacityGeneration||'')))throw new TypeError('IMAGE_LEDGER_FAILED_RELEASE_IDENTITY_INVALID');
     return evalLua(D37_RELEASE_FAILED_PLANNER_PREALLOCATION_LUA,[`${D37_PRODUCT_ROOT}:capacity`,metaKey,`${match[1]}:expiry`],[capacityGeneration]);
   };
+  const releaseCompletedPreallocation = async ({runId,appScopeId,capacityGeneration}={}) => {
+    if(typeof appScopeId!=='string'||!appScopeId||!(/^[0-9a-f]{64}$/).test(String(capacityGeneration||'')))throw new TypeError('IMAGE_LEDGER_COMPLETED_RELEASE_IDENTITY_INVALID');
+    const root=d36RunRoot(runId,appScopeId);
+    return evalLua(D37_RELEASE_COMPLETED_PREALLOCATION_LUA,[d36CapacityKey(appScopeId),root+':meta',d36ExpiryIndexKey(appScopeId),root+':inventory'],[capacityGeneration,appScopeId,runId,root+':']);
+  };
   const verifyStartInventoryAndCapacity = async (context, attestation) => {
     const appScopeId = String(context?.appScopeId || "");
     await finalizeExpiredRunsWithAttestation(appScopeId, attestation);
@@ -1809,11 +1884,32 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     const isD37Key = (key) => key.startsWith(`${D37_PRODUCT_ROOT}:`);
     const isLegacyD36Key = (key) => /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:/.test(key);
     if (keys.some((key) => !isD37Key(key) && !isLegacyD36Key(key))) throw new Error("IMAGE_LEDGER_FOREIGN_KEYS_PRESENT");
+    // Validate the full physical inventory before any future-budget release.
+    const runMetaKeys = keys.filter((key) => /:run:images-[^:]+:meta$/.test(key));
+    const inventoryUnion = new Set(keys.filter((key) => key === d36CapacityKey(appScopeId)
+      || /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:(?:(?:candidate:[0-9a-f]{40}:)?readiness|expiry)$/.test(key)
+      || /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:(readiness|capacity|expiry)$/.test(key)));
+    for (const metaKey of runMetaKeys) {
+      const inventoryKey = metaKey.replace(/:meta$/, ":inventory");
+      const members = await command(["SMEMBERS", inventoryKey]);
+      if (!Array.isArray(members) || !members.includes(metaKey) || !members.includes(inventoryKey)) {
+        throw new Error("IMAGE_LEDGER_INVENTORY_INCOMPLETE");
+      }
+      for (const member of members) inventoryUnion.add(String(member));
+    }
+    if (keys.some((key) => !inventoryUnion.has(key))) throw new Error("IMAGE_LEDGER_INVENTORY_UNION_MISMATCH");
     // The product capacity is shared across deployment scopes. Only terminal,
     // zero-image failures from this same product/generation are eligible.
     for(const key of keys.filter(k=>/^xiaoshimei:image-d37:/.test(k)&&/:run:images-[^:]+:meta$/.test(k))){
       const result=await releaseFailedPlannerPreallocation({metaKey:key,capacityGeneration:attestation.capacity_generation});
       if(!new Set(['RELEASED','ALREADY_RELEASED','NOT_ELIGIBLE']).has(result.status))throw new Error(`IMAGE_LEDGER_${result.status}`);
+      // Reclaim only this app scope's proven immutable completions. Other
+      // scopes, legacy roots and all uncertain/active runs remain reserved.
+      const prefix=d36AppRoot(appScopeId)+':run:';
+      if(key.startsWith(prefix)){
+        const completed=await releaseCompletedPreallocation({runId:key.slice(prefix.length,-5),appScopeId,capacityGeneration:attestation.capacity_generation});
+        if(!new Set(['RELEASED','ALREADY_RELEASED','NOT_ELIGIBLE']).has(completed.status))throw new Error(`IMAGE_LEDGER_${completed.status}`);
+      }
     }
     let physicalBytes = 0;
     for (const key of keys) {
@@ -1844,19 +1940,6 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       reservedBytes += values[0]; liveReservations += values[1]; unfinalizedInventory += values[2];
       if (![reservedBytes, liveReservations, unfinalizedInventory].every(Number.isSafeInteger)) throw new Error("IMAGE_LEDGER_CAPACITY_INVALID");
     }
-    const runMetaKeys = keys.filter((key) => /:run:images-[^:]+:meta$/.test(key));
-    const inventoryUnion = new Set(keys.filter((key) => key === d36CapacityKey(appScopeId)
-      || /^xiaoshimei:image-d37:\{xiaoshimei-studio-v2\}:scope:[0-9a-f]{32}:(?:(?:candidate:[0-9a-f]{40}:)?readiness|expiry)$/.test(key)
-      || /^xiaoshimei:image-d36:\{[0-9a-f]{32}\}:(readiness|capacity|expiry)$/.test(key)));
-    for (const metaKey of runMetaKeys) {
-      const inventoryKey = metaKey.replace(/:meta$/, ":inventory");
-      const members = await command(["SMEMBERS", inventoryKey]);
-      if (!Array.isArray(members) || !members.includes(metaKey) || !members.includes(inventoryKey)) {
-        throw new Error("IMAGE_LEDGER_INVENTORY_INCOMPLETE");
-      }
-      for (const member of members) inventoryUnion.add(String(member));
-    }
-    if (keys.some((key) => !inventoryUnion.has(key))) throw new Error("IMAGE_LEDGER_INVENTORY_UNION_MISMATCH");
     if (physicalBytes + reservedBytes + attestation.worst_case_run_bytes + attestation.headroom_bytes > attestation.capacity_limit_bytes) {
       const error=new Error("IMAGE_LEDGER_CAPACITY_EXHAUSTED");
       error.details={physical_bytes:physicalBytes,reserved_bytes:reservedBytes,next_run_bytes:attestation.worst_case_run_bytes,headroom_bytes:attestation.headroom_bytes,capacity_limit_bytes:attestation.capacity_limit_bytes,live_reservations:liveReservations,unfinalized_inventory:unfinalizedInventory};
@@ -1868,13 +1951,21 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     const runId = String(context?.runId || "");
     const appScopeId = String(context?.appScopeId || "");
     const record = redisHashObject(await command(["HGETALL", `${d36RunRoot(runId, appScopeId)}:meta`]));
+    let cacheOnly=false;
+    if(record.capacity_released==='1'&&record.capacity_release_reason==='COMPLETE_IMMUTABLE'&&record.status==='COMPLETE'){
+      try{
+        const run=JSON.parse(record.run_json),response=JSON.parse(record.cached_response_json);
+        cacheOnly=run.schema==='xiaoshimei.public-image-run.v1'&&run.run_id===runId&&run.status==='COMPLETE'&&run.phase==='COMPLETE'
+          &&response.schema==='xiaoshimei.image-generation-response.v1'&&response.run_id===runId&&response.status==='COMPLETE'&&!response.error;
+      }catch{/* No immutable cache evidence: retain the existing refusal. */}
+    }
     if (record.app_scope !== appScopeId
       || record.capacity_generation !== attestation.capacity_generation
       || Number(record.capacity_reservation_bytes) !== attestation.worst_case_run_bytes
-      || Number(record.capacity_released || 0) !== 0) {
+      || (Number(record.capacity_released || 0) !== 0&&!cacheOnly)) {
       throw new Error("IMAGE_LEDGER_CAPACITY_RESERVATION_INVALID");
     }
-    return { ...attestation, mode: "STEP", runtime_attested: true };
+    return { ...attestation, mode: "STEP", runtime_attested: true, ...(cacheOnly?{cache_only:true}:{}) };
   };
   return {
     async assertReady() {
@@ -1899,6 +1990,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
       return { ...attestation, mode: "HEALTH", runtime_attested: true };
     },
     releaseFailedPlannerPreallocation,
+    releaseCompletedPreallocation,
     async assertProductionReady(context = {}) {
       await this.assertReady();
       if (typeof readinessProbe === "function" || productionReadiness != null) {
