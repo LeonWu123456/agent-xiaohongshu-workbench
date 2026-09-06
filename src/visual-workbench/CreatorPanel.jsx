@@ -11,6 +11,21 @@ function stateLabel(health) {
   return '生成服务未就绪';
 }
 
+export function StudioLogin({onLogin,busy=false,error='',loading=false,onRetry}){
+ const [username,setUsername]=useState('leon'),[password,setPassword]=useState(''),[visible,setVisible]=useState(false);
+ return <main className="vw-login-screen"><section className="vw-login-card" aria-label="小师妹登录">
+  <div className="vw-login-brand"><span className="vw-brand-avatar"><img src="/assets/xiaoshimei-character.png" alt="小师妹"/></span><span>小师妹<span>STUDIO</span></span></div>
+  <h1>开始你的创作</h1><p>登录一次，把想法变成图文。</p>
+  {loading?<div role="status" className="vw-login-loading">正在连接工作台…</div>:<form onSubmit={async event=>{event.preventDefault();if(busy)return;const value={username,password};setPassword('');await onLogin(value);}}>
+   <label>用户名<input name="username" aria-label="用户名" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={event=>setUsername(event.target.value)} maxLength={64} required disabled={busy}/></label>
+   <label>密码<span className="vw-password-field"><input name="password" aria-label="密码" type={visible?'text':'password'} autoComplete="current-password" value={password} onChange={event=>setPassword(event.target.value)} maxLength={256} required disabled={busy}/><button type="button" onClick={()=>setVisible(!visible)} aria-label={visible?'隐藏密码':'显示密码'}>{visible?'隐藏':'显示'}</button></span></label>
+   {error&&<div role="alert" className="vw-login-error">{error}</div>}
+   <button className="vw-login-submit" type="submit" disabled={busy||!username.trim()||!password}>{busy?'正在登录…':'登录工作台'}</button>
+  </form>}
+  <footer><span>无需填写 API Key</span>{onRetry&&<button type="button" onClick={onRetry} disabled={busy||loading}>重新连接</button>}</footer>
+ </section></main>;
+}
+
 export function CreatorPanel({ topic, setTopic, session, health, busy, pending, recoveryDrafts = [], imageFlow, onGenerate, onEdit, onChooseTitle, onConfirm, onRefreshHealth, onImageCount, onAutoImageCount, onProductionMode, onImageCheck, onImageRun, onOpenRecovery, onInput, onAddReferences, onRemoveReference, onReferenceNote, referenceUrls = {}, onAuthenticate }) {
   const draft = session?.text_draft || null;
   const confirmed = Boolean(session?.text_confirmed);
@@ -34,7 +49,8 @@ export function CreatorPanel({ topic, setTopic, session, health, busy, pending, 
       <i/><span><strong>{stateLabel(health)}</strong><small>{health?.provider_label || '火山方舟 · 文字先行'}</small><small className="vw-provider-meta">{health?.credential_mode || '凭证模式未读取'} · 文字 {health?.text_model || '未读取'} · 图片 {health?.image_model || '未读取'} · 账本 {health?.image_ledger_attested === true ? 'READY' : health?.image_ledger_attestation_status || '未确认'}</small></span>
       <button type="button" onClick={onRefreshHealth} disabled={!!busy} aria-label="重新检查生成服务"><RefreshCw size={14}/></button>
     </div>
-    {accessRequired&&<form className="vw-access-form" onSubmit={async event=>{event.preventDefault();const code=accessCode;setAccessCode('');await onAuthenticate?.(code);}}><label><span>{'\u751f\u6210\u670d\u52a1\u8bbf\u95ee\u7801'}</span><input aria-label={'\u751f\u6210\u670d\u52a1\u8bbf\u95ee\u7801'} type="password" autoComplete="off" value={accessCode} onChange={e=>setAccessCode(e.target.value)} maxLength={256}/></label><button type="submit" disabled={!!busy||!accessCode.trim()}>{'\u8fde\u63a5\u751f\u6210\u670d\u52a1'}</button></form>}
+
+    {accessRequired&&health?.login_method!=='USERNAME_PASSWORD'&&<form className="vw-access-form" onSubmit={async event=>{event.preventDefault();const code=accessCode;setAccessCode('');await onAuthenticate?.(code);}}><label><span>{'\u751f\u6210\u670d\u52a1\u8bbf\u95ee\u7801'}</span><input aria-label={'\u751f\u6210\u670d\u52a1\u8bbf\u95ee\u7801'} type="password" autoComplete="off" value={accessCode} onChange={e=>setAccessCode(e.target.value)} maxLength={256}/></label><button type="submit" disabled={!!busy||!accessCode.trim()}>{'\u8fde\u63a5\u751f\u6210\u670d\u52a1'}</button></form>}
     {!isVariant&&<><section className="vw-creator-section">
       <header><span>01</span><div><strong>写下原文或选题</strong><small>这里只生成文字，确认前图片调用数 = 0</small></div></header>
       <textarea aria-label="原文或选题" rows="6" value={topic} onChange={event => setTopic(event.target.value)} placeholder="例如：为什么真正会休息的人，工作反而更快？也可以直接粘贴一段原文。" disabled={locked}/>

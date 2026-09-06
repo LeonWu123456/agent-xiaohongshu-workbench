@@ -155,13 +155,14 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
   const credentialOptions = isLoopback ? {} : { credentials: "same-origin" };
   const providerFailure = (response, payload) => {
     const providerCode = String(payload?.code || payload?.error || `HTTP_${response?.status || "UNKNOWN"}`);
-    const error = new Error(`provider request failed: ${providerCode}`);
+    const friendly={LOGIN_INVALID:'用户名或密码不正确。',LOGIN_INPUT_INVALID:'请输入有效的用户名和密码。',LOGIN_RATE_LIMITED:'登录尝试过于频繁，请一分钟后重试。',LOGIN_TEMPORARILY_UNAVAILABLE:'登录服务暂时不可用，请稍后重试。',ACCESS_SESSION_REQUIRED:'登录已过期，请重新登录。',ACCESS_CONFIGURATION_REQUIRED:'登录尚未配置完成，请联系管理员。'};
+    const error = new Error(friendly[providerCode]||`provider request failed: ${providerCode}`);
     error.providerCode = providerCode;
     error.providerStage = typeof payload?.stage === "string" ? payload.stage : null;
     error.failureId = typeof payload?.failure_id === "string" ? payload.failure_id : null;
     error.httpStatus = response?.status || null;
     error.requiresAccess = response?.status === 401 && !isLoopback
-      && (new Set(["ACCESS_DENIED", "ACCESS_SESSION_REQUIRED"]).has(providerCode) || cloudSettings()?.credential_mode === "SERVER_MANAGED");
+      && (new Set(["LOGIN_INVALID", "ACCESS_DENIED", "ACCESS_SESSION_REQUIRED"]).has(providerCode) || cloudSettings()?.credential_mode === "SERVER_MANAGED");
     error.providerDetails = payload?.details && typeof payload.details === "object" ? structuredClone(payload.details) : null;
     return error;
   };
@@ -219,17 +220,20 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
 
   const authenticateAccess = async (code, { generation = null } = {}) => {
     if (isLoopback) throw new TypeError("本机生成服务不使用公网访问会话");
-    if (typeof code !== "string" || code.length < 1 || code.length > 256) throw new TypeError("请输入有效访问码");
+    const isAccount=Boolean(code&&typeof code==='object'&&!Array.isArray(code));
+    if(isAccount){if(typeof code.username!=='string'||!code.username.trim()||code.username.length>64||typeof code.password!=='string'||!code.password||code.password.length>256)throw new TypeError('请输入用户名和密码。');}
+    else if(typeof code!=='string'||code.length<1||code.length>256)throw new TypeError('请输入有效登录信息。');
+    const loginInput=isAccount?{username:code.username,password:code.password}:{code};
     let loginPayload = null;
     let ambiguity = null;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs,10000));
       try {
         const response = await fetchImpl(accessSessionUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ code }),
+          body: JSON.stringify(loginInput),
           signal: controller.signal,
           credentials: "same-origin",
         });
@@ -252,7 +256,7 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs,10000));
     try {
       const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store", signal: controller.signal, credentials: "same-origin" });
       let configPayload = null;
@@ -272,6 +276,12 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
 
   return {
     id: `${isLoopback ? "local-http" : "same-origin-byok"}:${url.host}`,
+    async logout(){
+      const target=new URL(url);target.pathname=target.pathname.replace(/\/generate\/?$/,'/logout');
+      const response=await fetchImpl(target,{method:'POST',headers:{'content-type':'application/json'},body:'{}',credentials:'same-origin',signal:AbortSignal.timeout(10000)});
+      let payload;try{payload=await response.json();}catch{throw new Error('退出未确认，请重试。');}
+      if(!response.ok)throw providerFailure(response,payload);return payload;
+    },
     async checkHealth() {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 3000);
@@ -295,7 +305,7 @@ export function createLocalHttpProvider({ endpoint, fetchImpl = globalThis.fetch
       } finally { clearTimeout(timer); }
     },
     async getSettings() {
-      const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store", ...credentialOptions });
+      const response = await fetchImpl(configUrl, { method: "GET", cache: "no-store", signal:AbortSignal.timeout(Math.min(timeoutMs,10000)), ...credentialOptions });
       const payload = await response.json();
       if (!response?.ok) throw new Error(`provider config failed: HTTP_${response?.status || "UNKNOWN"}`);
       if (isLoopback) return payload;

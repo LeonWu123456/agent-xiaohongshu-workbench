@@ -3632,3 +3632,54 @@ test('native Redis Lua never partially decrements malformed counters and release
   assert.equal(await cli('HGET',meta,'capacity_released'),'1');
  }finally{server.kill('SIGTERM');await new Promise(r=>{if(server.exitCode!==null)return r();server.once('exit',r);setTimeout(r,2000).unref();});await rm(dir,{recursive:true,force:true});}
 });
+
+
+async function passwordEnv() {
+ const {scryptSync}=await import('node:crypto');const password='Exact-test Password 2026!';const salt='8f34d178afecc34aafe423180c3587ab';
+ const hash=scryptSync(password,Buffer.from(salt,'hex'),64,{N:32768,r:8,p:3,maxmem:64*1024*1024}).toString('hex');
+ return {password,env:{...accessEnv(),VERCEL_ENV:'preview',VERCEL_URL:'build-username.vercel.app',XIAOSHIMEI_PREVIEW_AUTH_MODE:'STUDIO_ACCESS_SESSION',XIAOSHIMEI_AUTH_MODE:'USERNAME_PASSWORD',XIAOSHIMEI_LOGIN_USERNAME:'leon',XIAOSHIMEI_PASSWORD_HASH:`scrypt$32768$8$3$${salt}$${hash}`,UPSTASH_REDIS_REST_URL:'https://auth-fixture.upstash.io',UPSTASH_REDIS_REST_TOKEN:'auth-fixture-token-123456'}};
+}
+test('username/password login shares existing session admission and never accepts an old code as password',async()=>{
+ const {password,env}=await passwordEnv();let rateCalls=0;const authFetchImpl=async(url,options)=>{rateCalls++;const command=JSON.parse(options.body);assert.equal(command[0],'EVAL');assert.ok(!options.body.includes(password));return {ok:true,json:async()=>({result:[rateCalls,60]})};};
+ const handle=createProviderHandler({env,authFetchImpl});const headers={...sameOriginHeaders(env),'x-real-ip':'192.0.2.1'};
+ const info=responseProbe();await handle({method:'GET',query:{route:'config'},headers:{}},info);assert.equal(info.body.login_method,'USERNAME_PASSWORD');assert.equal(info.body.authenticated,false);
+ const wrong=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers,body:{username:'leon',password:'incorrect'}},wrong);assert.equal(wrong.statusCode,401);assert.equal(wrong.body.error,'LOGIN_INVALID');
+ const other=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers,body:{username:'other',password}},other);assert.equal(other.statusCode,401);assert.deepEqual(other.body,wrong.body);
+ const code=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers,body:{code:'open-sesame'}},code);assert.equal(code.statusCode,400);
+ const success=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers,body:{username:'leon',password}},success);assert.equal(success.statusCode,200);assert.equal(success.body.username,'leon');
+ const cookies=setCookieValues(success);const cookie=cookiePairFromSetCookie(cookies.at(-1));assert.match(cookies.at(-1),/HttpOnly; Secure; SameSite=Strict/);
+ const checked=responseProbe();await handle({method:'GET',query:{route:'config'},headers:{cookie}},checked);assert.equal(checked.body.authenticated,true);assert.equal(checked.body.username,'leon');assert.ok(!JSON.stringify(checked.body).includes(env.XIAOSHIMEI_PASSWORD_HASH));assert.ok(!JSON.stringify(checked.body).includes(env.ARK_API_KEY));
+ const old=mintAccessSession(inspectServerAccessConfig(accessEnv()));assert.equal(verifyAccessSession(old.token,inspectServerAccessConfig(env)),false);
+ const changed=inspectServerAccessConfig({...env,XIAOSHIMEI_LOGIN_USERNAME:'new-owner'});assert.equal(verifyAccessSession(cookie.split('=')[1],changed),false);
+ const logout=responseProbe();await handle({method:'POST',query:{route:'logout'},headers:{...headers,cookie},body:{}},logout);assert.equal(logout.statusCode,200);assert.ok(setCookieValues(logout).every(x=>x.includes('Max-Age=0')));
+ const csrf=responseProbe();await handle({method:'POST',query:{route:'access-session'},headers:{...headers,origin:'https://foreign.example'},body:{username:'leon',password}},csrf);assert.equal(csrf.statusCode,403);
+ assert.equal(rateCalls,3);
+});
+test('username login fails closed for throttle, broken Redis and malformed credential configuration',async()=>{
+ const {password,env}=await passwordEnv();const headers=sameOriginHeaders(env),req={method:'POST',query:{route:'access-session'},headers,body:{username:'leon',password}};
+ const throttled=responseProbe();await createProviderHandler({env,authFetchImpl:async()=>({ok:true,json:async()=>({result:[11,42]})})})(req,throttled);assert.equal(throttled.statusCode,429);assert.equal(throttled.body.error,'LOGIN_RATE_LIMITED');
+ const unavailable=responseProbe();await createProviderHandler({env,authFetchImpl:async()=>{throw new Error('offline')}})(req,unavailable);assert.equal(unavailable.statusCode,503);assert.equal(unavailable.body.error,'LOGIN_TEMPORARILY_UNAVAILABLE');
+ const missing=inspectServerAccessConfig({...env,XIAOSHIMEI_PASSWORD_HASH:''});assert.equal(missing.ready,false);
+ const malformed=inspectServerAccessConfig({...env,XIAOSHIMEI_PASSWORD_HASH:env.XIAOSHIMEI_PASSWORD_HASH.replace('32768','9999999')});assert.equal(malformed.ready,false);
+ const tooLong=responseProbe();await createProviderHandler({env,authFetchImpl:async()=>{throw new Error('MUST_NOT_CALL')}})({...req,body:{username:'leon',password:'x'.repeat(300)}},tooLong);assert.equal(tooLong.statusCode,400);
+});
+
+
+test('username mode never falls back to public browser keys when server key is absent',async()=>{
+ const {env}=await passwordEnv();const off={...env,ARK_API_KEY:''};const handler=createProviderHandler({env:off});
+ const response=responseProbe();await handler({method:'POST',query:{route:'generate-images'},headers:{...sameOriginHeaders(off),authorization:'Bearer attacker-controlled-key'},body:{}},response);assert.equal(response.statusCode,503);assert.equal(response.body.error,'ACCESS_CONFIGURATION_REQUIRED');
+});
+test('username credential client uses the same cookie endpoint, confirms server login and exposes no frontend key',async()=>{
+ const {createLocalHttpProvider}=await import('../src/provider-client.mjs');const locationBefore=globalThis.location;
+ globalThis.location={origin:'https://studio.example'};const requests=[];
+ try{
+  const provider=createLocalHttpProvider({endpoint:'https://studio.example/api/provider/generate',fetchImpl:async(url,options={})=>{requests.push({url:String(url),...options});return {ok:true,status:200,json:async()=>String(url).endsWith('logout')?{authenticated:false}:{authenticated:true,configured:true,credential_mode:'SERVER_MANAGED',login_method:'USERNAME_PASSWORD',username:'leon'}};}});
+  const result=await provider.authenticateAccess({username:'leon',password:'test password'});assert.equal(result.config.authenticated,true);assert.deepEqual(JSON.parse(requests[0].body),{username:'leon',password:'test password'});assert.ok(requests.every(r=>r.credentials==='same-origin'));assert.equal(requests[0].headers.authorization,undefined);await provider.logout();assert.equal(requests.at(-1).url,'https://studio.example/api/provider/logout');
+ }finally{globalThis.location=locationBefore;}
+});
+
+
+test('configuration reads carry a short AbortSignal rather than an unbounded login dependency',async()=>{
+ const {createLocalHttpProvider}=await import('../src/provider-client.mjs');const before=globalThis.location;globalThis.location={origin:'https://studio.example'};
+ try{let signal;const provider=createLocalHttpProvider({endpoint:'https://studio.example/api/provider/generate',fetchImpl:async(_url,options)=>{signal=options.signal;return {ok:true,json:async()=>({configured:true})};}});await provider.getSettings();assert.ok(signal instanceof AbortSignal);assert.equal(signal.aborted,false);}finally{globalThis.location=before;}
+});

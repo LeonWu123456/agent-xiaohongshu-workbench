@@ -1,4 +1,4 @@
-import { createHash, createHmac, createPublicKey, randomUUID, timingSafeEqual, verify as verifySignature } from "node:crypto";
+import { createHash, createHmac, createPublicKey, randomUUID, timingSafeEqual, scrypt as scryptCallback, verify as verifySignature } from "node:crypto";
 import sharp from "sharp";
 import {
   ARK_BASE_URL,
@@ -160,21 +160,27 @@ function configuredPreviewOrigin(env = process.env) {
 }
 
 export function previewUsesVercelAuthentication(env = process.env) {
-  return configuredServerManaged(env) && Boolean(configuredPreviewOrigin(env))
+  return env.XIAOSHIMEI_AUTH_MODE !== "USERNAME_PASSWORD" && configuredServerManaged(env) && Boolean(configuredPreviewOrigin(env))
     && (!env.XIAOSHIMEI_PREVIEW_AUTH_MODE || env.XIAOSHIMEI_PREVIEW_AUTH_MODE === "VERCEL_AUTHENTICATION");
 }
 
 export function inspectServerAccessConfig(env = process.env) {
   const accessCodeSha256 = String(env?.XIAOSHIMEI_ACCESS_CODE_SHA256 || "").trim().toLowerCase();
-  const sessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
+  const baseSessionSecret = String(env?.XIAOSHIMEI_SESSION_SECRET || "").trim();
+  const accountMode=env?.XIAOSHIMEI_AUTH_MODE === "USERNAME_PASSWORD";
+  const username=String(env?.XIAOSHIMEI_LOGIN_USERNAME||"");
+  const passwordHash=String(env?.XIAOSHIMEI_PASSWORD_HASH||"");
+  const passwordConfig=parseStudioPasswordHash(passwordHash);
+  const sessionSecret=accountMode?createHmac("sha256",baseSessionSecret).update("studio-login-v1\0"+username+"\0"+passwordHash).digest("hex"):baseSessionSecret;
   const mode = String(env?.XIAOSHIMEI_PREVIEW_AUTH_MODE || "VERCEL_AUTHENTICATION");
-  const studioPreview = env?.VERCEL_ENV === "preview" && mode === "STUDIO_ACCESS_SESSION";
+  const studioPreview = env?.VERCEL_ENV === "preview" && (mode === "STUDIO_ACCESS_SESSION" || accountMode);
   const modeValid = env?.VERCEL_ENV !== "preview" || ["VERCEL_AUTHENTICATION", "STUDIO_ACCESS_SESSION"].includes(mode);
   const appOrigin = studioPreview ? configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN)
     : configuredPreviewOrigin(env) || configuredOrigin(env?.XIAOSHIMEI_APP_ORIGIN);
-  const ready = modeValid && /^[0-9a-f]{64}$/.test(accessCodeSha256) && sessionSecret.length >= 32 && Boolean(appOrigin);
+  const authConfigReady=accountMode?Boolean(/^[A-Za-z0-9._-]{1,64}$/.test(username)&&passwordConfig&&imageLedgerEnv(env).ready):/^[0-9a-f]{64}$/.test(accessCodeSha256);
+  const ready = modeValid && authConfigReady && baseSessionSecret.length >= 32 && Boolean(appOrigin);
   const appScope = appOrigin ? `xiaoshimei-studio:${createHash("sha256").update(appOrigin).digest("hex").slice(0, 32)}` : "";
-  return { ready, accessCodeSha256, sessionSecret, appOrigin, appScope };
+  return { ready, accessCodeSha256, sessionSecret, appOrigin, appScope, ...(accountMode?{loginMethod:"USERNAME_PASSWORD",username,passwordConfig}:{}) };
 }
 
 function imageLedgerEnv(env = process.env) {
@@ -380,6 +386,34 @@ export function inspectAccessSessionCandidates(cookieHeader, accessConfig, { now
   };
 }
 
+// One owner account: reuse the existing session, not a second auth system.
+function parseStudioPasswordHash(value) {
+ const match=/^scrypt\$32768\$8\$3\$([a-f0-9]{32})\$([a-f0-9]{128})$/.exec(value);
+ return match?{salt:Buffer.from(match[1],'hex'),hash:Buffer.from(match[2],'hex')}:null;
+}
+function boundedLogin(body) {
+ if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).sort().join(',')!=='password,username')throw new TypeError('LOGIN_INPUT_INVALID');
+ if(typeof body.username!=='string'||!body.username.trim()||body.username.length>64||typeof body.password!=='string'||!body.password||body.password.length>256)throw new TypeError('LOGIN_INPUT_INVALID');
+ return {username:body.username.trim(),password:body.password};
+}
+async function usernamePasswordMatches(input,config) {
+ const expected=config.passwordConfig;if(!expected)return false;
+ // Same KDF path for unknown usernames, without trimming or normalizing passwords.
+ const actual=await new Promise((resolve,reject)=>scryptCallback(input.password,expected.salt,64,{N:32768,r:8,p:3,maxmem:64*1024*1024},(error,key)=>error?reject(error):resolve(key)));
+ const userHash=value=>createHash('sha256').update(value).digest();
+ return safeEqual(actual,expected.hash)&&safeEqual(userHash(input.username),userHash(config.username));
+}
+async function admitUsernameLogin(request,config,env,fetchImpl) {
+ const connection=imageLedgerEnv(env);if(!connection.ready)throw new Error('LOGIN_TEMPORARILY_UNAVAILABLE');
+ const ip=requestHeader(request,'x-real-ip')||requestHeader(request,'x-forwarded-for').split(',')[0].trim()||'unknown';
+ const key='xiaoshimei:login:'+createHash('sha256').update(config.appScope+'\0'+ip).digest('hex');
+ const script="local n=redis.call('INCR',KEYS[1]);if n==1 then redis.call('EXPIRE',KEYS[1],60) end;return {n,redis.call('TTL',KEYS[1])}";
+ let response;try{response=await fetchImpl(connection.url,{method:'POST',headers:{authorization:'Bearer '+connection.token,'content-type':'application/json'},body:JSON.stringify(['EVAL',script,1,key]),signal:AbortSignal.timeout(4000)});}catch{throw new Error('LOGIN_TEMPORARILY_UNAVAILABLE');}
+ if(!response?.ok)throw new Error('LOGIN_TEMPORARILY_UNAVAILABLE');const data=await response.json();
+ if(data.error||!Array.isArray(data.result)||data.result.length!==2||!data.result.every(Number.isInteger)||data.result[0]<1||data.result[1]<0)throw new Error('LOGIN_TEMPORARILY_UNAVAILABLE');
+ if(data.result[0]>10){const error=new Error('LOGIN_RATE_LIMITED');error.retryAfter=Math.max(1,data.result[1]);throw error;}
+}
+
 function boundedAccessCode(body) {
   let serialized;
   try { serialized = JSON.stringify(body ?? null); } catch { throw new TypeError("ACCESS_CODE_INVALID"); }
@@ -441,6 +475,7 @@ function publicProviderConfig(request, { env = process.env, nowMs = Date.now() }
     access_configured: configured && (vercelAuthenticatedPreview || access.ready),
     authenticated,
     authentication_mode: vercelAuthenticatedPreview ? "VERCEL_AUTHENTICATION" : configured ? "STUDIO_ACCESS_SESSION" : "BROWSER_BYOK",
+    ...(access.loginMethod?{login_method:access.loginMethod,username:authenticated?access.username:null}:{}),
     image_ledger_configured: ledger.ready,
     provider: "volcengine-ark",
     provider_label: "火山方舟",
@@ -3147,10 +3182,19 @@ export function createProviderHandler(options = {}) {
       return response.end(bytes);
     }
     if (request.method !== "POST") return send(response, 405, { error: "METHOD_NOT_ALLOWED" });
+    if(env.XIAOSHIMEI_AUTH_MODE==='USERNAME_PASSWORD'&&!configuredServerManaged(env))return send(response,503,{error:'ACCESS_CONFIGURATION_REQUIRED'});
 
     const serverManaged = configuredServerManaged(env);
     const accessConfig = inspectServerAccessConfig(env);
     const vercelAuthenticatedPreview = previewUsesVercelAuthentication(env);
+    if(route==='logout'){
+      if(!accessConfig.ready||!serverManaged)return send(response,503,{error:'ACCESS_CONFIGURATION_REQUIRED'});
+      if(!requestHasExactSameOriginWriteGate(request,accessConfig.appOrigin))return send(response,403,{error:'ORIGIN_FORBIDDEN'});
+      const visible=inspectAccessSessionCandidates(requestHeader(request,'cookie'),accessConfig,{nowMs,allowFamilyOverflow:true});
+      if(visible.headerTooLarge)return send(response,431,{error:'COOKIE_HEADER_TOO_LARGE'});
+      response.setHeader('set-cookie',[...new Set(visible.familyPairs.map(pair=>pair.name))].map(deleteAccessSessionCookie));
+      return send(response,200,{authenticated:false});
+    }
     if (route === "access-session") {
       if (!serverManaged || !accessConfig.appOrigin) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       if (!requestHasExactSameOriginWriteGate(request, accessConfig.appOrigin)) return send(response, 403, { error: "ORIGIN_FORBIDDEN" });
@@ -3158,10 +3202,19 @@ export function createProviderHandler(options = {}) {
       if (!accessConfig.ready) return send(response, 503, { error: "ACCESS_CONFIGURATION_REQUIRED" });
       const visibleCandidates = inspectAccessSessionCandidates(requestHeader(request, "cookie"), accessConfig, { nowMs, allowFamilyOverflow: true });
       if (visibleCandidates.headerTooLarge) return send(response, 431, { error: "COOKIE_HEADER_TOO_LARGE" });
-      let code;
-      try { code = boundedAccessCode(request.body); }
-      catch { return send(response, 400, { error: "ACCESS_CODE_INVALID" }); }
-      if (!accessCodeMatches(code, accessConfig)) return send(response, 401, { error: "ACCESS_DENIED" });
+      if(accessConfig.loginMethod==='USERNAME_PASSWORD'){
+        let input;try{input=boundedLogin(request.body);}catch{return send(response,400,{error:'LOGIN_INPUT_INVALID'});}
+        try{
+          await admitUsernameLogin(request,accessConfig,env,options.authFetchImpl||globalThis.fetch);
+          if(!await usernamePasswordMatches(input,accessConfig))return send(response,401,{error:'LOGIN_INVALID'});
+        }catch(error){
+          if(error.message==='LOGIN_RATE_LIMITED'){response.setHeader('retry-after',String(error.retryAfter));return send(response,429,{error:'LOGIN_RATE_LIMITED'});}
+          return send(response,503,{error:'LOGIN_TEMPORARILY_UNAVAILABLE'});
+        }
+      }else{
+        let code;try{code=boundedAccessCode(request.body);}catch{return send(response,400,{error:'ACCESS_CODE_INVALID'});}
+        if(!accessCodeMatches(code,accessConfig))return send(response,401,{error:'ACCESS_DENIED'});
+      }
       const sessionOptions = { nowMs };
       if (typeof options.sessionId === "function") sessionOptions.sessionId = options.sessionId();
       else if (options.sessionId != null) sessionOptions.sessionId = options.sessionId;
@@ -3171,7 +3224,7 @@ export function createProviderHandler(options = {}) {
         .sort()
         .slice(0, ACCESS_SESSION_MAX_PAIRS);
       response.setHeader("set-cookie", [...staleNames.map(deleteAccessSessionCookie), accessSessionCookie(session)]);
-      return send(response, 200, { authenticated: true, credential_mode: "SERVER_MANAGED", expires_at: session.expiresAt.toISOString() });
+      return send(response, 200, { authenticated: true, credential_mode: "SERVER_MANAGED", expires_at: session.expiresAt.toISOString(), ...(accessConfig.loginMethod?{username:accessConfig.username}:{}) });
     }
 
     let imageLedger = null;

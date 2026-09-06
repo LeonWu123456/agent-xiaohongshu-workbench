@@ -277,3 +277,11 @@ test('paid media readback failure points to the non-generating recovery action, 
  }
  assert.equal(imageRecoveryMessage(new Error('SOURCE_CAS_CONFLICT')),'SOURCE_CAS_CONFLICT');
 });
+
+
+test('account-login UI isolates the legacy form and invalidates stale authentication reads',async()=>{
+ const {readFile}=await import('node:fs/promises');
+ const panel=await readFile(new URL('../src/visual-workbench/CreatorPanel.jsx',import.meta.url),'utf8');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ assert.match(panel,/health\?\.login_method!=='USERNAME_PASSWORD'/);assert.match(panel,/autoComplete="current-password"/);assert.match(panel,/autoComplete="username"/);
+ assert.match(main,/const authEpoch=useRef\(0\)/);assert.match(main,/epoch===authEpoch\.current/);assert.match(main,/const epoch=\+\+authEpoch\.current/);assert.match(main,/label="退出登录"/);
+});
