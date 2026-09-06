@@ -5,7 +5,8 @@ export function compactTextLength(value) {
 export function textDraftLengthBounds(sourceInput) {
   const sourceLength = compactTextLength(sourceInput);
   if (sourceLength < 80) return { minimum: 240, maximum: 900, sourceLength, fullSource: false };
-  return { minimum: 180, maximum: Math.min(600, Math.max(220, Math.ceil(sourceLength * 1.3))), sourceLength, fullSource: true };
+  // A complete supplied source must not need padding simply to reach a topic-seed target.
+  return { minimum: Math.min(180, sourceLength), maximum: Math.min(600, Math.max(220, Math.ceil(sourceLength * 1.3))), sourceLength, fullSource: true };
 }
 
 export function textDraftConfirmationIssue(textDraft) {

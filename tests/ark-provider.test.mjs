@@ -605,15 +605,30 @@ test('source-expansion repair carries measured limits and the rejected copy inst
  const rejected={...planValue(),body:body+'原'.repeat(242-body.replace(/\s/g,'').length),recommended_image_count:5};delete rejected.pages;
  let error;try{extractArkTextDraft({output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(rejected)}]},{...input(),topic:fullSource});}catch(e){error=e;}
  assert.ok(error);assert.match(error.message,/body:source_expansion:242\/220/);
- assert.deepEqual(error.qualityDetails,{kind:'source_expansion',observed:242,minimum:180,maximum:220,direction:'compress'});
- const repair=textQualityRetryGuidance(error,{finalAttempt:true});assert.match(repair,/上一版正文是242个有效字符/);assert.match(repair,/后台验收区间是180–220个/);assert.match(repair,/必须压缩到区间内/);assert.match(repair,/只做压缩、重组和润色/);assert.match(repair,/系统最后一次有界自动修稿/);
+ assert.deepEqual(error.qualityDetails,{kind:'source_expansion',observed:242,minimum:131,maximum:220,direction:'compress'});
+ const repair=textQualityRetryGuidance(error,{finalAttempt:true});assert.match(repair,/上一版正文是242个有效字符/);assert.match(repair,/后台验收区间是131–220个/);assert.match(repair,/必须压缩到区间内/);assert.match(repair,/只做压缩、重组和润色/);assert.match(repair,/系统最后一次有界自动修稿/);
  const payload=JSON.parse(repair.split('<rejected_text_draft>')[1].split('</rejected_text_draft>')[0]);assert.equal(payload.body,rejected.body);assert.deepEqual(payload.titles,rejected.titles);assert.deepEqual(payload.tags,rejected.tags);assert.equal(Object.keys(error).includes('rejectedDraft'),false);
 });
 
 test('final text length contract matches the unchanged schema even when user and inherited hints conflict',()=>{
  const fullSource='下班回家后先放好包，把桌上的杯子和杂物归位；再开一盏小灯，把手机放远；慢慢喝温水；记下一件小事；最后把明天要带的东西放在门边。没有做完也没关系，不把休息变成新的任务清单。';
- const value={...input(),topic:fullSource,text_requirements:'正文300至380字'};const original=structuredClone(value);const request=buildArkDraftTextRequest(value,'doubao-text');
- assert.equal(request.tools[0].parameters.properties.body.minLength,180);assert.equal(request.tools[0].parameters.properties.body.maxLength,220);
- assert.match(request.input[0].content,/最终可提交的正文范围：180–220个有效字符/);assert.match(request.input[0].content,/此前的字数建议.*不得突破/);assert.ok(request.input[0].content.lastIndexOf('最终可提交的正文范围')>request.input[0].content.indexOf('用户对文本的额外要求'));assert.deepEqual(value,original);
+ const value={...input(),topic:fullSource,text_requirements:'正文300至380字'};const original=structuredClone(value);const minimum=Math.min(180,fullSource.replace(/\s/g,'').length);const request=buildArkDraftTextRequest(value,'doubao-text');
+ assert.equal(request.tools[0].parameters.properties.body.minLength,minimum);assert.equal(request.tools[0].parameters.properties.body.maxLength,220);
+ assert.ok(request.input[0].content.includes(`最终可提交的正文范围：${minimum}–220个有效字符`));assert.match(request.input[0].content,/此前的字数建议.*不得突破/);assert.ok(request.input[0].content.lastIndexOf('最终可提交的正文范围')>request.input[0].content.indexOf('用户对文本的额外要求'));assert.deepEqual(value,original);
  const seed=buildArkDraftTextRequest({...input(),topic:'整理书桌'},'doubao-text');assert.equal(seed.tools[0].parameters.properties.body.minLength,260);assert.equal(seed.tools[0].parameters.properties.body.maxLength,600);assert.match(seed.input[0].content,/最终可提交的正文范围：260–600个有效字符/);
+});
+
+
+test('backend full-source generation, transport and confirmation accept the same faithful short rewrite',async()=>{
+ const {parseTextDraftResponse}=await import('../src/provider-contract.mjs');const {textDraftConfirmationIssue}=await import('../src/text-draft-policy.mjs');
+ const source='下班回家后，我想给自己一个不用赶的十五分钟。先把包放好，把桌上的杯子和杂物归位；再打开一盏柔和的小灯，手机暂时放远；给自己倒一杯温水，坐下来慢慢喝；打开笔记本，只记下今天一件想留下的小事；最后把明天要带的东西放在门边。没有做完也没关系，不把休息变成新的任务清单。';
+ const originalLength=source.replace(/\s/g,'').length;assert.equal(originalLength,131);
+ const context={...input(),topic:source,pillar:'identity'};const request=buildArkDraftTextRequest(context,'doubao-text');assert.equal(request.tools[0].parameters.properties.body.minLength,131);assert.equal(request.tools[0].parameters.properties.body.maxLength,220);
+ const paragraphs=['先把包放好，桌上的杯子和杂物归位。','接着打开小灯，把手机暂时放远。','然后坐下喝温水，打开笔记本记下一件小事。','最后把明天要带的东西放在门边；没有做完也没关系。'];
+ const joined=paragraphs.join('\n'),body=joined+'原'.repeat(170-joined.replace(/\s/g,'').length);
+ const candidate={...planValue(),body,recommended_image_count:5};delete candidate.pages;
+ const reply={output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(candidate)}]};const actual=extractArkTextDraft(reply,context);assert.equal(actual.body.replace(/\s/g,'').length,170);
+ const transport={schema:'xiaoshimei.text-draft-response.v1',draft_id:'actual-source-contract',source_input:source,pillar:'identity',goal:'save',text_requirements:'只润色原文',titles:actual.titles,selected_title:actual.selectedTitle,body:actual.body,tags:actual.tags,recommended_image_count:5};assert.equal(parseTextDraftResponse(transport).body,actual.body);assert.equal(textDraftConfirmationIssue(transport),null);
+ const tooShort={...candidate,body:'原'.repeat(130)};assert.throws(()=>extractArkTextDraft({output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(tooShort)}]},context),/body:length:130\/131-220/);
+ const tooLong={...candidate,body:'原'.repeat(221)};assert.throws(()=>extractArkTextDraft({output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(tooLong)}]},context),/body:source_expansion:221\/220/);
 });

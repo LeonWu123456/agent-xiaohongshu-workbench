@@ -1,3 +1,4 @@
+import { textDraftLengthBounds } from "./text-draft-policy.mjs";
 import { normalizePromptContext } from "./prompt-context.mjs";
 import { normalizeStyleLock, normalizeXhsContentType, normalizeXhsPageRole } from "./content-strategy.mjs";
 import { normalizeProductionMode } from "./production-mode.mjs";
@@ -73,7 +74,9 @@ export function parseTextDraftResponse(value, { imageVariantTarget = null } = {}
   if (typeof value.text_requirements !== "string") throw new TypeError("TEXT_DRAFT_REQUIREMENTS_INVALID");
   if (!Array.isArray(value.titles) || value.titles.length !== 3 || !value.titles.every((item) => typeof item === "string" && item.trim())) throw new TypeError("TEXT_DRAFT_TITLES_INVALID");
   if (!value.titles.includes(value.selected_title)) throw new TypeError("TEXT_DRAFT_SELECTED_TITLE_INVALID");
-  if (typeof value.body !== "string" || value.body.replace(/\s/g, "").length < (frozenVariant ? 1 : 180)) throw new TypeError("TEXT_DRAFT_BODY_INVALID");
+  const sourceBounds = textDraftLengthBounds(value.source_input);
+  const bodyMinimum = frozenVariant ? 1 : sourceBounds.fullSource ? sourceBounds.minimum : 180;
+  if (typeof value.body !== "string" || value.body.replace(/\s/g, "").length < bodyMinimum) throw new TypeError("TEXT_DRAFT_BODY_INVALID");
   if (!Array.isArray(value.tags) || value.tags.length !== 5 || !value.tags.every((item) => typeof item === "string" && (frozenVariant || item.trim()))) throw new TypeError("TEXT_DRAFT_TAGS_INVALID");
   if (!Number.isInteger(value.recommended_image_count) || value.recommended_image_count < 1 || value.recommended_image_count > 8) throw new TypeError("TEXT_DRAFT_IMAGE_COUNT_INVALID");
   const contentType = value.content_type == null ? "knowledge_card" : normalizeXhsContentType(value.content_type, "TEXT_DRAFT_CONTENT_TYPE");
