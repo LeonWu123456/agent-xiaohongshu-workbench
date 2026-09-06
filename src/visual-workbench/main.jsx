@@ -8,7 +8,7 @@ import {createEditorHistory,updateEditorHistory,undoEditorHistory,redoEditorHist
 import {buildPublishZip,collectPublishMediaRefs,inspectPng} from '../publish-package.mjs';
 import {createVisualStorage} from './storage.mjs';
 import {createVisualProvider,readProviderHealth,generateTextDraft,emptyAuthoringSession,sessionWithTextDraft,editTextSession,chooseTextTitle,confirmTextSession,runImageGeneration,updateImageSettings,updateAuthoringInput,updateActionReferences,requiresStudioAccess,readReferenceFiles,createPageVariantSession,applyPageVariant,imageRecoveryMessage,imageRecoveryView} from './creator.mjs';
-import {changePage,replacePageImage,listPageObjects,createDemo,createBlankContent,addContentPage,duplicateContentPage,deleteContentPage,reorderContentPage,clampPageIndex,composeEditableContent,mobileReadability,confirmedCopyCoverage,reconcileConfirmedCopy} from './model.mjs';
+import {changePage,replacePageImage,listPageObjects,createDemo,createBlankContent,addContentPage,duplicateContentPage,deleteContentPage,reorderContentPage,clampPageIndex,composeEditableContent,mobileReadability,confirmedCopyCoverage,reconcileConfirmedCopy,materializeGeneratedCopy} from './model.mjs';
 import {CreatorPanel,StudioLogin} from './CreatorPanel.jsx';
 import '../styles.css';
 import '../xhs-page-contract.css';
@@ -159,7 +159,7 @@ function App(){
    await document.fonts?.ready;
    const session=creatorRef.current;const count=session.image_count_mode==='AUTO'?session.text_draft.recommended_image_count:session.custom_image_count;
    try{
-     const result=await runImageGeneration({provider,service,session,pageCount:count,productionMode:session.production_mode,discoveryOnly,onState:setImageFlow,prepareContent:value=>session.image_variant_target?composeEditableContent(value,{measureText:measureEditableText}):reconcileConfirmedCopy(value,{measureText:measureEditableText})});
+     const result=await runImageGeneration({provider,service,session,pageCount:count,productionMode:session.production_mode,discoveryOnly,onState:setImageFlow,prepareContent:value=>session.image_variant_target?composeEditableContent(value,{measureText:measureEditableText}):materializeGeneratedCopy(value,{measureText:measureEditableText})});
      setPendingImage(service.pending());setCreatorSession(service.session());
      if(result.content){setHistory(createEditorHistory(result.content));setIndex(0);setSelected('title-block');setImageId(null);setDirty(false);setIsExample(false);setTab('pages');setNarrowPanelOpen(false);setNote(`配图完成 · ${result.content.visible_pages} 页已写回同一稿件`);}
      else setNote(result.observation?imageRecoveryView(service.pending(),{...result.observation,operation_nonce:service.pending()?.operation_nonce}).title:discoveryOnly?'已有进度已读回，没有继续图片调用。':'配图恢复点已保存，当前稿件保留。');

@@ -338,3 +338,74 @@ export function reconcileConfirmedCopy(content,{measureText}={}){
  if(remaining.length){const error=new Error('全文校对没有通过，已保留原稿，未提交不完整排版。');error.code='CONFIRMED_COPY_COVERAGE_INCOMPLETE';throw error;}
  return invalidateVisualReview(result);
 }
+
+
+// Initial narrative materialization only. Model page bodies are planning hints,
+// never a second authoritative article. Preserve the confirmed text verbatim,
+// give every occurrence one ordered home, and leave existing edited pages alone.
+export function materializeGeneratedCopy(content,{measureText}={}){
+ const fail=(code,message)=>{const error=new Error(message);error.code=code;throw error;};
+ const original=content?.pages||[],native=original.map(p=>Boolean(p.html_state?.free_objects?.length));
+ if(native.some(Boolean)){
+  if(native.every(Boolean))return content;
+  fail('GENERATED_COPY_ALREADY_EDITABLE','已有页面包含手工对象，未重新分配正文；请保留原稿后单独编辑。');
+ }
+ if(content?.generation?.mode!=='PROVIDER'||content.generation.production_mode!=='narrative'||original.some(p=>p.info_panels?.length))return reconcileConfirmedCopy(content,{measureText});
+ const source=String(content.body||'');
+ let spans=source.match(/[^。！？\r\n]+[。！？]*(?:\r\n|\r|\n)*|[。！？\r\n]+/gu)||[];
+ if(original.length<1||original.length>8||content.visible_pages!==original.length||source.length>6000||spans.length>256)fail('GENERATED_COPY_ALIGNMENT_LIMIT','原文或页面超过本轮排版范围，已保留生成结果，未截断正文。');
+ if(!source.trim()||spans.join('')!==source)fail('GENERATED_COPY_ALIGNMENT_UNCONFIRMED','无法确认原文边界，已保留生成结果，未改写正文。');
+ // The cover is a title and a scene, not a duplicate summary before page 2.
+ const cover=original.length>1,targets=cover?original.slice(1):original;
+ let coverCopy='';
+ if(cover){
+  // A genuinely literal opening on the cover is allowed; a paraphrased hook
+  // must not become a repeated second article ahead of the source steps.
+  const key=value=>String(value||'').replace(/\s/gu,'');let prefix='';
+  for(let n=1;n<=spans.length-targets.length;n++){
+   prefix+=spans[n-1];if(key(prefix)!==key(original[0].body))continue;
+   // Keep only as much literal opening as the real cover can display. The
+   // remainder stays in the original ordered source queue, never disappears.
+   for(let take=n;take>=1;take--){const text=spans.slice(0,take).join('');try{arrangeEditablePage({...original[0],body:text},0,{measureText});coverCopy=text;spans=spans.slice(take);break;}catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;}}
+   break;
+  }
+ }
+ if(spans.length<targets.length)fail('GENERATED_COPY_ALIGNMENT_UNCONFIRMED','正文段落少于图文页，未复制句子来凑页数；请减少页面或手工分配。');
+ const grams=value=>{const terms=new Set();for(const word of String(value||'').toLowerCase().match(/[\p{L}\p{N}]+/gu)||[])for(let size=2;size<=3;size++)for(let i=0;i+size<=word.length;i++)terms.add(word.slice(i,i+size));return terms;};
+ const anchors=targets.map(p=>grams([p.title,p.body,p.visual_action,p.image_prompt].join('\n'))),tokens=spans.map(grams),weight=new Map();
+ for(const terms of tokens)for(const term of terms)weight.set(term,1/Math.max(1,anchors.filter(a=>a.has(term)).length));
+ const scores=tokens.map(terms=>anchors.map(anchor=>[...terms].reduce((sum,t)=>sum+(anchor.has(t)?weight.get(t):0),0)/Math.max(1,[...terms].reduce((sum,t)=>sum+weight.get(t),0))));
+ const n=spans.length,m=targets.length,dp=Array.from({length:m+1},()=>Array(n+1).fill(null));dp[0][0]={score:0,cuts:[]};
+ // Monotone contiguous partition: no swapping, omission or duplicated source.
+ // Lexical overlap is a conservative relevance signal, NOT semantic proof.
+ for(let p=0;p<m;p++)for(let from=p;from<n;from++)if(dp[p][from]){
+  let agreement=0,score=0;
+  for(let to=from+1;to<=n-(m-p-1);to++){
+   const length=spans[to-1].replace(/\s/g,'').length;agreement+=scores[to-1][p];score+=scores[to-1][p]*length;
+   if(m>1&&agreement/(to-from)<0.06)continue;
+   const value=dp[p][from].score+score;
+   if(!dp[p+1][to]||dp[p+1][to].score<value)dp[p+1][to]={score:value,cuts:[...dp[p][from].cuts,{from,to}]};
+  }
+ }
+ const chosen=dp[m][n];if(!chosen)fail('GENERATED_COPY_ALIGNMENT_UNCONFIRMED','正文与分镜缺少可确认的对应关系，已保留图片和原文，未猜测或重复补页。');
+ const pages=[];
+ const compose=(page,body,index,continuation=false)=>arrangeEditablePage({...page,body,highlight_phrases:(page.highlight_phrases||[]).filter(x=>(page.title+'\n'+body).includes(x)),...(continuation?{page_role:'method'}:{})},index,{measureText});
+ if(cover)pages.push(compose(original[0],coverCopy,0));
+ for(let i=0;i<m;i++){
+  const {from,to}=chosen.cuts[i];let cursor=from,part=0;
+  while(cursor<to){
+   if(pages.length>=8)fail('GENERATED_COPY_PAGE_LIMIT','原文在手机字号下超过8页，未缩字、删文或重新生图。');
+   let accepted=null,end=cursor,lastError;
+   for(let j=cursor+1;j<=to;j++){
+    try{const candidate=compose(targets[i],spans.slice(cursor,j).join(''),pages.length,part>0);accepted=candidate;end=j;}
+    catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;lastError=error;break;}
+   }
+   if(!accepted)throw lastError||new Error('GENERATED_COPY_LAYOUT_UNCONFIRMED');
+   pages.push(accepted);cursor=end;part++;
+  }
+ }
+ if(pages.map(p=>p.body).join('')!==source)fail('GENERATED_COPY_SEQUENCE_INVALID','正文顺序校验未通过，未提交本次排版。');
+ const result=invalidateVisualReview({...content,pages,visible_pages:pages.length});
+ if(confirmedCopyCoverage(result).missing.length)fail('GENERATED_COPY_SEQUENCE_INVALID','画布正文校验未通过，未提交本次排版。');
+ return result;
+}

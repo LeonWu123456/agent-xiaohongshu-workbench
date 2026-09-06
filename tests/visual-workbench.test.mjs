@@ -434,3 +434,49 @@ test('source crop confirmation resets old image zoom in the same undoable state 
  const before=structuredClone(state),item=api.cropFrameGeometry(state.free_objects[0],{x:.1,y:.2,width:.8,height:.5},600,800),after=api.applySourceCrop(state,item);
  assert.deepEqual(after.image_edits.hero,{zoom:1,focalX:50,focalY:50});assert.deepEqual(after.image_edits.other,before.image_edits.other);assert.deepEqual(state,before);assert.deepEqual(after.free_objects[0].crop,item.crop);
 });
+
+
+function freshNarrativeCopyFixture(){
+ const c=createBlankContent();const seed=structuredClone(c.pages[0]);
+ c.body='回家后，先把包放在门边。\n把桌上的杯子和物品归位，接着打开小灯。\n慢慢喝一杯温水。\n记下一件想留下的小事。把明天要带的东西放在门边。\n没有做完也没关系。感到烦躁就停下，不要硬撑。';
+ c.generation={mode:'PROVIDER',provider:'volcengine-ark',production_mode:'narrative',run_id:'paid-original-run'};
+ const topics=[['轻轻开始','门边放好通勤包','通勤包'],['桌面和灯光','整理桌上杯子和物品，打开柔和小灯','桌面杯子小灯'],['坐下喝水','慢慢坐下，喝一杯温水','喝一杯温水'],['记录和准备','记下一件小事，把明天东西放在门边','笔记本明天东西门边'],['不必全部做完','没做完也没关系，感到烦躁就停下，不要硬撑','休息停下']];
+ c.pages=topics.map(([title,body,action],i)=>({...structuredClone(seed),page_role:i?'method':'hook',title,body,visual_action:action,image_prompt:action,visual:'character',image_style:{...seed.image_style,src:'/assets/real-'+i+'.png',hidden:false},info_panels:[],html_state:undefined}));c.visible_pages=5;return c;
+}
+
+test('new narrative materialization uses original ordered copy once instead of front-loading duplicate supplements',async()=>{
+ const {materializeGeneratedCopy,confirmedCopyCoverage}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture(),before=structuredClone(c);const out=materializeGeneratedCopy(c);
+ assert.deepEqual(c,before);assert.equal(out.pages.length,5);assert.equal(out.pages[0].body,'');assert.equal(out.pages[0].html_state.free_objects.some(o=>o.binding==='body'),false);
+ assert.equal(out.pages.map(p=>p.body).join(''),c.body);assert.deepEqual(confirmedCopyCoverage(out).missing,[]);assert.equal(out.pages.some(p=>p.eyebrow==='原文补充'),false);
+ out.pages.forEach((p,i)=>{assert.equal(p.image_style.src,c.pages[i].image_style.src);assert.equal(p.visual_action,c.pages[i].visual_action);assert.equal(p.title,c.pages[i].title);assert.ok(p.html_state.free_objects.some(o=>o.kind==='image'));});
+ assert.ok(out.pages[1].body.includes('打开小灯'));assert.ok(out.pages[2].body.includes('温水'));assert.ok(out.pages[3].body.includes('明天'));assert.ok(out.pages[4].body.includes('不要硬撑'));assert.deepEqual(out.generation,c.generation);assert.equal(out.body,c.body);
+ assert.deepEqual(materializeGeneratedCopy(out),out,'existing editable work is not repacked');
+});
+
+test('new-source alignment never hides missing repeated steps, numbers, or negations',async()=>{
+ const {materializeGeneratedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();c.body='先把杯子放好，不要打开手机。\n慢慢喝水30毫升。不要喝水300毫升。\n记下今天一件小事。再记下今天一件小事。\n最后停下来，不要硬撑。';c.pages[1].body='杯子和手机的位置';c.pages[2].body='喝水30毫升，不要喝水300毫升';c.pages[3].body='记录今天一件小事';
+ const out=materializeGeneratedCopy(c);assert.equal(out.pages.map(p=>p.body).join(''),c.body);assert.equal((out.pages.map(p=>p.body).join('').match(/今天一件小事/g)||[]).length,2);assert.equal(out.body,c.body);
+});
+
+test('unmatched or oversized source fails atomically instead of guessing topic/image alignment',async()=>{
+ const {materializeGeneratedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();c.body='量子态保持叠加。电子穿过势垒。恒星坍缩形成黑洞。探测器收到引力波。宇宙持续膨胀。';const before=structuredClone(c);
+ assert.throws(()=>materializeGeneratedCopy(c),e=>e.code==='GENERATED_COPY_ALIGNMENT_UNCONFIRMED');assert.deepEqual(c,before);
+ const big=freshNarrativeCopyFixture();big.body='超长原文。'.repeat(600);const exact=structuredClone(big);assert.throws(()=>materializeGeneratedCopy(big),e=>e.code==='GENERATED_COPY_ALIGNMENT_LIMIT');assert.deepEqual(big,exact);
+ const edited=freshNarrativeCopyFixture();edited.pages[1].html_state={free_objects:[{id:'user-note',kind:'text',text:'人工编辑',x:4,y:5,width:80,height:10,font_size:54}]};assert.throws(()=>materializeGeneratedCopy(edited),e=>e.code==='GENERATED_COPY_ALREADY_EDITABLE');
+});
+
+
+test('literal confirmed opening can stay on the cover exactly once; later methods keep their order',async()=>{
+ const {materializeGeneratedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();const first=c.body.slice(0,c.body.indexOf('\n')+1);c.pages[0].body=first.replace(/\s/gu,'');
+ const out=materializeGeneratedCopy(c);assert.equal(out.pages[0].body,first);assert.equal(out.pages.map(p=>p.body).join(''),c.body);assert.equal(out.pages.slice(1).some(p=>p.body.includes(first.trim())),false);
+});
+
+
+test('initial generation callback consumes fresh narrative alignment without reinterpreting existing editor state',async()=>{
+ const {materializeGeneratedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();assert.equal(materializeGeneratedCopy(c).pages.map(p=>p.body).join(''),c.body);
+ const {readFile}=await import('node:fs/promises');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');assert.match(main,/prepareContent:value=>session.image_variant_target\?composeEditableContent\(value,\{measureText:measureEditableText\}\):materializeGeneratedCopy\(value,\{measureText:measureEditableText\}\)/);
+});
+
+test('non-narrative generated content retains the previous reconciliation path, not a new no-op contract',async()=>{
+ const {materializeGeneratedCopy,reconcileConfirmedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();c.generation.production_mode='smart';const expected=reconcileConfirmedCopy(c);assert.deepEqual(materializeGeneratedCopy(c),expected);assert.equal(expected.body,c.body);
+});
