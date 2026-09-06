@@ -2138,7 +2138,11 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
   let planError;
   const planAttempts = [];
   const serverManaged = settings.credentialMode === "SERVER_MANAGED";
-  const maxPlanAttempts = serverManaged ? 1 : 3;
+  // Server-managed image generation still needs bounded planner self-repair.
+  // Planner calls are text-model calls and happen before the paid image lane, so
+  // allow up to three attempts while keeping the image-call count at zero until
+  // a valid plan has been committed.
+  const maxPlanAttempts = 3;
   for (let attempt = 1; attempt <= maxPlanAttempts; attempt += 1) {
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
     const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");

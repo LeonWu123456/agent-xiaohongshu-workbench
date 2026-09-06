@@ -1779,7 +1779,7 @@ test("D36 planner rejection is cached as a zero-image-call terminal state", asyn
   } finally {
     globalThis.fetch = previousFetch;
   }
-  assert.equal(plannerCalls, 1);
+  assert.equal(plannerCalls, 3);
 });
 
 test("D36 same nonce and input DISCOVER reads cached READY with one planner while a different input hash conflicts", async () => {
@@ -3100,7 +3100,7 @@ test("initial zero-image checkpoint is not returned until its durable run is ini
   assert.equal(imageUpstreamCalls, 0);
 });
 
-test("server-managed page planning makes at most one Ark call per HTTP operation", async () => {
+test("server-managed page planning allows at most three bounded Ark planner calls per HTTP operation", async () => {
   const fixture = imageLedgerFixture();
   const imageLedger = new FakeAtomicImageLedger();
   let upstreamCalls = 0;
@@ -3121,7 +3121,7 @@ test("server-managed page planning makes at most one Ark call per HTTP operation
   } finally {
     globalThis.fetch = previousFetch;
   }
-  assert.equal(upstreamCalls, 1);
+  assert.equal(upstreamCalls, 3);
   assert.equal(imageLedger.runs.size, 0);
 });
 
