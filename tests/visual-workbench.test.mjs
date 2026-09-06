@@ -480,3 +480,54 @@ test('initial generation callback consumes fresh narrative alignment without rei
 test('non-narrative generated content retains the previous reconciliation path, not a new no-op contract',async()=>{
  const {materializeGeneratedCopy,reconcileConfirmedCopy}=await import('../src/visual-workbench/model.mjs');const c=freshNarrativeCopyFixture();c.generation.production_mode='smart';const expected=reconcileConfirmedCopy(c);assert.deepEqual(materializeGeneratedCopy(c),expected);assert.equal(expected.body,c.body);
 });
+
+
+async function fourWorkImportFixture(){
+ const source=adapter(memoryStorage());await source.load();
+ for(let i=0;i<4;i++)await source.save(createBlankContent(),{asNew:true,displayName:'来源作品'+(i+1)});
+ const backup=await source.backup();source.dispose();return backup;
+}
+test('multiwork import preflight discloses exact scope before touching either target',async()=>{
+ const {previewVisualImport}=await import('../src/visual-workbench/storage.mjs');const backup=await fourWorkImportFixture(),raw=JSON.stringify(backup);
+ const empty=await previewVisualImport(raw,{hasWorkspace:false}),existing=await previewVisualImport(raw,{hasWorkspace:true});
+ assert.deepEqual([empty.sourceCount,empty.importedCount,empty.skippedCount],[4,4,0]);assert.equal(empty.restoredWorkspace,true);assert.equal(empty.confirmation,null);
+ assert.deepEqual([existing.sourceCount,existing.importedCount,existing.skippedCount],[4,1,3]);assert.equal(existing.restoredWorkspace,false);assert.equal(existing.activeTitle,'来源作品4');assert.match(existing.confirmation,/备份中有 4 份作品/);assert.match(existing.confirmation,/只新增.*来源作品4.*1 份/s);assert.match(existing.confirmation,/其余 3 份不会导入/);assert.match(existing.confirmation,/不要清空/);
+ const store=memoryStorage(),target=adapter(store);await target.load();await target.save(createBlankContent());const before=store.getItem(STORAGE_KEYS.envelopeV3);await previewVisualImport(raw,{hasWorkspace:true});assert.equal(store.getItem(STORAGE_KEYS.envelopeV3),before);target.dispose();
+});
+test('actual multiwork import receipts distinguish restore4 from add1 without overwriting existing work',async()=>{
+ const raw=JSON.stringify(await fourWorkImportFixture()),empty=adapter(memoryStorage());await empty.load();const restored=await empty.importFile(raw);assert.equal(restored.workspace.drafts.length,4);assert.deepEqual([restored.importSummary.sourceCount,restored.importSummary.importedCount,restored.importSummary.skippedCount],[4,4,0]);assert.match(restored.importSummary.success,/已恢复 4 份作品/);
+ const target=adapter(memoryStorage());await target.load();await target.save(createBlankContent(),{displayName:'已有作品'});const before=structuredClone(target.activeRecord());const result=await target.importFile(raw);
+ assert.equal(result.workspace.drafts.length,2);assert.deepEqual(result.workspace.drafts.find(d=>d.draft_id===before.draft_id),before);assert.deepEqual([result.importSummary.sourceCount,result.importSummary.importedCount,result.importSummary.skippedCount],[4,1,3]);assert.match(result.importSummary.success,/本次导入.*1 份.*其余 3 份未导入/s);assert.equal(target.activeRecord().display_name,'来源作品4');empty.dispose();target.dispose();
+});
+test('single and legacy imports do not claim whole-library restore or require multiwork confirmation',async()=>{
+ const {previewVisualImport}=await import('../src/visual-workbench/storage.mjs');const value=createBlankContent();for(const hasWorkspace of [false,true]){const summary=await previewVisualImport(JSON.stringify(value),{hasWorkspace});assert.deepEqual([summary.sourceCount,summary.importedCount,summary.skippedCount],[1,1,0]);assert.equal(summary.confirmation,null);assert.equal(summary.restoredWorkspace,false);}
+ const source=adapter(memoryStorage());await source.load();await source.save(value);const raw=JSON.stringify(await source.backup());assert.equal((await previewVisualImport(raw,{hasWorkspace:true})).confirmation,null);source.dispose();
+});
+test('preflight rejects malformed and incompatible backup instead of promising successful partial import',async()=>{
+ const {previewVisualImport}=await import('../src/visual-workbench/storage.mjs');await assert.rejects(()=>previewVisualImport('{broken',{hasWorkspace:true}));const b=await fourWorkImportFixture();b.workspace.drafts[1].content_package={pages:[]};await assert.rejects(()=>previewVisualImport(JSON.stringify(b),{hasWorkspace:true}));
+});
+
+
+// Run the real handler body, not a duplicated model of its ordering. Browser
+// state setters alone are stand-ins; parsing, import and persisted bytes are real.
+async function cancelledImportFromCurrentHandler({existing=false,mutant=''}={}){
+ const {runInNewContext}=await import('node:vm');const {previewVisualImport}=await import('../src/visual-workbench/storage.mjs');
+ const source=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'),marker=' async function importFile(file)';assert.equal(source.split(marker).length,2);
+ const start=source.indexOf(marker),end=source.indexOf('\n });}',start);assert.ok(end>start);let fn=source.slice(start,end+'\n });}'.length).trim();
+ if(mutant==='save-before-confirm'){const save='  if(dirty)await saveCurrent();';assert.equal(fn.split(save).length,2);fn=fn.replace(save,'').replace('  const preview=await','  if(dirty)await saveCurrent();\n  const preview=await');}
+ if(mutant==='omit-confirm'){const gate="  if(preview.confirmation&&!window.confirm(preview.confirmation)){setNote('已取消导入，作品库未改动。');return;}";assert.ok(fn.includes(gate));fn=fn.replace(gate,'');}
+ const local=memoryStorage(),service=adapter(local);await service.load();if(existing)await service.save(createBlankContent(),{displayName:'原作品'});
+ const before=Object.fromEntries(local.data),raw=JSON.stringify(await fourWorkImportFixture()),calls={saved:0,confirmed:0,notes:[]};
+ const context={service,dirty:true,previewVisualImport,guard:async(_label,run)=>run(),window:{confirm:()=>{calls.confirmed++;return false;}},saveCurrent:async()=>{calls.saved++;await service.save(changePage(createBlankContent(),0,{title:'原来未保存的新内容'}));},setNote:note=>calls.notes.push(note),createEditorHistory:x=>x};
+ for(const name of ['setCreatorSession','setTopic','setPendingImage','setRecoveries','setDrafts','setHistory','changeIndex','setDirty','setIsExample'])context[name]=()=>{};
+ try{await runInNewContext('('+fn+')',context)({size:raw.length,text:async()=>raw});return {before,after:Object.fromEntries(local.data),...calls};}finally{service.dispose();}
+}
+function assertCancelledImportIsUnchanged(result){assert.deepEqual(result.after,result.before);assert.equal(result.saved,0);assert.equal(result.confirmed,1);assert.deepEqual(result.notes,['已取消导入，作品库未改动。']);}
+test('actual import handler cancellation precedes saving dirty example and existing draft',async()=>{
+ for(const existing of [false,true])assertCancelledImportIsUnchanged(await cancelledImportFromCurrentHandler({existing}));
+});
+test('same import-cancellation oracle rejects save-before-confirm and omitted-confirm mutants',async()=>{
+ for(const mutant of ['save-before-confirm','omit-confirm'])for(const existing of [false,true]){
+  const result=await cancelledImportFromCurrentHandler({existing,mutant});assert.ok(result.saved>0);assert.notDeepEqual(result.after,result.before);assert.throws(()=>assertCancelledImportIsUnchanged(result),{code:'ERR_ASSERTION'});
+ }
+});

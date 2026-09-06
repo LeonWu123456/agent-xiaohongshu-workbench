@@ -6,7 +6,7 @@ import {HtmlPageCanvas,renderHtmlPageToPng,inspectHtmlPageLayout,measureEditable
 import {normalizeHtmlState,updateObjectEdit,objectEditFor,updateImageEdit,imageEditFor,layoutsForPage,FREE_FONTS,normalizeFreeObjects,freeObjectText,freeObjectImage,updateFreeObject,freeTextPatch,duplicateFreeObject,copyFreeObject,pasteFreeObject,applySourceCrop} from '../html-layout.mjs';
 import {createEditorHistory,updateEditorHistory,undoEditorHistory,redoEditorHistory} from '../editor-history.mjs';
 import {buildPublishZip,collectPublishMediaRefs,inspectPng} from '../publish-package.mjs';
-import {createVisualStorage} from './storage.mjs';
+import {createVisualStorage,previewVisualImport} from './storage.mjs';
 import {createVisualProvider,readProviderHealth,generateTextDraft,emptyAuthoringSession,sessionWithTextDraft,editTextSession,chooseTextTitle,confirmTextSession,runImageGeneration,updateImageSettings,updateAuthoringInput,updateActionReferences,requiresStudioAccess,readReferenceFiles,createPageVariantSession,applyPageVariant,imageRecoveryMessage,imageRecoveryView} from './creator.mjs';
 import {changePage,replacePageImage,listPageObjects,createDemo,createBlankContent,addContentPage,duplicateContentPage,deleteContentPage,reorderContentPage,clampPageIndex,composeEditableContent,mobileReadability,confirmedCopyCoverage,reconcileConfirmedCopy,materializeGeneratedCopy} from './model.mjs';
 import {CreatorPanel,StudioLogin} from './CreatorPanel.jsx';
@@ -233,7 +233,16 @@ function App(){
   else{const imageKey=item?.binding||selectedImageId||'hero';patch(replacePageImage(live,imageKey,data),'replace-image');setSelected(item?.id||'hero-image');setImageId(imageKey);}
   setNote('\u56fe\u7247\u5df2\u8f7d\u5165\uff1b\u4fdd\u5b58\u540e\u5199\u5165\u540c\u4e00\u7d20\u6750\u5e93\u3002');
  });}
- async function importFile(file){if(!file)return;await guard('导入旧稿',async()=>{if(file.size>40*1024*1024)throw new Error('这份备份超过40MB，请从旧版单独导出目标作品。');if(dirty)await saveCurrent();const result=await service.importFile(await file.text());const session=service.session();setCreatorSession(session);setTopic(session?.topic||'');setPendingImage(service.pending());setRecoveries(service.recoveryDrafts());setDrafts(service.drafts());setHistory(createEditorHistory(result.content));changeIndex(0);setDirty(false);setIsExample(false);setNote('已作为新草稿导入，原有作品保留。');});}
+ async function importFile(file){if(!file)return;await guard('导入旧稿',async()=>{
+  if(file.size>40*1024*1024)throw new Error('这份备份超过40MB，请从旧版单独导出目标作品。');
+  const raw=await file.text();
+  // A dirty example becomes a saved draft before import. Preview that actual
+  // destination, and do not save or write media if confirmation is declined.
+  const preview=await previewVisualImport(raw,{hasWorkspace:Boolean(service.workspace()||dirty)});
+  if(preview.confirmation&&!window.confirm(preview.confirmation)){setNote('已取消导入，作品库未改动。');return;}
+  if(dirty)await saveCurrent();
+  const result=await service.importFile(raw);const session=service.session();setCreatorSession(session);setTopic(session?.topic||'');setPendingImage(service.pending());setRecoveries(service.recoveryDrafts());setDrafts(service.drafts());setHistory(createEditorHistory(result.content));changeIndex(0);setDirty(false);setIsExample(false);setNote(result.importSummary.success);
+ });}
  async function exportCurrent(all=false){await guard(all?'正在打包全部页面':'正在导出当前页',async()=>{if(exportBlocked)throw new Error('当前文字尚未形成同稿画布；请先完成配图，旧画布不会冒充新文案成品。');const result=await saveCurrent();const draft=result.content;await pause();if(all){const images=[];for(let i=0;i<draft.visible_pages;i++){const url=await renderHtmlPageToPng(draft.pages[i],i,draft.visible_pages);images.push(new Uint8Array(await (await fetch(url)).arrayBuffer()));}const canonical=result.workspace.drafts.find(d=>d.draft_id===result.workspace.active_draft_id).content_package;const mediaAssets=await service.mediaStore.exportMediaAssets(collectPublishMediaRefs(canonical));download(await buildPublishZip(canonical,images,{mediaAssets}),safeName(draft.selectedTitle)+'.zip');setNote('已下载全部页面和可恢复的图文包。');}else{const url=await renderHtmlPageToPng(draft.pages[activeIndex],activeIndex,draft.visible_pages),blob=await(await fetch(url)).blob();const dimensions=inspectPng(new Uint8Array(await blob.arrayBuffer()));if(dimensions.width!==1080||dimensions.height!==1440)throw new Error('图片尺寸不正确，未下载。');download(blob,`${safeName(draft.pages[activeIndex].title)}-${activeIndex+1}.png`);setNote('已下载 1080 × 1440 PNG。');}});}
  const backup=()=>guard('保存备份',async()=>{if(!service.pending())await saveCurrent();download(new Blob([JSON.stringify(await service.backup(),null,2)],{type:'application/json'}),safeName(current.current.selectedTitle)+'-工作台备份.json');setNote('完整备份已下载，包含原始图文与图片素材。');});
  if(!authLoaded||(location.protocol==='https:'&&providerHealth.status==='UNAVAILABLE')||(providerHealth.login_method==='USERNAME_PASSWORD'&&providerHealth.authenticated!==true))return <StudioLogin onLogin={authenticateStudio} busy={loginBusy} error={loginError} loading={!authLoaded} onRetry={reconnectLogin}/>;
