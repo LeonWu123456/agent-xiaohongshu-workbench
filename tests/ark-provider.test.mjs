@@ -632,3 +632,28 @@ test('backend full-source generation, transport and confirmation accept the same
  const tooShort={...candidate,body:'原'.repeat(130)};assert.throws(()=>extractArkTextDraft({output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(tooShort)}]},context),/body:length:130\/131-220/);
  const tooLong={...candidate,body:'原'.repeat(221)};assert.throws(()=>extractArkTextDraft({output:[{type:'function_call',name:'return_xiaoshimei_text_draft',arguments:JSON.stringify(tooLong)}]},context),/body:source_expansion:221\/220/);
 });
+
+
+test('provider optional highlight metadata cannot fail a valid narrative page and never invents copy',()=>{
+ const base=planValue().pages.map(p=>({...p,panels:[]}));
+ const response=pages=>({output:[{type:'function_call',name:'return_xiaoshimei_page_plan',arguments:JSON.stringify({pages})}]});
+ const context={...input(),productionMode:'narrative'};const normal=extractArkPagePlan(response(base),2,context);
+ for(const value of ['书院',{invalid:'optional'},7,true,'not from source']){
+  const pages=structuredClone(base);pages[1].highlight_phrases=value;const wire=response(pages),saved=structuredClone(wire);const result=extractArkPagePlan(wire,2,context);
+  assert.deepEqual(wire,saved);assert.equal(result[1].body,normal[1].body);assert.equal(result[1].visualAction,normal[1].visualAction);assert.equal(result[1].imagePrompt,normal[1].imagePrompt);
+  assert.deepEqual(result[1].highlightPhrases,value==='书院'?['书院']:[]);assert.deepEqual(result[0],normal[0]);
+ }
+ const pages=structuredClone(base);pages[1].highlight_phrases='书院';pages[1].body='短';assert.throws(()=>extractArkPagePlan(response(pages),2,context),/PAGE_PLAN_BODY_TOO_SHORT/);
+ pages[1].body=base[1].body;pages[1].visual_action='';assert.throws(()=>extractArkPagePlan(response(pages),2,context),/visual_action/);
+});
+
+
+test('provider panel emphasis degrades safely while stored-data and required panel contracts remain strict',async()=>{
+ const {normalizeHighlightPhrases}=await import('../src/content-strategy.mjs');assert.throws(()=>normalizeHighlightPhrases('身体','身体训练'),/must be an array/,'stored-user normalizer has not been relaxed');
+ const pages=planValue().pages.map(p=>({...p,panels:[]}));pages[1].panels=[{title:'身体训练',body:'从身体、专注和礼仪开始，认真观察原来的动作。',visual_action:'小师妹抬手翻开桌面上的书本',highlight_phrases:[]},{title:'器物故事',body:'从器物、仪式与故事开始，记录观察到的日常。',visual_action:'小师妹伸手指向桌上的生活器物',highlight_phrases:[]}];
+ const response=pages=>({output:[{type:'function_call',name:'return_xiaoshimei_page_plan',arguments:JSON.stringify({pages})}]});const context={...input(),productionMode:'smart'},normal=extractArkPagePlan(response(pages),2,context);
+ for(const value of ['身体',{ignored:true},7,true,'不在原文的高亮']){
+  const changed=structuredClone(pages);changed[1].panels[0].highlight_phrases=value;const wire=response(changed),frozen=structuredClone(wire);const actual=extractArkPagePlan(wire,2,context);assert.deepEqual(wire,frozen);assert.deepEqual(actual[0],normal[0]);assert.deepEqual(actual[1].panels[1],normal[1].panels[1]);assert.equal(actual[1].panels[0].body,normal[1].panels[0].body);assert.equal(actual[1].panels[0].visualAction,normal[1].panels[0].visualAction);assert.deepEqual(actual[1].panels[0].highlightPhrases,value==='身体'?['身体']:[]);
+ }
+ const bad=structuredClone(pages);bad[1].panels[0].highlight_phrases={ignored:true};bad[1].panels[0].body='短';assert.throws(()=>extractArkPagePlan(response(bad),2,context),/PAGE_PLAN_PANEL_BUDGET_FAILED/);
+});

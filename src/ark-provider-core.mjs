@@ -564,6 +564,13 @@ export function buildArkPagePlanRequest(draft, pageCount, model, qualityFeedback
   return { model: nonEmptyString(model, "text model"), store: false, thinking: { type: "disabled" }, max_output_tokens: 8192, input: [{ type: "message", role: "user", content: instructions }], tools: [{ type: "function", name: ARK_PAGE_PLAN_TOOL, description: `返回恰好${pageCount}页的图文分镜`, strict: true, parameters: pagePlanParameters(pageCount) }], tool_choice: { type: "function", name: ARK_PAGE_PLAN_TOOL } };
 }
 
+// Provider-only decorative metadata is optional. Preserve user-visible copy
+// and all required plan gates; malformed emphasis becomes no emphasis.
+function providerHighlightPhrases(value, source, path) {
+  const candidates = Array.isArray(value) || value == null ? value : typeof value === "string" ? [value] : [];
+  return normalizeHighlightPhrases(candidates, source, path);
+}
+
 export function extractArkPagePlan(response, pageCount, context = {}) {
   const value = parseFunctionArguments(response, ARK_PAGE_PLAN_TOOL, pageCount);
   if (!Array.isArray(value?.pages) || value.pages.length !== pageCount) throw new TypeError("PAGE_PLAN_COUNT_MISMATCH");
@@ -579,7 +586,7 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
     const normalized = {
       pageRole: normalizeXhsPageRole(pageRole, `pages[${index}].page_role`),
       shotRole: normalizeShotRole(page?.shot_role, `pages[${index}].shot_role`, index === 0 ? "scene" : "action"),
-      highlightPhrases: normalizeHighlightPhrases(page?.highlight_phrases, `${title}\n${body}`, `pages[${index}].highlight_phrases`),
+      highlightPhrases: providerHighlightPhrases(page?.highlight_phrases, `${title}\n${body}`, `pages[${index}].highlight_phrases`),
       eyebrow: nonEmptyString(page?.eyebrow, `pages[${index}].eyebrow`), title, body,
       visualAction: nonEmptyString(page?.visual_action, `pages[${index}].visual_action`),
       imagePrompt: nonEmptyString(page?.image_prompt, `pages[${index}].image_prompt`),
@@ -589,7 +596,7 @@ export function extractArkPagePlan(response, pageCount, context = {}) {
         visualAction: nonEmptyString(panel?.visual_action, `pages[${index}].panels[${panelIndex}].visual_action`),
         contentRole: normalizePanelContentRole(panel?.content_role, `pages[${index}].panels[${panelIndex}].content_role`, panelIndex === 0 ? "hero" : panelIndex === rawPanels.length - 1 ? "detail" : "support"),
         shotRole: normalizeShotRole(panel?.shot_role, `pages[${index}].panels[${panelIndex}].shot_role`, panelIndex === 0 ? "scene" : panelIndex === rawPanels.length - 1 ? "detail" : "action"),
-        highlightPhrases: normalizeHighlightPhrases(panel?.highlight_phrases, `${panel?.title || ""}\n${panel?.body || ""}`, `pages[${index}].panels[${panelIndex}].highlight_phrases`),
+        highlightPhrases: providerHighlightPhrases(panel?.highlight_phrases, `${panel?.title || ""}\n${panel?.body || ""}`, `pages[${index}].panels[${panelIndex}].highlight_phrases`),
       })),
     };
     normalized.imagePrompt = repairEyeCareImagePrompt(normalized.imagePrompt, normalized.visualAction, context);
