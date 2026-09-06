@@ -357,6 +357,7 @@ export function normalizeFreeObjects(value) {
    out.color=/^#[0-9a-f]{6}$/i.test(item.color||'')?item.color:'#292720';out.align=['left','center','right','justify'].includes(item.align)?item.align:'left';out.line_height=finite(item.line_height,1.4,.8,3);out.paragraph_gap=finite(item.paragraph_gap,0,0,120);
   }else{
    out.image_id=String(item.image_id||item.id);out.fit=item.fit==='contain'?'contain':'cover';
+   if(item.crop!==undefined)out.crop=normalizeSourceCrop(item.crop);
    if(/^(hero|panel-\d+)$/.test(item.binding||''))out.binding=item.binding;
    else{const src=String(item.src||'');if(!/^(data:image\/(png|jpeg|webp);base64,|blob:|\/(assets|generated)\/|xiaoshimei-media:\/\/sha256\/|https:\/\/)/i.test(src))throw new TypeError('FREE_IMAGE_SOURCE_INVALID');out.src=src;}
   }
@@ -384,10 +385,7 @@ export function freeTextPatch(page,item,text){
  return {[item.binding]:value||(item.binding==='title'?'\u70b9\u51fb\u8f93\u5165\u6807\u9898':item.binding==='eyebrow'?'\u5c0f\u6807\u9898':'\u70b9\u51fb\u8f93\u5165\u6b63\u6587')};
 }
 export function duplicateFreeObject(page,state,id,newId){
- const item=state.free_objects.find(item=>item.id===id);if(!item)throw new TypeError('FREE_OBJECT_MISSING');
- const copy={...item,id:newId,binding:undefined,x:item.x+2,y:item.y+2};
- if(item.kind==='text')copy.text=freeObjectText(page,item);else{copy.src=freeObjectImage(page,item)?.src;copy.image_id=newId;}
- return {...state,free_objects:normalizeFreeObjects([...state.free_objects,copy]),image_edits:item.kind==='image'?{...state.image_edits,[newId]:{...imageEditFor(state,item.image_id)}}:state.image_edits};
+ return pasteFreeObject(state,copyFreeObject(page,state,id),newId,2);
 }
 
 export function freeResizeGeometry(item,before,after,direction,pageWidth,pageHeight){
@@ -418,4 +416,41 @@ export function readEditablePlainText(root) {
   return text;
  };
  return read(root).replace(/\u00a0/g,' ');
+}
+
+
+// Source crop is nondestructive metadata. Media bytes and old frame transforms
+// remain owned by DraftRecord/media store, and old documents without crop do not change.
+export function normalizeSourceCrop(value){
+ if(!value||typeof value!=='object')throw new TypeError('IMAGE_CROP_INVALID');
+ const out=Object.fromEntries(['x','y','width','height'].map(k=>[k,Number(value[k])]));
+ if(!Object.values(out).every(Number.isFinite)||out.x<0||out.y<0||out.width<.01||out.height<.01||out.x+out.width>1.000001||out.y+out.height>1.000001)throw new TypeError('IMAGE_CROP_BOUNDS_INVALID');
+ return out;
+}
+export function cropFrameGeometry(item,rect,imageWidth,imageHeight){
+ const crop=normalizeSourceCrop(rect);if(item?.kind!=='image'||!(imageWidth>0&&imageHeight>0))throw new TypeError('IMAGE_CROP_TARGET_INVALID');
+ const ratio=imageWidth*crop.width/(imageHeight*crop.height),fw=item.width*10.8,fh=item.height*14.4;
+ const w=Math.min(fw,fh*ratio),h=w/ratio;
+ return {...item,crop,fit:'contain',x:item.x+(fw-w)/21.6,y:item.y+(fh-h)/28.8,width:w/10.8,height:h/14.4};
+}
+export function copyFreeObject(page,state,id){
+ const item=state?.free_objects?.find(o=>o.id===id);if(!item)throw new TypeError('CLIPBOARD_SELECTION_MISSING');
+ const copy={...item};delete copy.binding;
+ if(item.kind==='text')copy.text=freeObjectText(page,item);else copy.src=freeObjectImage(page,item)?.src;
+ return {schema:'xiaoshimei.object-clipboard.v1',item:normalizeFreeObjects([copy])[0],...(item.kind==='image'?{image_edit:imageEditFor(state,item.image_id,freeObjectImage(page,item))}:{})};
+}
+export function pasteFreeObject(state,value,newId,offset=2){
+ if(!value||value.schema!=='xiaoshimei.object-clipboard.v1'||value.item?.binding||!['text','image'].includes(value.item?.kind))throw new TypeError('CLIPBOARD_FORMAT_INVALID');
+ const source=normalizeFreeObjects([value.item])[0];
+ const item={...source,id:newId,x:Math.max(0,Math.min(100-source.width,source.x+offset)),y:Math.max(0,Math.min(100-source.height,source.y+offset))};
+ const next={...state,free_objects:normalizeFreeObjects([...(state.free_objects||[]),{...item,...(item.kind==='image'?{image_id:newId}:{})}])};
+ if(item.kind==='image')next.image_edits={...state.image_edits,[newId]:imageEditFor({image_edits:{[newId]:value.image_edit}},newId)};
+ return next;
+}
+
+
+export function applySourceCrop(state,item){
+ if(item?.kind!=='image')throw new TypeError('IMAGE_CROP_TARGET_INVALID');
+ const next=updateFreeObject(state,item.id,item);
+ return {...next,image_edits:{...state.image_edits,[item.image_id]:{zoom:1,focalX:50,focalY:50}}};
 }

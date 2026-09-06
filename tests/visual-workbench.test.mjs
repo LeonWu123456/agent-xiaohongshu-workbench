@@ -385,3 +385,52 @@ test('parent context packing does not reject a feasible uneven four-one-one sent
  const before=structuredClone(c),out=composeEditableContent(c);assert.equal(out.pages.length,3);assert.deepEqual(c,before);
  assert.equal(out.pages.flatMap(p=>p.html_state.free_objects.filter(o=>o.id==='context-copy').map(o=>o.text)).join(''),p.body);
 });
+
+
+test('crop is nondestructive bounded source geometry and survives normalized save',async()=>{
+ const api=await import('../src/html-layout.mjs');assert.equal(typeof api.normalizeSourceCrop,'function');
+ assert.deepEqual(api.normalizeSourceCrop({x:.2,y:.1,width:.6,height:.7}),{x:.2,y:.1,width:.6,height:.7});
+ assert.throws(()=>api.normalizeSourceCrop({x:-.1,y:0,width:1,height:1}),/CROP/);
+ assert.throws(()=>api.normalizeSourceCrop({x:.9,y:0,width:.3,height:1}),/CROP/);
+ const img={id:'image-1',kind:'image',src:'/assets/xiaoshimei-character.png',crop:{x:.2,y:.1,width:.6,height:.7},x:10,y:10,width:50,height:40};
+ const saved=api.normalizeFreeObjects([img])[0];assert.deepEqual(saved.crop,img.crop);assert.equal(saved.src,img.src);
+ const changed=api.cropFrameGeometry(saved,img.crop,600,800);assert.ok(changed.width<=saved.width&&changed.height<=saved.height);assert.equal(changed.src,img.src);
+});
+
+test('object clipboard freezes bindings and pastes text or cropped image independently across pages',async()=>{
+ const api=await import('../src/html-layout.mjs');assert.equal(typeof api.copyFreeObject,'function');
+ const c=createBlankContent(),p=c.pages[0];p.title='Original title';p.html_state=api.normalizeHtmlState({...p.html_state,free_objects:[{id:'title-block',kind:'text',binding:'title',x:10,y:10,width:50,height:10,font_size:74,color:'#443322'},{id:'hero-image',kind:'image',binding:'hero',image_id:'hero',x:5,y:25,width:90,height:60,crop:{x:.1,y:.1,width:.8,height:.8}}]},p);
+ p.image_style={...p.image_style,src:'xiaoshimei-media://sha256/'+'a'.repeat(64)};p.html_state.image_edits={hero:{zoom:1.2,focalX:40,focalY:60}};
+ const before=structuredClone(p),text=api.copyFreeObject(p,p.html_state,'title-block'),image=api.copyFreeObject(p,p.html_state,'hero-image');p.title='Later title';
+ const dest={...structuredClone(p),title:'Another page',html_state:{...p.html_state,free_objects:[]}};
+ const pasted=api.pasteFreeObject(dest.html_state,text,'new-text',0);assert.equal(pasted.free_objects[0].text,'Original title');assert.equal(pasted.free_objects[0].binding,undefined);assert.equal(pasted.free_objects[0].font_size,74);
+ const twice=api.pasteFreeObject(pasted,image,'new-image',0);assert.equal(twice.free_objects[1].src,p.image_style.src);assert.equal(twice.free_objects[1].image_id,'new-image');assert.deepEqual(twice.free_objects[1].crop,before.html_state.free_objects[1].crop);assert.equal(twice.image_edits['new-image'].zoom,1.2);assert.deepEqual(p.html_state,before.html_state);
+ assert.throws(()=>api.pasteFreeObject(twice,{schema:'bad'},'new',0),/CLIPBOARD/);
+});
+
+test('short paired scenes get equal image stages with same top and left-aligned copy beneath',async()=>{
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();const p=c.pages[0];p.title='两点提醒';p.page_role='method';p.body='';p.info_panels=[0,1].map(i=>({id:'p'+i,title:'注意事项'+i,body:'检查状态，发现异常就停止。',image_style:{src:'/assets/xiaoshimei-character-full.png',hidden:false}}));
+ const out=composeEditableContent(c,{force:true}),objects=out.pages[0].html_state.free_objects,images=objects.filter(o=>o.kind==='image');assert.equal(images.length,2);assert.equal(images[0].height,images[1].height);assert.equal(images[0].width,images[1].width);assert.equal(images[0].y,images[1].y);
+ const titles=objects.filter(o=>/^panel-\d+-title$/.test(o.binding||''));assert.ok(titles.every(o=>o.y>images[0].y+images[0].height));assert.ok(titles.every(o=>o.align==='left'));
+});
+
+
+test('copy and crop retain old rotated records without exposing new rotation commands',async()=>{
+ const api=await import('../src/html-layout.mjs');const page=createBlankContent().pages[0];page.image_style={...page.image_style,src:'/assets/xiaoshimei-character.png'};page.html_state={free_objects:api.normalizeFreeObjects([{id:'old-image',kind:'image',binding:'hero',image_id:'hero',rotation:17,x:10,y:10,width:45,height:30,crop:{x:.1,y:.1,width:.8,height:.8}}]),image_edits:{hero:{zoom:1.2,focalX:38,focalY:56}}};
+ const duplicate=api.duplicateFreeObject(page,page.html_state,'old-image','independent-image');assert.equal(duplicate.free_objects[1].rotation,17);assert.deepEqual(duplicate.free_objects[1].crop,page.html_state.free_objects[0].crop);assert.deepEqual(duplicate.image_edits['independent-image'],page.html_state.image_edits.hero);assert.equal(page.html_state.free_objects.length,1);
+ const full={...page.html_state,free_objects:Array.from({length:128},(_,i)=>({...page.html_state.free_objects[0],id:'object-'+i}))};const before=structuredClone(full);assert.throws(()=>api.pasteFreeObject(full,api.copyFreeObject(page,page.html_state,'old-image'),'extra'),/FREE_OBJECTS_INVALID/);assert.deepEqual(full,before);
+});
+
+test('editorial three-step pages keep source panel order and readable type without unnecessary expansion',async()=>{
+ const {composeEditableContent,mobileReadability}=await import('../src/visual-workbench/model.mjs');const c=createBlankContent();const p=c.pages[0];p.title='日常的三个小步骤';p.eyebrow='生活练习';p.page_role='method';p.body='';p.info_panels=[0,1,2].map(i=>({id:'p'+i,title:'步骤'+i,body:'保留每一步具体的说明，不减少原文。',image_style:{src:'/assets/xiaoshimei-character-full.png'}}));
+ const {seedEditableObjects}=await import('../src/visual-workbench/model.mjs');p.html_state={free_objects:seedEditableObjects(p).reverse()};const before=structuredClone(c);const out=composeEditableContent(c,{force:true,editorial:true});assert.equal(out.pages.length,1);assert.deepEqual(c,before);assert.equal(mobileReadability(out.pages[0]).readable,true);
+ const a=out.pages[0].html_state.free_objects;const y=i=>a.find(o=>o.binding==='panel-'+i).y;assert.ok(y(0)<y(1)&&y(1)<y(2));
+});
+
+
+test('source crop confirmation resets old image zoom in the same undoable state without altering other images',async()=>{
+ const api=await import('../src/html-layout.mjs');assert.equal(typeof api.applySourceCrop,'function');
+ const state={free_objects:api.normalizeFreeObjects([{id:'img',kind:'image',binding:'hero',image_id:'hero',x:5,y:5,width:40,height:50},{id:'other',kind:'image',src:'/assets/xiaoshimei-character.png',image_id:'other',x:50,y:5,width:40,height:50}]),image_edits:{hero:{zoom:1.6,focalX:25,focalY:70},other:{zoom:1.2,focalX:45,focalY:50}}};
+ const before=structuredClone(state),item=api.cropFrameGeometry(state.free_objects[0],{x:.1,y:.2,width:.8,height:.5},600,800),after=api.applySourceCrop(state,item);
+ assert.deepEqual(after.image_edits.hero,{zoom:1,focalX:50,focalY:50});assert.deepEqual(after.image_edits.other,before.image_edits.other);assert.deepEqual(state,before);assert.deepEqual(after.free_objects[0].crop,item.crop);
+});

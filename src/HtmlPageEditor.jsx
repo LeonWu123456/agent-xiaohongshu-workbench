@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { flushSync } from "react-dom";
+import { flushSync, createPortal } from "react-dom";
 import html2canvas from "html2canvas";
 import {
   AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Crop, Minus, Move, Plus, RotateCcw, ScanSearch, Shuffle, Sparkles, Type,
@@ -8,7 +8,7 @@ import {
 import {
   HTML_IMAGE_ZOOM_MAX, bodyParagraphs, editorialPanelMeta, highlightTextSegments, imageEditFor, layoutsForPage, nextHtmlLayout, normalizeHtmlState,
   objectDragEdit, objectEditFor, objectTransformStyle, updateImageEdit, updateObjectEdit,
-  titleTextSegments, freeResizeGeometry, readEditablePlainText, FREE_FONTS, normalizeFreeObjects, freeObjectText, freeObjectImage, updateFreeObject, freeTextPatch,
+  titleTextSegments, freeResizeGeometry, readEditablePlainText, normalizeSourceCrop, cropFrameGeometry, applySourceCrop, FREE_FONTS, normalizeFreeObjects, freeObjectText, freeObjectImage, updateFreeObject, freeTextPatch,
 } from "./html-layout.mjs";
 import { assertRenderedImageRegions, assertRenderedPageContent } from "./export-image-verification.mjs";
 import { rectContainedBy, rectsIntersect } from "./layout-qa.mjs";
@@ -922,15 +922,15 @@ function syncFreeText(element,item,page,isEditing){
  if(item.paragraph_gap>0){const nodes=bodyParagraphs(text).map((text,i)=>{const node=doc.createElement('div');node.textContent=text;if(i)node.style.marginTop=`${item.paragraph_gap/10.8}cqw`;return node;});element.replaceChildren(...nodes);}
  else element.replaceChildren(doc.createTextNode(text));
 }
-function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSelectImage,onImageEdit,onPagePatch,renderOnly=false,onDirty}) {
- const root=useRef(null),moveable=useRef(null),gesture=useRef(null),cropDrag=useRef(null),latest=useRef(null);
- const [target,setTarget]=useState(null),[editing,setEditing]=useState(null),[cropping,setCropping]=useState(null),[keepRatio,setKeepRatio]=useState(false);
+function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSelectImage,onImageEdit,onPagePatch,renderOnly=false,onDirty,onRequestCrop}) {
+ const root=useRef(null),moveable=useRef(null),gesture=useRef(null),cropDrag=useRef(null),pointerDrag=useRef(null),latest=useRef(null);
+ const [target,setTarget]=useState(null),[editing,setEditing]=useState(null),[cropping,setCropping]=useState(null),[keepRatio,setKeepRatio]=useState(false),[localCrop,setLocalCrop]=useState(null);
  const objects=state.free_objects,selected=objects.find(o=>o.id===selectedObject);
  latest.current={page,state,selected,onImageEdit,onPagePatch};
  const size=()=>({w:root.current?.clientWidth||1,h:root.current?.clientHeight||1});
  const apply=(el,item)=>Object.assign(el.style,freeCss(item));
  const commit=item=>onPagePatch?.({html_state:updateFreeObject(latest.current.state,item.id,item)});
- function stopGesture(){const g=gesture.current;gesture.current=null;if(g){if(g.page===latest.current.page&&g.target.isConnected)apply(g.target,g.original);moveable.current?.stopDrag();moveable.current?.updateRect();}}
+ function stopGesture(){stopPointerMove();const g=gesture.current;gesture.current=null;if(g){if(g.page===latest.current.page&&g.target.isConnected)apply(g.target,g.original);moveable.current?.stopDrag();moveable.current?.updateRect();}}
  function begin(e,type){
   // A gesture belongs to its actual DOM target and page, not a stale selection.
   const item=latest.current.state.free_objects.find(o=>o.id===e.target?.dataset?.freeId);
@@ -945,23 +945,44 @@ function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSe
  useEffect(()=>{setTarget(root.current?.querySelector(`[data-free-id="${selectedObject}"]`)||null);if(editing!==selectedObject)setEditing(null);if(cropping!==selectedObject)setCropping(null);},[selectedObject,objects.length,pageIndex]);
  useEffect(()=>{moveable.current?.updateRect();},[state,page]);
  useEffect(()=>{if(!editing)return;const el=root.current?.querySelector(`[data-free-id="${editing}"]`);el?.focus();},[editing]);
- useEffect(()=>{const cancel=()=>stopGesture();window.addEventListener('pointercancel',cancel);return()=>window.removeEventListener('pointercancel',cancel);},[]);
+ useEffect(()=>{const cancel=()=>stopGesture();window.addEventListener('blur',cancel);return()=>{window.removeEventListener('blur',cancel);stopPointerMove();};},[]);
  useEffect(()=>{const node=root.current;if(!node||renderOnly)return;const wheel=e=>{const item=latest.current.state.free_objects.find(o=>o.id===cropping);if(!item||!e.target.closest?.(`[data-free-id="${item.id}"]`))return;e.preventDefault();e.stopPropagation();const edit=imageEditFor(latest.current.state,item.image_id,freeObjectImage(latest.current.page,item));latest.current.onImageEdit?.(item.image_id,{zoom:Math.max(1,Math.min(1.8,edit.zoom+(e.deltaY<0?.05:-.05)))});};node.addEventListener('wheel',wheel,{passive:false});return()=>node.removeEventListener('wheel',wheel);},[cropping,renderOnly]);
- function select(e,item){
-  if(renderOnly||e.button!==0)return;e.stopPropagation();if(editing===item.id||cropping===item.id)return;
-  root.current?.focus({preventScroll:true});const changed=item.id!==selectedObject,element=e.currentTarget,event=e.nativeEvent;
-  if(changed)stopGesture();
-  // Commit the target before transferring this live mousedown. Deferring it to
-  // RAF can start a drag AFTER mouseup and turn the next Save click into a move.
-  flushSync(()=>{onSelectObject?.(item.id);onSelectImage?.(item.kind==='image'?item.image_id:null);setTarget(element);});
-  if(changed&&event.buttons===1&&element.isConnected){moveable.current?.updateRect();moveable.current?.dragStart(event);}
+
+ function stopPointerMove(cancel=true){
+  const g=pointerDrag.current;pointerDrag.current=null;if(!g)return;
+  if(cancel&&g.target.isConnected)apply(g.target,g.original);
+  if(g.capture.hasPointerCapture?.(g.pointer))g.capture.releasePointerCapture(g.pointer);
+  moveable.current?.updateRect();
+ }
+ function select(e,item,fromHandle=false){
+  if(renderOnly||e.button!==0||!e.isPrimary)return;
+  if(editing===item.id&&!fromHandle)return;
+  e.preventDefault();e.stopPropagation();stopGesture();
+  const element=root.current?.querySelector(`[data-free-id="${item.id}"]`);if(!element)return;
+  // Focus commits an old text edit before capturing the new gesture. The live
+  // pointer is owned by this element, independent of lazy Moveable readiness.
+  flushSync(()=>{document.activeElement?.blur();setEditing(null);setCropping(null);root.current?.focus({preventScroll:true});onSelectObject?.(item.id);onSelectImage?.(item.kind==='image'?item.image_id:null);setTarget(element);});
+  const original=latest.current.state.free_objects.find(o=>o.id===item.id);if(!original)return;
+  const rect=root.current.getBoundingClientRect();e.currentTarget.setPointerCapture(e.pointerId);
+  pointerDrag.current={original:{...original},page:latest.current.page,target:element,capture:e.currentTarget,pointer:e.pointerId,startX:e.clientX,startY:e.clientY,rect,moved:false,next:null};
+ }
+ function movePointer(e){
+  const g=pointerDrag.current;if(!g||g.pointer!==e.pointerId)return;
+  if(g.page!==latest.current.page||!g.target.isConnected){stopPointerMove();return;}
+  const dx=e.clientX-g.startX,dy=e.clientY-g.startY;if(!g.moved&&Math.hypot(dx,dy)<3)return;
+  g.moved=true;e.preventDefault();const next={...g.original,x:g.original.x+dx/g.rect.width*100,y:g.original.y+dy/g.rect.height*100};g.next=next;apply(g.target,next);moveable.current?.updateRect();
+ }
+ function finishPointer(e,cancel=false){
+  const g=pointerDrag.current;if(!g||g.pointer!==e.pointerId)return;
+  const next=!cancel&&g.moved&&g.page===latest.current.page&&g.target.isConnected?g.next:null;
+  stopPointerMove(!next);if(next)commit(next);
  }
  function edit(e,item){e.stopPropagation();stopGesture();onSelectObject?.(item.id);if(item.kind==='text'){
   // Paragraph spacing is presentation only. Edit the exact source text in a
   // plain-text host so browser block margins cannot become extra newlines.
   if(editing!==item.id)e.currentTarget.replaceChildren(document.createTextNode(freeObjectText(latest.current.page,item)));
   setEditing(item.id);setCropping(null);
- }else{setCropping(item.id);setEditing(null);}}
+ }else{setEditing(null);if(onRequestCrop)onRequestCrop(item.id);else setLocalCrop(item.id);}}
  function finishText(e,item){const next=readEditablePlainText(e.currentTarget);setEditing(null);if(next!==freeObjectText(page,item))onPagePatch?.(freeTextPatch(latest.current.page,item,next));}
  function cropStart(e,item){if(cropping!==item.id)return;e.preventDefault();e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId);const edit=imageEditFor(state,item.image_id,freeObjectImage(page,item)),r=e.currentTarget.getBoundingClientRect();cropDrag.current={id:item.id,pointer:e.pointerId,x:e.clientX,y:e.clientY,edit,rect:r,next:null,target:e.currentTarget};}
  function cropMove(e,item){const g=cropDrag.current;if(!g||g.id!==item.id||g.pointer!==e.pointerId)return;const next={...g.edit,focalX:Math.max(12,Math.min(88,g.edit.focalX-(e.clientX-g.x)/g.rect.width*100)),focalY:Math.max(12,Math.min(88,g.edit.focalY-(e.clientY-g.y)/g.rect.height*100))};g.next=next;g.target.style.setProperty('--image-focal-x',next.focalX+'%');g.target.style.setProperty('--image-focal-y',next.focalY+'%');}
@@ -970,12 +991,13 @@ function FreePageCanvas({page,pageIndex,state,selectedObject,onSelectObject,onSe
  return <>
   <article ref={root} className="html-page html-free-page" data-layout="free" data-page-role={page.page_role} tabIndex={renderOnly?undefined:0} onKeyDown={renderOnly?undefined:keys} onMouseDown={renderOnly?undefined:e=>{if(e.target===e.currentTarget){e.currentTarget.focus({preventScroll:true});onSelectObject?.(null);setCropping(null);setEditing(null);}}}>
    {objects.map(item=>{const image=item.kind==='image'?freeObjectImage(page,item):null;const crop=item.kind==='image'?imageEditFor(state,item.image_id,image):null;const style={...freeCss(item),...(crop?{'--image-focal-x':crop.focalX+'%','--image-focal-y':crop.focalY+'%','--image-zoom':crop.zoom}:{})};
-    return item.kind==='text'?<div key={item.id} ref={element=>syncFreeText(element,item,page,editing===item.id)} className={`html-free-object html-free-text ${editing===item.id?'is-editing':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-editable-text="true" style={style} contentEditable={!renderOnly&&editing===item.id?'plaintext-only':false} suppressContentEditableWarning spellCheck={false} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onInput={renderOnly?undefined:()=>onDirty?.()} onBlur={renderOnly?undefined:e=>{if(editing===item.id)finishText(e,item);}} onPaste={renderOnly?undefined:e=>{if(editing!==item.id)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));}}/>
-     :<figure key={item.id} className={`html-page__image html-free-object html-free-image ${cropping===item.id?'is-cropping':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-image-id={item.image_id} style={style} onMouseDown={renderOnly?undefined:e=>select(e,item)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onPointerDown={renderOnly?undefined:e=>cropStart(e,item)} onPointerMove={renderOnly?undefined:e=>cropMove(e,item)} onPointerUp={renderOnly?undefined:e=>cropEnd(e,item)} onPointerCancel={renderOnly?undefined:e=>cropEnd(e,item,true)}><img src={image?.src} style={{objectFit:item.fit||'cover'}} alt="" draggable={false} crossOrigin={image?.src?.startsWith('data:')?undefined:'anonymous'}/></figure>;
+    return item.kind==='text'?<div key={item.id} ref={element=>syncFreeText(element,item,page,editing===item.id)} className={`html-free-object html-free-text ${editing===item.id?'is-editing':''} ${!renderOnly&&selectedObject===item.id?'is-selected':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-editable-text="true" style={style} contentEditable={!renderOnly&&editing===item.id?'plaintext-only':false} suppressContentEditableWarning spellCheck={false} onPointerDown={renderOnly?undefined:e=>select(e,item)} onPointerMove={renderOnly?undefined:movePointer} onPointerUp={renderOnly?undefined:e=>finishPointer(e)} onPointerCancel={renderOnly?undefined:e=>finishPointer(e,true)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)} onInput={renderOnly?undefined:()=>onDirty?.()} onBlur={renderOnly?undefined:e=>{if(editing===item.id)finishText(e,item);}} onPaste={renderOnly?undefined:e=>{if(editing!==item.id)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'));}}/>
+     :<figure key={item.id} className={`html-page__image html-free-object html-free-image ${cropping===item.id?'is-cropping':''} ${!renderOnly&&selectedObject===item.id?'is-selected':''}`} data-free-id={item.id} data-editor-object-id={item.id} data-image-id={item.image_id} style={style} onPointerDown={renderOnly?undefined:e=>select(e,item)} onPointerMove={renderOnly?undefined:movePointer} onPointerUp={renderOnly?undefined:e=>finishPointer(e)} onPointerCancel={renderOnly?undefined:e=>finishPointer(e,true)} onDoubleClick={renderOnly?undefined:e=>edit(e,item)}><FreeImagePixels item={item} image={image} edit={crop}/></figure>;
    })}
   </article>
-  {!renderOnly&&cropping&&<div className="html-crop-toolbar"><span>{'\u62d6\u52a8\u56fe\u7247\u53d6\u666f \u00b7 \u6eda\u8f6e\u7f29\u653e'}</span><button type="button" onClick={()=>setCropping(null)}>{'\u5b8c\u6210\u88c1\u5207'}</button></div>}
-  {!renderOnly&&<React.Suspense fallback={null}><Moveable ref={moveable} flushSync={flushSync} target={editing?null:target} container={root.current?.parentElement||undefined} draggable={!cropping} resizable rotatable={!cropping} keepRatio={keepRatio&&!cropping} origin={false} throttleDrag={0} throttleResize={0} throttleRotate={0} rotationPosition="bottom" renderDirections={selected?.kind==='text'?['nw','ne','sw','se','w','e']:['nw','n','ne','w','e','sw','s','se']} onDragStart={e=>begin(e,'drag')} onDrag={e=>preview(e,'drag')} onDragEnd={end} onResizeStart={e=>begin(e,'resize')} onResize={e=>preview(e,'resize')} onResizeEnd={end} onRotateStart={e=>begin(e,'rotate')} onRotate={e=>preview(e,'rotate')} onRotateEnd={end}/></React.Suspense>}
+  {!renderOnly&&localCrop&&objects.some(o=>o.id===localCrop)&&<ImageCropDialog key={localCrop} item={objects.find(o=>o.id===localCrop)} page={page} onCancel={()=>setLocalCrop(null)} onApply={item=>{onPagePatch?.({html_state:applySourceCrop(latest.current.state,item)});setLocalCrop(null);}}/>}
+  {!renderOnly&&selected&&<button type="button" className="vw-object-drag-handle" aria-label="移动选中对象" style={{left:`${Math.max(0,Math.min(87,selected.x))}%`,top:`max(2px, calc(${Math.max(0,Math.min(96,selected.y))}% - 28px))`}} onPointerDown={e=>select(e,selected,true)} onPointerMove={movePointer} onPointerUp={e=>finishPointer(e)} onPointerCancel={e=>finishPointer(e,true)}>⠿ 移动</button>}
+  {!renderOnly&&<React.Suspense fallback={null}><Moveable ref={moveable} flushSync={flushSync} target={editing?null:target} container={root.current?.parentElement||undefined} draggable={false} resizable rotatable={false} keepRatio={keepRatio&&!cropping} origin={false} throttleDrag={0} throttleResize={0} throttleRotate={0} rotationPosition="bottom" renderDirections={selected?.kind==='text'?['nw','ne','sw','se','w','e']:['nw','n','ne','w','e','sw','s','se']} onResizeStart={e=>begin(e,'resize')} onResize={e=>preview(e,'resize')} onResizeEnd={end}/></React.Suspense>}
  </>;
 }
 export function HtmlPageCanvas(props) {
@@ -997,4 +1019,52 @@ export function measureEditableText({text,width,fontSize,fontFamily,fontWeight,l
  const el=document.createElement('div');
  Object.assign(el.style,{position:'fixed',left:'-20000px',top:'0',visibility:'hidden',width:width+'px',height:'auto',padding:'0',margin:'0',border:'0',boxSizing:'border-box',fontFamily:FREE_FONTS[fontFamily]||FREE_FONTS.pingfang,fontSize:fontSize+'px',fontWeight:String(fontWeight||400),lineHeight:String(lineHeight),letterSpacing:'.01em',whiteSpace:'pre-wrap',overflowWrap:'anywhere',wordBreak:'normal'});
  if(paragraphGap>0){bodyParagraphs(text).forEach((text,i)=>{const p=document.createElement('div');p.textContent=text;if(i)p.style.marginTop=paragraphGap+'px';el.append(p);});}else el.textContent=text;document.body.append(el);try{return el.getBoundingClientRect().height;}finally{el.remove();}
+}
+
+
+function FreeImagePixels({item,image,edit}){
+ const [natural,setNatural]=useState({width:1,height:1});const src=image?.src;
+ const loaded=e=>{const img=e.currentTarget;setNatural({width:img.naturalWidth,height:img.naturalHeight});};
+ if(!item.crop)return <img src={src} onLoad={loaded} style={{objectFit:item.fit||'cover'}} alt="" draggable={false} crossOrigin={src?.startsWith('data:')?undefined:'anonymous'}/>;
+ const crop=normalizeSourceCrop(item.crop),fw=item.width*10.8,fh=item.height*14.4,cw=crop.width*natural.width,ch=crop.height*natural.height;
+ const scale=(item.fit==='contain'?Math.min(fw/cw,fh/ch):Math.max(fw/cw,fh/ch))*(edit?.zoom||1),w=cw*scale,h=ch*scale;
+ return <span className="html-source-crop" style={{left:`${(fw-w)*(edit?.focalX??50)/fw}%`,top:`${(fh-h)*(edit?.focalY??50)/fh}%`,width:`${w/fw*100}%`,height:`${h/fh*100}%`}}><img src={src} onLoad={loaded} style={{position:'absolute',left:`${-crop.x/crop.width*100}%`,top:`${-crop.y/crop.height*100}%`,width:`${100/crop.width}%`,height:`${100/crop.height}%`,objectFit:'fill',transform:'none'}} alt="" draggable={false} crossOrigin={src?.startsWith('data:')?undefined:'anonymous'}/></span>;
+}
+
+export function ImageCropDialog({item,page,onApply,onCancel}){
+ const area=useRef(null),drag=useRef(null),close=useRef(null),image=freeObjectImage(page,item);
+ const [natural,setNatural]=useState(null),[crop,setCrop]=useState(()=>item.crop||{x:0,y:0,width:1,height:1}),[error,setError]=useState('');
+ useEffect(()=>{const old=document.activeElement;close.current?.focus();const key=e=>{if(e.key==='Escape'){e.preventDefault();onCancel();}if(e.key==='Tab'){const fields=[...document.querySelectorAll('.vw-crop-dialog button:not(:disabled)')];const i=fields.indexOf(document.activeElement);if(e.shiftKey&&i<=0){e.preventDefault();fields.at(-1)?.focus();}else if(!e.shiftKey&&i===fields.length-1){e.preventDefault();fields[0]?.focus();}}};document.addEventListener('keydown',key);return()=>{document.removeEventListener('keydown',key);old?.focus?.();};},[]);
+ function start(e,edge){if(e.button!==0||!natural)return;e.preventDefault();e.stopPropagation();e.currentTarget.setPointerCapture(e.pointerId);drag.current={rect:area.current.getBoundingClientRect(),crop:{...crop},x:e.clientX,y:e.clientY,edge,pointer:e.pointerId};}
+ function move(e){const g=drag.current;if(!g||g.pointer!==e.pointerId)return;const dx=(e.clientX-g.x)/g.rect.width,dy=(e.clientY-g.y)/g.rect.height,min=.04;let{x,y,width,height}=g.crop;
+  if(g.edge==='move'){x=Math.max(0,Math.min(1-width,x+dx));y=Math.max(0,Math.min(1-height,y+dy));}
+  else{let right=x+width,bottom=y+height;if(g.edge.includes('w'))x=Math.max(0,Math.min(right-min,x+dx));if(g.edge.includes('e'))right=Math.max(x+min,Math.min(1,right+dx));if(g.edge.includes('n'))y=Math.max(0,Math.min(bottom-min,y+dy));if(g.edge.includes('s'))bottom=Math.max(y+min,Math.min(1,bottom+dy));width=right-x;height=bottom-y;}
+  setCrop({x,y,width,height});
+ }
+ function end(e,cancel=false){const g=drag.current;if(!g)return;drag.current=null;if(cancel)setCrop(g.crop);if(e.currentTarget.hasPointerCapture?.(e.pointerId))e.currentTarget.releasePointerCapture(e.pointerId);}
+ function preset(ratio){if(!natural)return;const normalized=ratio/(natural.width/natural.height),width=Math.min(1,normalized),height=width/normalized;setCrop({x:(1-width)/2,y:(1-height)/2,width,height});}
+ return createPortal(<div className="vw-crop-backdrop"><section role="dialog" aria-modal="true" aria-label="裁剪图片" className="vw-crop-dialog"><header><div><h2>裁剪图片</h2><p>拖动边角选取画面，原图始终保留。</p></div><button ref={close} type="button" aria-label="取消裁剪" onClick={onCancel}>取消</button></header>
+ <div className="vw-crop-presets"><button type="button" onClick={()=>setCrop({x:0,y:0,width:1,height:1})}>选取原图</button><button type="button" onClick={()=>preset(1)}>1:1</button><button type="button" onClick={()=>preset(3/4)}>3:4</button><button type="button" onClick={()=>preset(4/3)}>4:3</button></div>
+ <div className="vw-crop-stage" ref={area} style={{aspectRatio:natural?natural.width/natural.height:1,width:natural?`min(100%, ${55*natural.width/natural.height}vh)`:'60%',maxHeight:'55vh'}}><img src={image?.src} alt="裁剪原图" draggable={false} onError={()=>setError('原图暂时无法载入，未修改任何内容。')} onLoad={e=>setNatural({width:e.currentTarget.naturalWidth,height:e.currentTarget.naturalHeight})}/>{natural&&<>{[{left:0,top:0,width:1,height:crop.y},{left:0,top:crop.y,width:crop.x,height:crop.height},{left:crop.x+crop.width,top:crop.y,width:1-crop.x-crop.width,height:crop.height},{left:0,top:crop.y+crop.height,width:1,height:1-crop.y-crop.height}].map((r,i)=><span className="vw-crop-shade" key={i} style={Object.fromEntries(Object.entries(r).map(([k,v])=>[k,v*100+'%']))}/>)}</>}{natural&&<div className="vw-crop-selection" style={{left:crop.x*100+'%',top:crop.y*100+'%',width:crop.width*100+'%',height:crop.height*100+'%'}} onPointerDown={e=>start(e,'move')} onPointerMove={move} onPointerUp={end} onPointerCancel={e=>end(e,true)}><i className="vw-crop-grid"/>{['nw','n','ne','e','se','s','sw','w'].map(edge=><button key={edge} type="button" data-crop-handle={edge} className={'vw-crop-handle is-'+edge} aria-label={'裁剪边角 '+edge} onPointerDown={e=>start(e,edge)} onPointerMove={move} onPointerUp={end} onPointerCancel={e=>end(e,true)}/>)}</div>}</div>
+ {error&&<p role="alert">{error}</p>}<footer><span>{Math.round(crop.width*100)}% × {Math.round(crop.height*100)}%</span><button type="button" disabled={!natural||!!error} onClick={()=>onApply(cropFrameGeometry(item,crop,natural.width,natural.height))}>应用裁剪</button></footer></section></div>,document.body);
+}
+
+
+export async function balanceIllustrationWhitespace(content){
+ const crops=new Map();
+ async function bounds(src){
+  if(crops.has(src))return crops.get(src);
+  const task=(async()=>{try{
+   const img=new Image();if(!src.startsWith('data:'))img.crossOrigin='anonymous';img.src=src;await img.decode();
+   const canvas=document.createElement('canvas'),max=240;const scale=Math.min(1,max/Math.max(img.naturalWidth,img.naturalHeight));canvas.width=Math.max(1,Math.round(img.naturalWidth*scale));canvas.height=Math.max(1,Math.round(img.naturalHeight*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(img,0,0,canvas.width,canvas.height);const {data}=ctx.getImageData(0,0,canvas.width,canvas.height),w=canvas.width,h=canvas.height;
+   const empty=(x,y)=>{const i=(y*w+x)*4;return data[i+3]<24||(data[i]>239&&data[i+1]>239&&data[i+2]>239);};
+   let edge=0,white=0;for(let x=0;x<w;x++){edge+=2;white+=Number(empty(x,0))+Number(empty(x,h-1));}for(let y=1;y<h-1;y++){edge+=2;white+=Number(empty(0,y))+Number(empty(w-1,y));}if(white/edge<.97)return null;
+   let l=w,r=-1,t=h,b=-1,count=0;for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(!empty(x,y)){l=Math.min(l,x);r=Math.max(r,x);t=Math.min(t,y);b=Math.max(b,y);count++;}
+   if(count<w*h*.05||r<l||b<t)return null;const pad=Math.ceil(Math.max(r-l+1,b-t+1)*.045);l=Math.max(0,l-pad);t=Math.max(0,t-pad);r=Math.min(w-1,r+pad);b=Math.min(h-1,b+pad);
+   if((r-l+1)*(b-t+1)>w*h*.95)return null;
+   return {x:l/w,y:t/h,width:(r-l+1)/w,height:(b-t+1)/h};
+  }catch{return null;}})();crops.set(src,task);return task;
+ }
+ const pages=[];for(const page of content.pages){if(!page.html_state?.free_objects){pages.push(page);continue;}const objects=[];for(const item of page.html_state.free_objects){const src=item.kind==='image'?freeObjectImage(page,item)?.src:null;const crop=src&&!item.crop&&item.fit==='contain'?await bounds(src):null;objects.push(crop?{...item,crop}:item);}pages.push({...page,html_state:{...page.html_state,free_objects:objects}});}
+ return {...content,pages};
 }

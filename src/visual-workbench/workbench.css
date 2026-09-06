@@ -83,3 +83,10 @@ html,body,#visual-root{margin:0;width:100%;height:100%;min-width:360px}body{over
 .vw-login-card .vw-login-submit{width:100%;height:49px;border:0;border-radius:9px;background:#ae542f;color:#fff;font-size:16px;font-weight:600;cursor:pointer}.vw-login-submit:disabled{background:#ebded0;color:#846e56;cursor:default}.vw-login-error{padding:11px 12px;border:1px solid #e8c9b7;background:#fff3ec;border-radius:8px;color:#a34325;font-size:14px;margin:0 0 16px;line-height:1.55}.vw-login-loading{padding:28px 0;color:#8a7965}
 .vw-login-card footer{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:24px;font-size:12px;color:#a09280}.vw-login-card footer button{border:0;background:none;color:#9b6846;font:inherit;padding:4px}
 @media(max-width:480px){.vw-login-screen{padding:20px}.vw-login-card{padding:30px 24px 24px;border-radius:18px}.vw-login-card h1{font-size:25px}}
+
+.vw-object-drag-handle{position:absolute;z-index:75;border:1px solid #c99070;border-radius:6px;background:#fffdf7;color:#754b37;padding:4px 9px;font-size:11px;line-height:18px;cursor:grab;touch-action:none;user-select:none;box-shadow:0 2px 6px #4b362818}
+.vw-object-drag-handle:active{cursor:grabbing}
+.vw-canvas-tools{flex-wrap:wrap;gap:4px}.vw-canvas-bar{min-height:52px;height:auto;padding-top:8px;padding-bottom:8px}.vw-canvas-tools .vw-button{padding:0 8px}.vw-object-actions .vw-button:first-child{grid-column:1/-1}
+@media(max-width:650px){.vw-crop-backdrop{padding:10px}.vw-crop-dialog{padding:14px}.vw-crop-dialog .vw-crop-handle{width:24px;height:24px}.vw-object-drag-handle{padding:5px 10px}.vw-canvas-tools .vw-button{font-size:10px!important;padding:0 5px}}
+
+

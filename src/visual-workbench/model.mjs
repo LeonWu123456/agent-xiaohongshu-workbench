@@ -118,7 +118,7 @@ function layoutOverflow(pageIndex,code='EDITABLE_LAYOUT_NEEDS_SPLIT'){
 }
 // Pagination reuses the existing page/undo contract. Only complete, canonical
 // multi-panel groups can be split automatically; custom/deleted objects stay put.
-function mobilePages(content,{force,pageIndex,measureText}){
+function mobilePages(content,{force,pageIndex,measureText,editorial}){
  const out=[],touched=new Set(),splitStarts=new Map();let changed=false;
  content.pages.forEach((page,i)=>{
   if(i>=content.visible_pages||(pageIndex!==null&&pageIndex!==i)||(!force&&page.html_state?.free_objects)){out.push(page);return;}
@@ -127,7 +127,7 @@ function mobilePages(content,{force,pageIndex,measureText}){
   const intact=!objects||(objects.some(o=>o.binding==='title')&&(!page.eyebrow?.trim()||objects.some(o=>o.binding==='eyebrow'))&&objects.every(o=>canonical.has(o.binding))&&panels.every((p,j)=>objects.some(o=>o.binding===`panel-${j}-body`)&&objects.some(o=>o.binding===`panel-${j}-title`)&&(!p.image_style?.src||p.image_style.hidden||objects.some(o=>o.binding===`panel-${j}`))));
   if(panels.length<3||!intact){touched.add(out.length);out.push(page);return;}
   // Split only when the current page actually cannot fit at readable type.
-  try{arrangeEditablePage(page,i,{measureText});touched.add(out.length);out.push(page);return;}
+  try{arrangeEditablePage(page,i,{measureText,editorial});touched.add(out.length);out.push(page);return;}
   catch(error){if(error.code!=='EDITABLE_LAYOUT_NEEDS_SPLIT')throw error;}
   changed=true;splitStarts.set(i,out.length);
   panels.forEach((panel,j)=>{
@@ -189,8 +189,11 @@ function mobilePages(content,{force,pageIndex,measureText}){
  if(out.length>8)throw layoutOverflow(0,'MOBILE_PAGE_LIMIT');
  return{pages:out,changed,touched};
 }
-export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHeight}={}){
- const source=normalizeFreeObjects(page.html_state?.free_objects||seedEditableObjects(page,pageIndex)).map(o=>mobileType(o,pageIndex));
+export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHeight,editorial=false}={}){
+ const raw=normalizeFreeObjects(page.html_state?.free_objects||seedEditableObjects(page,pageIndex));
+ const compactSteps=editorial&&raw.filter(o=>o.kind==='image').length===3&&page.info_panels?.length===3;
+ const source=raw.map(o=>{const next=mobileType(o,pageIndex);if(!compactSteps)return next;
+  return next.kind!=='text'?next:{...next,font_size:next.binding==='title'?84:next.binding==='eyebrow'?36:/^panel-\d+-title$/.test(next.binding||'')?60:next.font_size,line_height:next.binding==='title'?1.1:next.binding==='eyebrow'?1.18:/^panel-\d+-title$/.test(next.binding||'')?1.2:1.45};});
  const headers=source.filter(o=>o.kind==='text'&&['eyebrow','title'].includes(o.binding)).sort((a,b)=>Number(b.binding==='eyebrow')-Number(a.binding==='eyebrow'));
  const images=source.filter(o=>o.kind==='image'),copy=source.filter(o=>o.kind==='text'&&!headers.includes(o));
  const left=54,width=972,bottom=1386,updates=new Map();let y=54;
@@ -210,13 +213,26 @@ export function arrangeEditablePage(page,pageIndex=0,{measureText=estimateTextHe
  }else{
   const groups=new Map();
   for(const o of source.filter(o=>!headers.includes(o))){const panel=/^panel-(\d+)/.exec(o.binding||'');const key=panel?'panel-'+panel[1]:o.id;const group=groups.get(key)||{texts:[],images:[]};group[o.kind==='text'?'texts':'images'].push(o);groups.set(key,group);}
-  for(const group of groups.values()){
-   if(group.images.length&&group.texts.length){const tw=558,hs=group.texts.map(o=>height(o,tw));const th=hs.reduce((n,h)=>n+h,0)+Math.max(0,hs.length-1)*18;const rowH=Math.max(360*group.images.length,th);let top=y+(rowH-th)/2;
-    group.images.forEach((o,j)=>put(o,left,y+j*rowH/group.images.length,378,rowH/group.images.length));group.texts.forEach((o,j)=>{put(o,468,top,tw,hs[j]);top+=hs[j]+18;});y+=rowH+38;
+
+  const orderedGroups=[...groups.entries()].sort(([a],[b])=>/^panel-\d+$/.test(a)&&/^panel-\d+$/.test(b)?Number(a.slice(6))-Number(b.slice(6)):0).map(([,value])=>value);
+  const paired=orderedGroups;let pairedPlaced=false;
+  if(paired.length===2&&paired.every(g=>g.images.length===1&&g.texts.length>0)){
+   const gap=36,column=(width-gap)/2;
+   const hs=paired.map(g=>g.texts.map(o=>height(o,column))),th=hs.map(h=>h.reduce((a,b)=>a+b,0)+Math.max(0,h.length-1)*18);
+   const imageH=bottom-y-Math.max(...th)-32;
+   if(imageH>=360){
+    paired.forEach((g,i)=>{const x=left+i*(column+gap);put({...g.images[0],fit:'contain'},x,y,column,imageH);let top=y+imageH+32;g.texts.forEach((o,j)=>{put({...o,align:'left'},x,top,column,hs[i][j]);top+=hs[i][j]+18;});});
+    pairedPlaced=true;y=bottom;
+   }
+  }
+  if(!pairedPlaced)for(const group of orderedGroups){
+
+   if(group.images.length&&group.texts.length){const iw=compactSteps?276:378,gap=36,tw=width-iw-gap,spacing=compactSteps?12:18,hs=group.texts.map(o=>height(o,tw));const th=hs.reduce((n,h)=>n+h,0)+Math.max(0,hs.length-1)*spacing;const rowH=Math.max((compactSteps?286:360)*group.images.length,th);let top=y+(rowH-th)/2;
+    group.images.forEach((o,j)=>put({...o,fit:'contain'},left,y+j*rowH/group.images.length,iw,rowH/group.images.length));group.texts.forEach((o,j)=>{put({...o,align:'left'},left+iw+gap,top,tw,hs[j]);top+=hs[j]+spacing;});y+=rowH+38;
    }else if(group.texts.length){for(const o of group.texts){const h=height(o,width);put(o,left,y,width,h);y+=h+24;}}
    else{for(const o of group.images){put(o,left,y,width,400);y+=424;}}
   }
-  y-=38;
+  if(!pairedPlaced)y-=38;
  }
  const occupiedBottom=Math.max(0,...[...updates.values()].map(o=>(o.y+o.height)*14.4));
  if(occupiedBottom>bottom+1)throw layoutOverflow(pageIndex);
@@ -227,10 +243,10 @@ export function mobileReadability(page){
  const minimum=text.length?Math.min(...text.map(o=>o.font_size/3)):null;
  return{minimum_body_px:minimum,readable:minimum===null||minimum>=18};
 }
-export function composeEditableContent(content,{force=false,pageIndex=null,measureText}={}){
+export function composeEditableContent(content,{force=false,pageIndex=null,measureText,editorial=false}={}){
  if(!content?.pages?.length)throw new TypeError('EDITABLE_CONTENT_MISSING');
- const prepared=mobilePages(content,{force,pageIndex,measureText});
- const pages=applySmartLayoutSequence(prepared.pages).map((page,i)=>prepared.touched.has(i)?arrangeEditablePage(page,i,{measureText}):prepared.pages[i]);
+ const prepared=mobilePages(content,{force,pageIndex,measureText,editorial});
+ const pages=applySmartLayoutSequence(prepared.pages).map((page,i)=>prepared.touched.has(i)?arrangeEditablePage(page,i,{measureText,editorial}):prepared.pages[i]);
  return invalidateVisualReview({...content,pages,...(prepared.changed?{visible_pages:content.visible_pages+pages.length-content.pages.length,stage:'LOCAL_DRAFT'}:{})});
 }
 
