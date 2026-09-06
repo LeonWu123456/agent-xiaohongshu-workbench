@@ -285,3 +285,46 @@ test('account-login UI isolates the legacy form and invalidates stale authentica
  assert.match(panel,/health\?\.login_method!=='USERNAME_PASSWORD'/);assert.match(panel,/autoComplete="current-password"/);assert.match(panel,/autoComplete="username"/);
  assert.match(main,/const authEpoch=useRef\(0\)/);assert.match(main,/epoch===authEpoch\.current/);assert.match(main,/const epoch=\+\+authEpoch\.current/);assert.match(main,/label="退出登录"/);
 });
+
+
+test('inflight state is an observation, not an exception or a new paid step',async()=>{
+ const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');
+ const {service,session}=await confirmedService();
+ await runImageGeneration({provider:{fetchImageMediaDelta:async()=>[],generateImages:async(_r,consume)=>{const r=readyImageResponse('PARTIAL');await consume(r);return r;}},service,session,discoveryOnly:true});
+ const before=structuredClone(service.activeRecord()),events=[],requests=[];
+ const provider={fetchImageMediaDelta:async()=>{throw new Error('Unexpected media write');},generateImages:async request=>{requests.push(request);return {...readyImageResponse('IN_FLIGHT'),bootstrap_nonce:service.pending().operation_nonce,input_sha256:service.pending().input_hash};}};
+ const result=await runImageGeneration({provider,service,session:service.session(),onState:e=>events.push(e)});
+ assert.equal(result.status,'IN_FLIGHT');assert.deepEqual(requests.map(r=>r.mode),['DISCOVER']);assert.deepEqual(service.activeRecord(),before);
+ const view=imageRecoveryView(service.pending(),events.at(-1));assert.equal(view.canContinue,false);assert.equal(view.autoCheck,true);assert.match(view.title,/处理中/);assert.doesNotMatch(view.title,/完成|失败/);
+ service.dispose();
+});
+
+test('unknown/planning/materializing observations cannot be mistaken for complete or authorize STEP',async()=>{
+ const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');
+ for(const status of ['UNKNOWN','PLANNING','MATERIALIZING']){
+  const {service,session}=await confirmedService();await runImageGeneration({provider:{fetchImageMediaDelta:async()=>[],generateImages:async(_r,consume)=>{const r=readyImageResponse();await consume(r);return r;}},service,session,discoveryOnly:true});
+  const before=structuredClone(service.activeRecord()),events=[];let count=0;
+  const result=await runImageGeneration({provider:{fetchImageMediaDelta:async()=>[],generateImages:async input=>{count++;assert.equal(input.mode,'DISCOVER');return readyImageResponse(status);}},service,session:service.session(),discoveryOnly:true,onState:e=>events.push(e)});
+  const view=imageRecoveryView(service.pending(),events.at(-1));assert.equal(result.status,status);assert.equal(count,1);assert.equal(view.canContinue,false);assert.equal(view.autoCheck,status!=='UNKNOWN');assert.deepEqual(service.activeRecord(),before);service.dispose();
+ }
+});
+
+test('checkpoint-only and stale-other-operation observations do not enable paid controls',async()=>{
+ const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');const pending={operation_nonce:'a'.repeat(64),protocol_state:'PARTIAL'};
+ assert.equal(imageRecoveryView(pending,null).canContinue,false);
+ assert.equal(imageRecoveryView(pending,{operation_nonce:'b'.repeat(64),phase:'CHECKPOINT_ADVANCED',status:'PARTIAL'}).canContinue,false);
+ assert.equal(imageRecoveryView(pending,{operation_nonce:pending.operation_nonce,phase:'CHECKPOINT_ADVANCED',status:'PARTIAL'}).canContinue,true);
+ assert.equal(imageRecoveryView(pending,{operation_nonce:pending.operation_nonce,phase:'COMPLETE',status:'COMPLETE'}).canContinue,false);
+});
+
+
+test('explicit retry stays reachable only after fresh BOOTSTRAP is actually discovered missing',async()=>{
+ const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');const {service,session}=await confirmedService();
+ await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{throw new Error('preflight failed');}}}),/preflight failed/);
+ const frozen=structuredClone(service.pending()),observations=[],requests=[];
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async request=>{requests.push(request);return {status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'}};}};
+ await assert.rejects(()=>runImageGeneration({service,session,provider,discoveryOnly:true,onState:value=>observations.push(value)}),/IMAGE_LEDGER_RUN_MISSING/);
+ const view=imageRecoveryView(service.pending(),observations.at(-1));assert.equal(view.canContinue,true);assert.equal(view.autoCheck,false);assert.deepEqual(requests.map(x=>x.mode),['DISCOVER']);assert.deepEqual(service.pending(),frozen);
+ const expired={...frozen,operation_snapshot:{...frozen.operation_snapshot,mutation_epoch:Date.now()-8*86400000}};
+ assert.equal(imageRecoveryView(expired,observations.at(-1)).canContinue,false);service.dispose();
+});

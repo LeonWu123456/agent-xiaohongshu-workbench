@@ -1,5 +1,5 @@
 import React,{useRef,useState} from 'react';
-import {requiresStudioAccess} from './creator.mjs';
+import {requiresStudioAccess,imageRecoveryView} from './creator.mjs';
 import { Check, RefreshCw, Sparkles, Type, Image as ImageIcon, ShieldCheck } from 'lucide-react';
 import { estimateMotherSheetPlan } from '../mother-sheet.mjs';
 import { PRODUCTION_MODES } from '../production-mode.mjs';
@@ -26,7 +26,7 @@ export function StudioLogin({onLogin,busy=false,error='',loading=false,onRetry})
  </section></main>;
 }
 
-export function CreatorPanel({ topic, setTopic, session, health, busy, pending, recoveryDrafts = [], imageFlow, onGenerate, onEdit, onChooseTitle, onConfirm, onRefreshHealth, onImageCount, onAutoImageCount, onProductionMode, onImageCheck, onImageRun, onOpenRecovery, onInput, onAddReferences, onRemoveReference, onReferenceNote, referenceUrls = {}, onAuthenticate }) {
+export function CreatorPanel({ topic, setTopic, session, health, busy, pending, recoveryDrafts = [], imageFlow, onGenerate, onEdit, onChooseTitle, onConfirm, onRefreshHealth, onImageCount, onAutoImageCount, onProductionMode, onImageCheck, onImageRun, onOpenRecovery, onInput, onAddReferences, onRemoveReference, onReferenceNote, referenceUrls = {}, onAuthenticate, recoveryChecksPaused = false }) {
   const draft = session?.text_draft || null;
   const confirmed = Boolean(session?.text_confirmed);
   const files=useRef(null),replaceRef=useRef(null),[accessCode,setAccessCode]=useState('');
@@ -34,6 +34,7 @@ export function CreatorPanel({ topic, setTopic, session, health, busy, pending, 
   const references=session?.action_reference_manifest||[],locked=Boolean(busy||pending||isVariant);
   const complete=Boolean(draft&&session?.assembled_draft_id===draft.draft_id);
   const accessRequired=requiresStudioAccess(health);
+  const recovery=imageRecoveryView(pending,imageFlow);
   const generateDisabled=locked||health?.configured===false||accessRequired;
 
   const imageCount = draft ? (session?.image_count_mode === 'CUSTOM' ? session.custom_image_count : draft.recommended_image_count) : 0;
@@ -86,9 +87,9 @@ export function CreatorPanel({ topic, setTopic, session, health, busy, pending, 
       <div className="vw-image-count"><button type="button" className={session.image_count_mode !== 'CUSTOM' ? 'active' : ''} onClick={onAutoImageCount} disabled={locked}>智能判断 · {draft.recommended_image_count} 页</button><select aria-label="配图页数" value={imageCount} onChange={event=>onImageCount(Number(event.target.value))} disabled={locked}>{[1,2,3,4,5,6,7,8].map(value=><option value={value} key={value}>{value} 页</option>)}</select></div>
       <label><span>成品模式</span><select aria-label="配图成品模式" value={session.production_mode || 'smart'} onChange={event=>onProductionMode(event.target.value)} disabled={locked}>{PRODUCTION_MODES.map(mode=><option key={mode.id} value={mode.id}>{mode.label}</option>)}</select></label>
       <p className="vw-image-estimate">{isVariant?'同一动作生成三个独立配图方案，选择后只替换原稿中的这一张图片。':`\u9884\u8ba1 ${estimate.minMotherSheets===estimate.maxMotherSheets?estimate.minMotherSheets:estimate.minMotherSheets+'-'+estimate.maxMotherSheets} \u5f20\u6bcd\u7248\u56fe\uff0c\u81ea\u52a8\u5207\u5206\u5c01\u9762\u4e3b\u89c6\u89c9\u4e0e\u63d2\u56fe\uff0c\u518d\u6392\u4e3a ${imageCount} \u9875\u53ef\u7f16\u8f91\u4f5c\u54c1\u3002`}</p>
-      {pending && <div className="vw-pending-image"><ShieldCheck size={17}/><div><strong>发现可恢复的同稿配图任务</strong><span>{pending.protocol_state} · 已保存恢复点，不会自动继续扣费</span></div><button type="button" onClick={onImageCheck} disabled={!!busy}>检查任务（不生成图片）</button></div>}
-      {imageFlow && <p className="vw-flow-state">{imageFlow.phase==='CHECKPOINT_COMMITTED'?'已固定同稿恢复点':imageFlow.phase==='CHECKPOINT_ADVANCED'?'图片步骤已持久化':'配图已完成'}</p>}
-      {(!pending || new Set(['BOOTSTRAP','READY','PARTIAL']).has(pending.protocol_state)) ? <button type="button" className="vw-paid-image" onClick={onImageRun} disabled={!!busy||health?.configured===false||accessRequired}><ImageIcon size={16}/>{pending?(pending.protocol_state==='BOOTSTRAP'?'重新提交原配图任务（可能调用图片模型）':'继续配图（将调用图片模型）'):`生成 ${imageCount} 页配图（将调用图片模型）`}</button> : <div className="vw-paid-hold">先检查任务状态；拿到 READY/PARTIAL 回执后才会出现付费继续按钮。</div>}
+      {pending && <div className="vw-pending-image"><ShieldCheck size={17}/><div><strong>{recovery.title}</strong><span>{recovery.detail}</span>{recoveryChecksPaused&&recovery.autoCheck&&<small>本轮自动查询已暂停，原任务仍保留；可以稍后再次检查。</small>}</div><button type="button" onClick={onImageCheck} disabled={!!busy}>检查任务（不生成图片）</button></div>}
+      {imageFlow && <p className="vw-flow-state" role="status">{pending?recovery.title:imageFlow.phase==='COMPLETE'?'配图已完成':'进度已保留'}</p>}
+      {(!pending || recovery.canContinue) ? <button type="button" className="vw-paid-image" onClick={onImageRun} disabled={!!busy||health?.configured===false||accessRequired}><ImageIcon size={16}/>{pending?(pending.protocol_state==='BOOTSTRAP'?'重新提交原配图任务（可能调用图片模型）':'继续配图（将调用图片模型）'):`生成 ${imageCount} 页配图（将调用图片模型）`}</button> : <div className="vw-paid-hold">已有任务尚未确认可继续，暂不提供付费操作。检查进度不会生成图片。</div>}
       <small className="vw-paid-note">手机排版会按内容拆页，最多 8 页，不额外生图。明确付费动作 · 页面加载、保存、刷新、恢复检查都不会自动触发图片模型</small>
     </section>}
     {!draft && <div className="vw-creator-hint"><Type size={17}/><p><strong>先把文字定下来。</strong><span>文字确认前，画面不会因为一次输入而重新生成。你可以放心改标题、正文和标签。</span></p></div>}

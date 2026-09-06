@@ -1,3 +1,4 @@
+import {generationFailureFeedback} from '../generation-feedback.mjs';
 import {replacePageImage} from './model.mjs';
 import {normalizePageImageVariantTarget} from '../provider-contract.mjs';
 import { createLocalHttpProvider } from '../provider-client.mjs';
@@ -141,6 +142,10 @@ function imageDiscoveryRequest(pending) {
   return { mode:'DISCOVER', bootstrap_nonce:pending.operation_nonce, input_sha256:pending.input_hash };
 }
 function imageRecoveryDraftId(nonce) { return `image-recovery-${nonce.slice(0,32)}`; }
+function isFreshUnstartedOperation(pending){
+ const age=Date.now()-Number(pending?.operation_snapshot?.mutation_epoch);
+ return Boolean(pending&&pending.protocol_state==='BOOTSTRAP'&&!pending.run_id&&!pending.checkpoint_preimage_hash&&!pending.attempt_nonce&&Number(pending.completed_image_steps||0)===0&&Number.isFinite(age)&&age>=0&&age<7*86400000);
+}
 function imageResponseError(response) {
   const code=response?.error?.code || `IMAGE_RESPONSE_${response?.status || 'INVALID'}`;
   const error=new Error(code); error.providerCode=code; error.providerStage='image'; error.providerDetails=response?.progress||null;
@@ -176,12 +181,16 @@ export async function runImageGeneration({ provider, service, session, pageCount
   let expectedToken = draftRecordToken(operationRecord);
   const pending = operationRecord.pending_image_operation;
   const recoveredDraftId = imageRecoveryDraftId(pending.operation_nonce);
-  const emit = value => { if (typeof onState === 'function') onState(structuredClone(value)); };
+  const emit = value => { if (typeof onState === 'function') onState(structuredClone({draft_id:operationRecord.draft_id,operation_nonce:operationRecord.pending_image_operation?.operation_nonce||pending.operation_nonce,...value})); };
   emit({ phase:'CHECKPOINT_COMMITTED', resumed:bootstrap.resumed, draft_id:operationRecord.draft_id, operation_nonce:pending.operation_nonce });
   const initialRequest = bootstrap.resumed ? imageDiscoveryRequest(pending) : await rebuildPendingImageStartV3({ pendingImageOperation:pending, mediaStore:service.mediaStore });
   const requestModes = [initialRequest.mode];
   let completed = null;
   let layoutError = null;
+  const observed = (status,progress=null) => {
+    const observation={phase:'OBSERVED',status,operation_nonce:pending.operation_nonce,progress};emit(observation);
+    return {status,observation,content:null,workspace:service.workspace(),request_modes:[...requestModes],pending:service.pending(),layout_error:null};
+  };
   const consume = async response => {
     const mediaDelta = response.media_delta?.length ? await provider.fetchImageMediaDelta(response.media_delta) : [];
     if (response.status === 'COMPLETE') {
@@ -222,10 +231,8 @@ export async function runImageGeneration({ provider, service, session, pageCount
     // A preflight rejection may leave a durable local BOOTSTRAP but no server
     // run. Check-only stays read-only. Explicit retry reuses the frozen nonce,
     // snapshot and verified reference bytes; never recreate an expired run.
-    const age=Date.now()-Number(pending.operation_snapshot?.mutation_epoch);
-    const freshUnstarted=bootstrap.resumed && pending.protocol_state==='BOOTSTRAP'
-      && !pending.run_id && !pending.checkpoint_preimage_hash && !pending.attempt_nonce
-      && Number(pending.completed_image_steps||0)===0 && Number.isFinite(age) && age>=0 && age<7*86400000;
+    const freshUnstarted=bootstrap.resumed&&isFreshUnstartedOperation(pending);
+    if(discoveryOnly&&freshUnstarted&&result.status==='ERROR'&&result.error?.code==='IMAGE_LEDGER_RUN_MISSING')observed('UNSTARTED_MISSING');
     if(!discoveryOnly && freshUnstarted && result.status==='ERROR' && result.error?.code==='IMAGE_LEDGER_RUN_MISSING'){
       const request=await rebuildPendingImageStartV3({pendingImageOperation:pending,mediaStore:service.mediaStore});
       requestModes.push('START');
@@ -239,9 +246,13 @@ export async function runImageGeneration({ provider, service, session, pageCount
       await service.sync({allowPending:false});
       throw imageResponseError(result);
     }
+    if(result.status==='UNKNOWN'&&!discoveryOnly){observed('UNKNOWN',result.progress);throw imageResponseError(result);}
+    if (new Set(['IN_FLIGHT','PLANNING','MATERIALIZING','UNKNOWN','COMMITTED_RESULT','LATE_RESULT']).has(result.status)) return observed(result.status,result.progress);
     if (result.status === 'ERROR' || (result.status !== 'COMPLETE' && !discoveryOnly)) throw imageResponseError(result);
     return { status: completed ? 'COMPLETE' : result.status, content:completed?.content || null, workspace:completed?.workspace || service.workspace(), request_modes:requestModes, pending:service.pending(), layout_error:layoutError };
   } catch (error) {
+    const state={IMAGE_STEP_IN_FLIGHT:'IN_FLIGHT',IMAGE_STEP_UNKNOWN:'UNKNOWN'}[error?.providerCode||error?.message];
+    if(state){const result=observed(state,error.providerDetails);if(state!=='UNKNOWN'||discoveryOnly)return result;}
     if (error?.intentionalStop === true && error?.checkpointPersisted === true) {
       return { status:'CHECKPOINTED', content:null, workspace:service.workspace(), request_modes:requestModes, pending:service.pending(), paid_continuation_required:true };
     }
@@ -329,6 +340,20 @@ export async function applyPageVariant({service,candidateIndex}={}) {
 
 export function imageRecoveryMessage(error){
  const code=String(error?.providerCode||error?.message||'');
+ if(['IMAGE_RESPONSE_UNKNOWN','IMAGE_STEP_UNKNOWN','IMAGE_RESPONSE_IN_FLIGHT','IMAGE_STEP_IN_FLIGHT'].includes(code)){const feedback=generationFailureFeedback({providerCode:code.includes('IN_FLIGHT')?'IN_FLIGHT':'UNKNOWN',providerStage:'image'});return feedback.title+'。'+feedback.detail;}
  if(/^IMAGE_MEDIA_(?:FETCH|BODY_READ)/.test(code))return '图片素材暂未读回，任务和已生成结果仍保留。先恢复工作台访问，再点“检查任务（不生成图片）”取回结果；不要重新生图。';
  return String(error?.message||error||'操作失败');
+}
+
+
+export function imageRecoveryView(pending,flow){
+ if(!pending)return {status:'NONE',title:'',detail:'',canContinue:true,autoCheck:false};
+ const same=Boolean(flow?.operation_nonce&&flow.operation_nonce===pending.operation_nonce);
+ const checkpoint=same&&flow.phase==='CHECKPOINT_ADVANCED'&&['READY','READY_DISCOVERY','PARTIAL'].includes(flow.status)&&['READY','PARTIAL'].includes(pending.protocol_state);
+ if(checkpoint)return {status:flow.status,title:'现有配图进度已确认',detail:'已保存的图片不会重画。继续下一步仍需要你明确点击。',canContinue:true,autoCheck:false};
+ const status=same&&flow.phase==='OBSERVED'?flow.status:'CHECKING';
+ if(status==='UNSTARTED_MISSING'&&isFreshUnstartedOperation(pending))return {status,title:'服务器尚未启动这次任务',detail:'本机文字和参考图已保留。可以明确重新提交同一任务，不会更换任务编号。',canContinue:true,autoCheck:false};
+ const code={IN_FLIGHT:'IN_FLIGHT',MATERIALIZING:'MATERIALIZING',UNKNOWN:'UNKNOWN',COMMITTED_RESULT:'READY_RESPONSE_LOST',LATE_RESULT:'READY_RESPONSE_LOST'}[status];
+ const feedback=code?generationFailureFeedback({providerCode:code,providerStage:'image'}):null;
+ return {status,title:feedback?.title||(status==='PLANNING'?'正在整理本次画面的分镜':'正在检查已保存的配图任务'),detail:feedback?.detail||'保留原任务和已有图片，只查询进度，不会另起生图任务。',canContinue:false,autoCheck:status!=='UNKNOWN'&&['CHECKING','IN_FLIGHT','PLANNING','MATERIALIZING','COMMITTED_RESULT','LATE_RESULT'].includes(status)};
 }
