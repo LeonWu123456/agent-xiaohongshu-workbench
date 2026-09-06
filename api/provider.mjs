@@ -2338,14 +2338,16 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
     const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
     try {
-      pages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: !serverManaged && attempt === 3 });
-      assertXhsPublishQuality(pages.map((page) => ({
+      const candidatePages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: !serverManaged && attempt === 3 });
+      assertXhsPublishQuality(candidatePages.map((page) => ({
         page_role: page.pageRole,
+        visual: "character",
         eyebrow: page.eyebrow,
         title: page.title,
         body: page.body,
         info_panels: page.panels.map((panel) => ({ title: panel.title, body: panel.body, content_role: panel.contentRole })),
       })), { pillar: input.draft.pillar, publishBody: input.draft.body, productionMode: input.production_mode });
+      pages = candidatePages;
       planAttempts.push({ attempt, status: "PASS" });
       break;
     } catch (error) {

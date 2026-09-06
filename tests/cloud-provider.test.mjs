@@ -3737,3 +3737,18 @@ test('native Redis releases completed future allocation once and preserves repla
   const cachedAgain=await step();assert.equal(cachedAgain.status,'CACHED');assert.deepEqual(cachedAgain.cachedResponse,JSON.parse(cached));assert.equal((await step({attemptNonce:'e'.repeat(64)})).status,'NONCE_CONFLICT');assert.equal((await step({logicalStepId:'never-issued-step'})).status,'COMPLETE');assert.equal(await cli('HGET',meta,'reservation_count'),'1');
  }finally{server.kill('SIGTERM');await new Promise(r=>{if(server.exitCode!==null)return r();server.once('exit',r);setTimeout(r,2000).unref();});await rm(dir,{recursive:true,force:true});}
 });
+
+
+test('page-plan acceptance uses actual character visuals and never retains a rejected candidate',async()=>{
+ const previous=globalThis.fetch;
+ try{
+  for(const invalidCover of [false,true]){
+   const pages=Array.from({length:5},(_,i)=>({...d36PlannerPage(),page_role:i===0?'hook':'method',title:invalidCover&&i===0?'短':i===0?'先把今日动作记下来':'把当前动作依次记录',eyebrow:i===0?'日常记录':'一个小动作',body:'按原来的次序把一个日常动作记录下来，先看清自己正在做什么，再把看到的步骤写进记录册，不必为了记录而增加新的事情。',panels:[]}));
+   let plannerCalls=0,imageCalls=0;globalThis.fetch=async(url)=>{if(String(url).includes('/images/')){imageCalls++;throw new Error('NO_IMAGE_CALL_ALLOWED');}plannerCalls++;return{ok:true,json:async()=>({output:[{type:'function_call',name:'return_xiaoshimei_page_plan',arguments:JSON.stringify({pages})}]})};};
+   const ledger=new FakeD36ImageLedger(),input=await d36StartInput({nonce:invalidCover?'1'.repeat(64):'2'.repeat(64),operationOverrides:{page_count:5,production_mode:'narrative'}});const result=await d36Transaction()(input,D36_SETTINGS,{imageLedger:ledger,nowMs:1_788_192_000_000,accessExpiresAtMs:1_788_192_720_000,appScopeId:D36_APP_SCOPE});
+   assert.equal(plannerCalls,1);assert.equal(imageCalls,0);
+   if(invalidCover){assert.equal(result.status,'ERROR');assert.equal(result.error.code,'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS');assert.match(result.error.details.cause,/XHS_COVER_TITLE_BUDGET/);}
+   else{assert.equal(result.status,'READY',JSON.stringify(result.error));const run=ledger.runs.get(result.run_id);assert.deepEqual(run.compactRun.plan_attempts,[{attempt:1,status:'PASS'}]);assert.equal(run.compactRun.assets.length,0);}
+  }
+ }finally{globalThis.fetch=previous;}
+});
