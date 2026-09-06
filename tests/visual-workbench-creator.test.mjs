@@ -328,3 +328,50 @@ test('explicit retry stays reachable only after fresh BOOTSTRAP is actually disc
  const expired={...frozen,operation_snapshot:{...frozen.operation_snapshot,mutation_epoch:Date.now()-8*86400000}};
  assert.equal(imageRecoveryView(expired,observations.at(-1)).canContinue,false);service.dispose();
 });
+
+
+// This executes the actual effect body from main.jsx under a deterministic
+// clock. Network replies take 1ms; only the observation response is simulated.
+async function pollingClockFromCurrentSource({mutant=false}={}) {
+ const {readFile}=await import('node:fs/promises');const {runInNewContext}=await import('node:vm');
+ const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');
+ const source=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ const marker=' useEffect(()=>{\n  const nonce=pendingImage?.operation_nonce';
+ const ending=' },[pendingImage?.operation_nonce,activeDraftId,busy,tab,providerHealth?.authenticated,imageFlow]);';
+ assert.equal(source.split(marker).length,2,'one exact production polling effect');
+ const begin=source.indexOf(marker),end=source.indexOf(ending,begin);assert.ok(end>begin);
+ let body=source.slice(begin+' useEffect(()=>{'.length,end);
+ assert.equal(body.split('imageChecks.current.count>=4').length,2);
+ if(mutant)body=body.replace('imageChecks.current.count>=4','imageChecks.current.count>=5');
+ let now=0,nextId=0,cleanup=null;const timers=new Map(),calls=[];
+ const nonce='a'.repeat(64),draftId='fixed-test-draft';
+ const state={pendingImage:{operation_nonce:nonce,protocol_state:'PARTIAL'},activeDraftId:draftId,imageFlow:null,imageChecks:{current:{key:null,count:0}},busy:false,busyRef:{current:false},tab:'create',providerHealth:{authenticated:true},imageRecoveryView};
+ state.service={activeRecord:()=>({draft_id:state.activeDraftId}),pending:()=>state.pendingImage};
+ state.setTimeout=(fn,delay)=>{const id=++nextId;timers.set(id,{at:now+delay,fn});return id;};state.clearTimeout=id=>timers.delete(id);
+ const render=()=>{cleanup?.();cleanup=runInNewContext('(function(){'+body+'})()',state);};
+ state.runImages=options=>{
+  calls.push({at:now,...options});assert.equal(options.discoveryOnly,true);assert.equal(options.expectedOperationNonce,nonce);
+  state.busy=true;state.busyRef.current=true;render();
+  state.setTimeout(()=>{state.busy=false;state.busyRef.current=false;state.imageFlow={phase:'OBSERVED',status:'IN_FLIGHT',operation_nonce:nonce};render();},1);
+ };
+ const advanceTo=target=>{assert.ok(target>=now);let guard=0;while(true){const due=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at)[0];if(!due)break;assert.ok(++guard<100,'bounded virtual queue');now=due[1].at;timers.delete(due[0]);due[1].fn();}now=target;};
+ render();return {calls,state,advanceTo,dispose:()=>{cleanup?.();timers.clear();}};
+}
+
+test('polling cap remains four after the potential fifth deadline, not just the old 22 second window',async()=>{
+ const clock=await pollingClockFromCurrentSource();
+ try{clock.advanceTo(37504);assert.deepEqual(clock.calls.map(c=>c.at),[2500,7501,17502,37503]);
+  clock.advanceTo(37504+22000);assert.equal(clock.calls.length,4);
+  clock.advanceTo(37504+45000);assert.equal(clock.calls.length,4);
+  clock.advanceTo(37504+300000);assert.equal(clock.calls.length,4);
+ }finally{clock.dispose();}
+});
+
+test('polling cap fifth-request mutant is invisible at 22 seconds but rejected beyond its 40 second deadline',async()=>{
+ const clock=await pollingClockFromCurrentSource({mutant:true});
+ try{clock.advanceTo(37504);assert.equal(clock.calls.length,4);
+  clock.advanceTo(37504+22000);assert.equal(clock.calls.length,4,'old oracle falsely accepts the mutant');
+  clock.advanceTo(37504+45000);assert.equal(clock.calls.length,5);assert.equal(clock.calls[4].at,77504);
+  assert.throws(()=>assert.equal(clock.calls.length,4),{code:'ERR_ASSERTION'},'the same four-call oracle must reject the fifth-call mutant');
+ }finally{clock.dispose();}
+});
