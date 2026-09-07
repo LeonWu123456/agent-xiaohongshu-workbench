@@ -799,6 +799,31 @@ test("Production ledger binding fails closed when deployment and configured cand
   assert.equal(binding.ready, false);
 });
 
+test("Production ledger binding fails closed when deployment commit is missing or malformed", () => {
+  for (const deployment of ["", "not-a-git-sha"]) {
+    const binding = imageLedgerRuntimeBinding({
+      VERCEL_ENV: "production",
+      VERCEL_GIT_COMMIT_SHA: deployment,
+      XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+      XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+      XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+      XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+    }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+    assert.equal(binding.ready, false);
+  }
+});
+
+test("Production ledger binding fails closed when configured candidate commit is missing", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    VERCEL_GIT_COMMIT_SHA: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.ready, false);
+});
+
 function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const payload = {
@@ -1779,7 +1804,7 @@ test("D36 planner rejection is cached as a zero-image-call terminal state", asyn
   } finally {
     globalThis.fetch = previousFetch;
   }
-  assert.equal(plannerCalls, 1);
+  assert.equal(plannerCalls, 3);
 });
 
 test("D36 same nonce and input DISCOVER reads cached READY with one planner while a different input hash conflicts", async () => {
@@ -3039,7 +3064,7 @@ test("the server returns a signed resumable budget error before any seventh upst
   globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
   try {
     await assert.rejects(
-      () => generateImages({ draft, production_mode: "smart", image_count: 1, resume_run_id: run.run_id, resume_checkpoint: signed, reference_images: [], reference_note: "" }, { apiKey, textModel: "text", imageModel: "image", credentialMode: "SERVER_MANAGED" }, { imageLedger }),
+      () => generateImages({ draft, production_mode: "smart", image_count: 1, resume_run_id: run.run_id, resume_checkpoint: signed, reference_images: [], reference_note: "" }, { apiKey, textModel: "text", imageModel: "image", credentialMode: "SERVER_MANAGED" }, { imageLedger, nowMs: Date.parse("2026-09-01T00:00:00.000Z") }),
       (error) => error.message === "IMAGE_CALL_BUDGET_EXHAUSTED"
         && error.details?.resume_checkpoint?.signature
         && error.details?.remaining_image_calls === 0
@@ -3100,7 +3125,7 @@ test("initial zero-image checkpoint is not returned until its durable run is ini
   assert.equal(imageUpstreamCalls, 0);
 });
 
-test("server-managed page planning makes at most one Ark call per HTTP operation", async () => {
+test("server-managed page planning allows at most three bounded Ark calls per HTTP operation", async () => {
   const fixture = imageLedgerFixture();
   const imageLedger = new FakeAtomicImageLedger();
   let upstreamCalls = 0;
@@ -3121,7 +3146,7 @@ test("server-managed page planning makes at most one Ark call per HTTP operation
   } finally {
     globalThis.fetch = previousFetch;
   }
-  assert.equal(upstreamCalls, 1);
+  assert.equal(upstreamCalls, 3);
   assert.equal(imageLedger.runs.size, 0);
 });
 
@@ -3746,7 +3771,7 @@ test('page-plan acceptance uses actual character visuals and never retains a rej
    const pages=Array.from({length:5},(_,i)=>({...d36PlannerPage(),page_role:i===0?'hook':'method',title:invalidCover&&i===0?'短':i===0?'先把今日动作记下来':'把当前动作依次记录',eyebrow:i===0?'日常记录':'一个小动作',body:'按原来的次序把一个日常动作记录下来，先看清自己正在做什么，再把看到的步骤写进记录册，不必为了记录而增加新的事情。',panels:[]}));
    let plannerCalls=0,imageCalls=0;globalThis.fetch=async(url)=>{if(String(url).includes('/images/')){imageCalls++;throw new Error('NO_IMAGE_CALL_ALLOWED');}plannerCalls++;return{ok:true,json:async()=>({output:[{type:'function_call',name:'return_xiaoshimei_page_plan',arguments:JSON.stringify({pages})}]})};};
    const ledger=new FakeD36ImageLedger(),input=await d36StartInput({nonce:invalidCover?'1'.repeat(64):'2'.repeat(64),operationOverrides:{page_count:5,production_mode:'narrative'}});const result=await d36Transaction()(input,D36_SETTINGS,{imageLedger:ledger,nowMs:1_788_192_000_000,accessExpiresAtMs:1_788_192_720_000,appScopeId:D36_APP_SCOPE});
-   assert.equal(plannerCalls,1);assert.equal(imageCalls,0);
+   assert.equal(plannerCalls,invalidCover?3:1);assert.equal(imageCalls,0);
    if(invalidCover){assert.equal(result.status,'ERROR');assert.equal(result.error.code,'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS');assert.match(result.error.details.cause,/XHS_COVER_TITLE_BUDGET/);}
    else{assert.equal(result.status,'READY',JSON.stringify(result.error));const run=ledger.runs.get(result.run_id);assert.deepEqual(run.compactRun.plan_attempts,[{attempt:1,status:'PASS'}]);assert.equal(run.compactRun.assets.length,0);}
   }

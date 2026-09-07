@@ -77,6 +77,8 @@ export const IMAGE_LEDGER_RUN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const IMAGE_LEDGER_PHYSICAL_TTL_MS = 8 * 24 * 60 * 60 * 1000;
 export const IMAGE_LEDGER_IN_FLIGHT_LEASE_MS = 360_000;
 export const IMAGE_PLANNER_LEASE_MS = 240_000;
+const IMAGE_PLANNER_COMMIT_RESERVE_MS = 30_000;
+const IMAGE_PLANNER_ATTEMPT_TIMEOUT_MS = 70_000;
 export const IMAGE_LEDGER_COMMIT_MARGIN_MS = 30_000;
 export const IMAGE_TRANSACTION_RESPONSE_MAX_BYTES = 1_250_000;
 export const IMAGE_ASSET_SHA256_HEADER = "x-content-sha256";
@@ -209,16 +211,16 @@ export function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", re
   const candidateCommit = vercelEnvironment === "preview" && deploymentCommitValid
     ? deploymentCommit
     : configuredCandidateCommit || deploymentCommit;
-  const productionCommitConflict = vercelEnvironment === "production"
-    && deploymentCommitValid
-    && configuredCandidateCommitValid
-    && deploymentCommit !== configuredCandidateCommit;
+  const productionIdentityValid = vercelEnvironment !== "production"
+    || (deploymentCommitValid
+      && configuredCandidateCommitValid
+      && deploymentCommit === configuredCandidateCommit);
   return {
     ready: Boolean(publicKey)
       && /^[0-9a-f]{64}$/.test(databaseIdSha256)
       && Boolean(restOrigin && appScopeId && vercelProjectId && vercelEnvironment)
       && /^[0-9a-f]{40}$/.test(candidateCommit)
-      && !productionCommitConflict,
+      && productionIdentityValid,
     publicKey,
     expected: {
       database_id_sha256: databaseIdSha256,
@@ -534,14 +536,14 @@ function send(response, status, body) {
   response.status(status).setHeader("cache-control", "no-store").json(body);
 }
 
-async function arkPost(path, apiKey, body, stage) {
+async function arkPost(path, apiKey, body, stage, { timeoutMs = 210_000 } = {}) {
   let upstream;
   try {
     upstream = await fetch(`${ARK_BASE_URL}${path}`, {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(210_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
     throw new Error(`${stage}:NETWORK_FETCH_FAILED:${String(error?.name || "UNKNOWN")}`);
@@ -2333,10 +2335,19 @@ async function createInitialPublicImageRun(input, settings, pageCount, draftSha2
   let planError;
   const planAttempts = [];
   const serverManaged = settings.credentialMode === "SERVER_MANAGED";
-  const maxPlanAttempts = target ? 0 : serverManaged ? 1 : 3;
+  const maxPlanAttempts = target ? 0 : 3;
+  const plannerDeadlineMs = Date.now() + IMAGE_PLANNER_LEASE_MS - IMAGE_PLANNER_COMMIT_RESERVE_MS;
   for (let attempt = 1; attempt <= maxPlanAttempts; attempt += 1) {
+    const remainingMs = plannerDeadlineMs - Date.now();
+    if (remainingMs <= 0) throw planError || new Error("PAGE_PLAN_RETRY_BUDGET_EXHAUSTED");
     const qualityFeedback = planError ? pagePlanRetryGuidance(planError) : "";
-    const result = await arkPost("/responses", settings.apiKey, buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note), "PAGE_PLAN_MODEL_CALL_FAILED");
+    const result = await arkPost(
+      "/responses",
+      settings.apiKey,
+      buildArkPagePlanRequest(input.draft, pageCount, settings.textModel, qualityFeedback, input.production_mode, input.reference_note),
+      "PAGE_PLAN_MODEL_CALL_FAILED",
+      { timeoutMs: Math.min(IMAGE_PLANNER_ATTEMPT_TIMEOUT_MS, remainingMs) },
+    );
     try {
       const candidatePages = extractArkPagePlan(result, pageCount, { topic: input.draft.source_input, pillar: input.draft.pillar, goal: input.draft.goal, productionMode: input.production_mode, repairEyeCareEvidence: !serverManaged && attempt === 3 });
       assertXhsPublishQuality(candidatePages.map((page) => ({
