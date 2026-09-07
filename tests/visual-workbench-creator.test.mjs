@@ -124,3 +124,39 @@ test('inactive pending draft stays discoverable and reopening it is zero-provide
   const callsBeforeOpen=providerCalls;await service.activateDraft(draftA);
   assert.equal(providerCalls,callsBeforeOpen);assert.equal(service.pending().protocol_state,'READY');
 });
+
+test('public visual workbench keeps a fresh-device access-login path before generation', async () => {
+  const previousLocation=globalThis.location;
+  Object.defineProperty(globalThis,'location',{value:{origin:'https://xiaoshimei-full-workbench.vercel.app',hostname:'xiaoshimei-full-workbench.vercel.app'},configurable:true,writable:true});
+  const calls=[];
+  const fetchImpl=async (url,options={})=>{
+    calls.push({url:String(url),method:options.method||'GET',body:options.body||null});
+    if(String(url).endsWith('/access-session')) return new Response(JSON.stringify({ok:true}),{status:200,headers:{'content-type':'application/json'}});
+    if(String(url).endsWith('/config')) return new Response(JSON.stringify({configured:true,access_required:true,authenticated:true,credential_mode:'SERVER_MANAGED',text_model:'text',image_model:'image'}),{status:200,headers:{'content-type':'application/json'}});
+    throw new Error('UNEXPECTED_ENDPOINT:'+url);
+  };
+  try {
+    const provider=createVisualProvider({endpoint:'https://xiaoshimei-full-workbench.vercel.app/api/provider/generate',fetchImpl});
+    const result=await provider.loginAccess('trial-code');
+    assert.equal(result.config.authenticated,true);
+    assert.equal(calls[0].url,'https://xiaoshimei-full-workbench.vercel.app/api/provider/access-session');
+    assert.equal(JSON.parse(calls[0].body).code,'trial-code');
+    assert.equal(calls[1].url,'https://xiaoshimei-full-workbench.vercel.app/api/provider/config');
+  } finally {
+    if(previousLocation===undefined) delete globalThis.location;
+    else Object.defineProperty(globalThis,'location',{value:previousLocation,configurable:true,writable:true});
+  }
+});
+
+test('visual workbench source renders access verification and blocks generation until authenticated', async () => {
+  const panel=await import('node:fs/promises').then(fs=>fs.readFile(new URL('../src/visual-workbench/CreatorPanel.jsx',import.meta.url),'utf8'));
+  const main=await import('node:fs/promises').then(fs=>fs.readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8'));
+  assert.match(panel,/access_required === true && health\?\.authenticated !== true/);
+  assert.match(panel,/小师妹 Studio 访问码/);
+  assert.match(panel,/验证并开始创作/);
+  assert.match(panel,/disabled=\{!!busy \|\| accessRequired \|\| topic\.trim\(\)\.length < 2\}/);
+  assert.match(main,/provider\.loginAccess\(accessCode\)/);
+  assert.match(main,/请先验证小师妹 Studio 访问码/);
+  assert.equal((main.match(/href="\/legacy\.html"/g)||[]).length,2);
+  assert.doesNotMatch(main,/href="\/"[^>]*(?:旧版|回到旧版)/);
+});

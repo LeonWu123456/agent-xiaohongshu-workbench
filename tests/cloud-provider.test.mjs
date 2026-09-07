@@ -3125,6 +3125,63 @@ test("server-managed page planning allows at most three bounded Ark planner call
   assert.equal(imageLedger.runs.size, 0);
 });
 
+test("server-managed planner discards a structurally valid plan that fails publish quality on every bounded retry", async () => {
+  const fixture = imageLedgerFixture();
+  const imageLedger = new FakeAtomicImageLedger();
+  let upstreamCalls = 0;
+  const rejectedPage = { ...d36PlannerPage(), eyebrow: "第一步", title: "第一步先把今日动作记下来" };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: [rejectedPage] }) }] }) };
+  };
+  try {
+    await assert.rejects(
+      () => generateImages(
+        { draft: fixture.draft, production_mode: "smart", image_count: 1, resume_run_id: null, resume_checkpoint: null, reference_images: [], reference_note: "" },
+        fixture.settings,
+        { imageLedger },
+      ),
+      /XHS_HEADING_PREFIX_DUPLICATED|PAGE_PLAN_REJECTED/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  assert.equal(upstreamCalls, 3);
+  assert.equal(imageLedger.runs.size, 0);
+});
+
+test("server-managed planner shares one lease-bounded retry deadline and stops before commit headroom is consumed", async () => {
+  const fixture = imageLedgerFixture();
+  const imageLedger = new FakeAtomicImageLedger();
+  const rejectedPage = { ...d36PlannerPage(), eyebrow: "第一步", title: "第一步先把今日动作记下来" };
+  let upstreamCalls = 0;
+  let fakeNow = 1_788_192_000_000;
+  const previousFetch = globalThis.fetch;
+  const previousDateNow = Date.now;
+  Date.now = () => fakeNow;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    fakeNow += 110_000;
+    return { ok: true, json: async () => ({ output: [{ type: "function_call", name: "return_xiaoshimei_page_plan", arguments: JSON.stringify({ pages: [rejectedPage] }) }] }) };
+  };
+  try {
+    await assert.rejects(
+      () => generateImages(
+        { draft: fixture.draft, production_mode: "smart", image_count: 1, resume_run_id: null, resume_checkpoint: null, reference_images: [], reference_note: "" },
+        fixture.settings,
+        { imageLedger },
+      ),
+      /XHS_HEADING_PREFIX_DUPLICATED|PAGE_PLAN_RETRY_BUDGET_EXHAUSTED/,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    Date.now = previousDateNow;
+  }
+  assert.equal(upstreamCalls, 2);
+  assert.equal(imageLedger.runs.size, 0);
+});
+
 test("an expired signed run fails closed before reserve or image upstream", async () => {
   const fixture = imageLedgerFixture();
   const imageLedger = new FakeAtomicImageLedger();
