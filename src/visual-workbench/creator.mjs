@@ -7,7 +7,7 @@ import { defaultPromptValues, promptContextForProvider } from '../prompt-context
 import {
   normalizeAuthoringSession, AUTHORING_SESSION_SCHEMA, createRestartablePendingImageOperationV3,
   rebuildPendingImageStartV3, commitDraftImageProgressV3, commitDraftImageCompletionV3,
-  commitDraftImagePlannerFailureV3, createDraftRecordV3, draftRecordToken,
+  commitDraftImagePlannerFailureV3, releaseUnstartedPendingImageOperationV3, createDraftRecordV3, draftRecordToken,
 } from '../workspace-state.mjs';
 import { textDraftConfirmationIssue } from '../text-draft-policy.mjs';
 
@@ -163,11 +163,14 @@ async function persistBootstrap({ service, session, pageCount, productionMode, c
     operationSnapshot:imageOperationSnapshot({recordId:record.draft_id,draft:session.text_draft,pageCount,productionMode,referenceNote:session.action_reference_note||'',variantTarget:session.image_variant_target}),
     orderedReferenceManifest:session.action_reference_manifest||[], protocolState:'BOOTSTRAP', updatedAt:new Date().toISOString(),
   });
+  // Prove that the frozen START can be reconstructed from local media before
+  // making the draft durable-pending. Local/preflight failures must not brick editing.
+  const initialRequest=await rebuildPendingImageStartV3({pendingImageOperation:pending,mediaStore:service.mediaStore});
   const desired=createDraftRecordV3({draftId:record.draft_id,displayName:record.display_name,contentPackage:record.content_package,generationSession:session,pendingImageOperation:pending,createdAt:record.created_at,updatedAt:new Date().toISOString()});
   const receipt=await service.coordinator.mergeDraftCas({draftId:record.draft_id,expectedDraftToken:draftRecordToken(record),buildDraft:()=>desired,requireActiveDraftId:record.draft_id,reason:`VISUAL_IMAGE_BOOTSTRAP:${operationNonce}`});
   if(!receipt.ok||!receipt.target_draft?.pending_image_operation) throw new Error(`IMAGE_BOOTSTRAP_NOT_COMMITTED:${receipt.code||'UNKNOWN'}`);
   await service.sync({allowPending:true});
-  return {record:service.activeRecord(),pending:service.pending(),resumed:false};
+  return {record:service.activeRecord(),pending:service.pending(),resumed:false,initialRequest};
 }
 export async function runImageGeneration({ provider, service, session, pageCount = null, productionMode = 'smart', discoveryOnly = false, cryptoApi = globalThis.crypto, onState = null, prepareContent = null } = {}) {
   if (!provider?.generateImages || !provider?.fetchImageMediaDelta) throw new TypeError('IMAGE_PROVIDER_UNAVAILABLE');
@@ -183,7 +186,7 @@ export async function runImageGeneration({ provider, service, session, pageCount
   const recoveredDraftId = imageRecoveryDraftId(pending.operation_nonce);
   const emit = value => { if (typeof onState === 'function') onState(structuredClone({draft_id:operationRecord.draft_id,operation_nonce:operationRecord.pending_image_operation?.operation_nonce||pending.operation_nonce,...value})); };
   emit({ phase:'CHECKPOINT_COMMITTED', resumed:bootstrap.resumed, draft_id:operationRecord.draft_id, operation_nonce:pending.operation_nonce });
-  const initialRequest = bootstrap.resumed ? imageDiscoveryRequest(pending) : await rebuildPendingImageStartV3({ pendingImageOperation:pending, mediaStore:service.mediaStore });
+  const initialRequest = bootstrap.resumed ? imageDiscoveryRequest(pending) : bootstrap.initialRequest;
   const requestModes = [initialRequest.mode];
   let completed = null;
   let layoutError = null;
@@ -228,15 +231,20 @@ export async function runImageGeneration({ provider, service, session, pageCount
   };
   try {
     let result = await provider.generateImages(initialRequest, consume);
-    // A preflight rejection may leave a durable local BOOTSTRAP but no server
-    // run. Check-only stays read-only. Explicit retry reuses the frozen nonce,
-    // snapshot and verified reference bytes; never recreate an expired run.
+    // An ambiguous dispatch may leave a durable local BOOTSTRAP. A later
+    // DISCOVER is free: proven RUN_MISSING releases that stale lock; any other
+    // state preserves the original authority so a paid action cannot be duplicated.
     const freshUnstarted=bootstrap.resumed&&isFreshUnstartedOperation(pending);
-    if(discoveryOnly&&freshUnstarted&&result.status==='ERROR'&&result.error?.code==='IMAGE_LEDGER_RUN_MISSING')observed('UNSTARTED_MISSING');
-    if(!discoveryOnly && freshUnstarted && result.status==='ERROR' && result.error?.code==='IMAGE_LEDGER_RUN_MISSING'){
-      const request=await rebuildPendingImageStartV3({pendingImageOperation:pending,mediaStore:service.mediaStore});
-      requestModes.push('START');
-      result=await provider.generateImages(request,consume);
+    const discoveredMissing=initialRequest.mode==='DISCOVER'&&freshUnstarted&&result.status==='ERROR'&&result.error?.code==='IMAGE_LEDGER_RUN_MISSING';
+    if(discoveredMissing){
+      const release=await releaseUnstartedPendingImageOperationV3({
+        coordinator:service.coordinator,draftId:operationRecord.draft_id,expectedDraftToken:expectedToken,operationSnapshot:operationRecord,
+      });
+      if(release.action!=='RELEASED')throw new Error(`IMAGE_UNSTARTED_RELEASE_FAILED:${release.code||'UNKNOWN'}`);
+      await service.sync({allowPending:false});
+      const observation={phase:'UNSTARTED_RELEASED',status:'UNSTARTED_RELEASED',operation_nonce:pending.operation_nonce,progress:result.progress||null};
+      emit(observation);
+      return {status:'UNSTARTED_RELEASED',observation,content:null,workspace:service.workspace(),request_modes:[...requestModes],pending:null,layout_error:null};
     }
     if (result.status === 'ERROR' && result.error?.code === 'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS') {
       const release = await commitDraftImagePlannerFailureV3({
@@ -352,7 +360,6 @@ export function imageRecoveryView(pending,flow){
  const checkpoint=same&&flow.phase==='CHECKPOINT_ADVANCED'&&['READY','READY_DISCOVERY','PARTIAL'].includes(flow.status)&&['READY','PARTIAL'].includes(pending.protocol_state);
  if(checkpoint)return {status:flow.status,title:'现有配图进度已确认',detail:'已保存的图片不会重画。继续下一步仍需要你明确点击。',canContinue:true,autoCheck:false};
  const status=same&&flow.phase==='OBSERVED'?flow.status:'CHECKING';
- if(status==='UNSTARTED_MISSING'&&isFreshUnstartedOperation(pending))return {status,title:'服务器尚未启动这次任务',detail:'本机文字和参考图已保留。可以明确重新提交同一任务，不会更换任务编号。',canContinue:true,autoCheck:false};
  const code={IN_FLIGHT:'IN_FLIGHT',MATERIALIZING:'MATERIALIZING',UNKNOWN:'UNKNOWN',COMMITTED_RESULT:'READY_RESPONSE_LOST',LATE_RESULT:'READY_RESPONSE_LOST'}[status];
  const feedback=code?generationFailureFeedback({providerCode:code,providerStage:'image'}):null;
  return {status,title:feedback?.title||(status==='PLANNING'?'正在整理本次画面的分镜':'正在检查已保存的配图任务'),detail:feedback?.detail||'保留原任务和已有图片，只查询进度，不会另起生图任务。',canContinue:false,autoCheck:status!=='UNKNOWN'&&['CHECKING','IN_FLIGHT','PLANNING','MATERIALIZING','COMMITTED_RESULT','LATE_RESULT'].includes(status)};

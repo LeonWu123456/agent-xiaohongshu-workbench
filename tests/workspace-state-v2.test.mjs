@@ -38,6 +38,7 @@ import {
   createWorkspaceV3Coordinator,
   commitDraftImageCompletionV3,
   commitDraftImagePlannerFailureV3,
+  releaseUnstartedPendingImageOperationV3,
   commitDraftImageProgressV3,
   draftAutosaveRequiredV3,
   draftContentWithPreservedBookkeepingV3,
@@ -2050,6 +2051,36 @@ test("planner-only zero-image failure atomically releases the exact draft input 
   });
   assert.equal(stale.action, "RELEASED");
   assert.equal(stale.target_draft.pending_image_operation, null);
+});
+
+test("unstarted release rejects READY and PARTIAL pending authority", async () => {
+  for (const protocolState of ["READY", "PARTIAL"]) {
+    const session = { ...fullSession(`release-guard-${protocolState}`), image_resume: protocolState === "PARTIAL" ? {
+      resume_run_id: "guard-run", checkpoint_preimage_hash: "d".repeat(64), logical_step_id: "render-job-01",
+      attempt_nonce: "e".repeat(64), completed_image_steps: 1, total_image_steps: 2, max_image_calls: 6,
+      actual_image_calls: 1, remaining_image_calls: 5, local_media_refs: [], status: "PARTIAL",
+    } : null };
+    const pending = createPendingImageOperation({
+      operationNonce: (protocolState === "READY" ? "6" : "7").repeat(64),
+      operationSnapshot: imageOperationSnapshot(`release-guard-${protocolState}`, session.text_draft),
+      operationSnapshotHash: "8".repeat(64), inputHash: "9".repeat(64), orderedReferenceManifest: [],
+      protocolState, runId: "guard-run", checkpointPreimageHash: "d".repeat(64), logicalStepId: "render-job-01",
+      attemptNonce: protocolState === "PARTIAL" ? "e".repeat(64) : null,
+      completedImageSteps: protocolState === "PARTIAL" ? 1 : 0, totalImageSteps: 2,
+    });
+    const record = createDraftRecordV3({
+      draftId: `release-guard-${protocolState}`, contentPackage: assembledContent(session, `release-guard-${protocolState}`),
+      generationSession: session, pendingImageOperation: pending, createdAt: T0,
+    });
+    let writes = 0;
+    const result = await releaseUnstartedPendingImageOperationV3({
+      coordinator: { mergeDraftCas: async () => { writes += 1; throw new Error("MUST_NOT_WRITE"); } },
+      draftId: record.draft_id, expectedDraftToken: draftRecordToken(record), operationSnapshot: record, updatedAt: T1,
+    });
+    assert.equal(result.action, "STOP");
+    assert.equal(result.code, "IMAGE_UNSTARTED_RELEASE_PRECONDITION_FAILED");
+    assert.equal(writes, 0, `${protocolState} must never be unlocked by missing-run cleanup`);
+  }
 });
 
 test("workspace media-first adapter consumes the real media-store manifest-only put response and verifies bytes by a separate readback", async () => {

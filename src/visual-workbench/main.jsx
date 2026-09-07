@@ -162,6 +162,7 @@ function App(){
      const result=await runImageGeneration({provider,service,session,pageCount:count,productionMode:session.production_mode,discoveryOnly,onState:setImageFlow,prepareContent:value=>session.image_variant_target?composeEditableContent(value,{measureText:measureEditableText}):materializeGeneratedCopy(value,{measureText:measureEditableText})});
      setPendingImage(service.pending());setCreatorSession(service.session());
      if(result.content){setHistory(createEditorHistory(result.content));setIndex(0);setSelected('title-block');setImageId(null);setDirty(false);setIsExample(false);setTab('pages');setNarrowPanelOpen(false);setNote(`配图完成 · ${result.content.visible_pages} 页已写回同一稿件`);}
+     else if(result.status==='UNSTARTED_RELEASED')setNote('服务器确认旧配图任务未启动；已解除编辑锁。需要生图时请重新点击生成。');
      else setNote(result.observation?imageRecoveryView(service.pending(),{...result.observation,operation_nonce:service.pending()?.operation_nonce}).title:discoveryOnly?'已有进度已读回，没有继续图片调用。':'配图恢复点已保存，当前稿件保留。');
      if(result.layout_error)setError(result.layout_error);
    }finally{setPendingImage(service.pending());setRecoveries(service.recoveryDrafts());setDrafts(service.drafts());setCreatorSession(service.session());}
@@ -171,7 +172,7 @@ function App(){
   const nonce=pendingImage?.operation_nonce,key=nonce?activeDraftId+':'+nonce:null;
   if(imageChecks.current.key!==key)imageChecks.current={key,count:0};
   const recovery=imageRecoveryView(pendingImage,imageFlow);
-  if(!nonce||busy||tab!=='create'||providerHealth?.authenticated!==true||!recovery.autoCheck||imageChecks.current.count>=4)return;
+  if(!nonce||busy||providerHealth?.authenticated!==true||!recovery.autoCheck||imageChecks.current.count>=4)return;
   const timer=setTimeout(()=>{
    if(busyRef.current||service.activeRecord()?.draft_id!==activeDraftId||service.pending()?.operation_nonce!==nonce)return;
    imageChecks.current.count++;

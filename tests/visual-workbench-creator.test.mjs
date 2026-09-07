@@ -7,7 +7,7 @@ import { createVisualStorage, STORAGE_KEYS } from '../src/visual-workbench/stora
 import { createDemo } from '../src/visual-workbench/model.mjs';
 import {
   defaultProviderEndpoint, createVisualProvider, emptyAuthoringSession, sessionWithTextDraft,
-  editTextSession, chooseTextTitle, confirmTextSession, generateTextDraft, readProviderHealth, runImageGeneration,
+  editTextSession, chooseTextTitle, confirmTextSession, generateTextDraft, readProviderHealth, runImageGeneration, updateActionReferences,
 } from '../src/visual-workbench/creator.mjs';
 
 function textDraft() {
@@ -80,6 +80,23 @@ async function confirmedService() {
   await service.save(createDemo(),{generationSession:session});
   return {service,session,storage};
 }
+
+test('local START preflight failure cannot leave a durable pending lock',async()=>{
+  const {service,session}=await confirmedService();
+  const sha='f'.repeat(64);
+  const referenced=updateActionReferences(session,{manifest:[{
+    schema:'xiaoshimei.media-asset-manifest.v1',media_ref:`xiaoshimei-media://sha256/${sha}`,sha256:sha,
+    size_bytes:4,mime:'image/jpeg',name:'missing-reference',width:96,height:128,
+  }]});
+  let providerCalls=0;
+  await assert.rejects(()=>runImageGeneration({
+    provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{providerCalls++;throw new Error('PROVIDER_MUST_NOT_RUN');}},
+    service,session:referenced,
+  }));
+  assert.equal(providerCalls,0,'local media/start validation must finish before durable pending or Provider dispatch');
+  assert.equal(service.pending(),null,'failed local preflight must not brick the editor after refresh');
+  assert.equal(service.activeRecord().pending_image_operation,null);
+});
 
 test('image bootstrap is committed before provider sees START and discovery can stop after durable checkpoint',async()=>{
   const {service,session}=await confirmedService();let providerCalls=0;
@@ -251,14 +268,16 @@ test('discovery ERROR is never reported as saved recovery and never releases or 
 });
 
 
-test('explicit retry resubmits exactly the same fresh BOOTSTRAP only after missing-run discovery',async()=>{
+test('fresh missing-run discovery releases the old BOOTSTRAP; a later explicit click creates a new operation',async()=>{
  const {service,session}=await confirmedService();const first=[];
- await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async request=>{first.push(request);throw new Error('IMAGE_LEDGER_CAPACITY_EXHAUSTED');}}}),/CAPACITY_EXHAUSTED/);
- const frozen=structuredClone(service.pending());assert.equal(frozen.protocol_state,'BOOTSTRAP');
- const missing={status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'}};const calls=[];
- const provider={fetchImageMediaDelta:async()=>[],generateImages:async(request,consume)=>{calls.push(request);if(request.mode==='DISCOVER')return missing;await consume(readyImageResponse());throw Object.assign(new Error('test checkpoint stop'),{intentionalStop:true,checkpointPersisted:true});}};
- await assert.rejects(()=>runImageGeneration({service,session,provider,discoveryOnly:true}),/IMAGE_LEDGER_RUN_MISSING/);assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);
- calls.length=0;const result=await runImageGeneration({service,session,provider});assert.equal(result.status,'CHECKPOINTED');assert.deepEqual(calls.map(x=>x.mode),['DISCOVER','START']);assert.deepEqual(calls[1],first[0]);assert.equal(service.pending().operation_nonce,frozen.operation_nonce);assert.equal(service.pending().protocol_state,'READY');
+ await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async request=>{first.push(request);throw new Error('network after dispatch');}}}),/network after dispatch/);
+ const frozen=structuredClone(service.pending());assert.equal(frozen.protocol_state,'BOOTSTRAP');assert.equal(first[0].mode,'START');
+ const missing={status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'},progress:{},upstream_calls:0};const calls=[];
+ const discovery={fetchImageMediaDelta:async()=>[],generateImages:async request=>{calls.push(request);return missing;}};
+ const released=await runImageGeneration({service,session,provider:discovery,discoveryOnly:true});
+ assert.equal(released.status,'UNSTARTED_RELEASED');assert.deepEqual(calls.map(x=>x.mode),['DISCOVER']);assert.equal(service.pending(),null);
+ const second=[];const provider={fetchImageMediaDelta:async()=>[],generateImages:async(input,consume)=>{second.push(input);const decision=await consume(readyImageResponse());assert.equal(decision.request.mode,'STEP');throw Object.assign(new Error('stop after checkpoint'),{intentionalStop:true,checkpointPersisted:true});}};
+ const result=await runImageGeneration({service,session:service.session(),provider});assert.equal(result.status,'CHECKPOINTED');assert.equal(second[0].mode,'START');assert.notEqual(second[0].bootstrap_nonce,frozen.operation_nonce);assert.equal(service.pending().protocol_state,'READY');
 });
 test('unknown or expired BOOTSTRAP cannot be treated as a safe new START',async()=>{
  const {service,session}=await confirmedService();await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{throw new Error('network');}}}),/network/);
@@ -318,15 +337,21 @@ test('checkpoint-only and stale-other-operation observations do not enable paid 
 });
 
 
-test('explicit retry stays reachable only after fresh BOOTSTRAP is actually discovered missing',async()=>{
+test('fresh missing-run discovery unlocks editing instead of exposing a paid retry on the stale operation',async()=>{
  const {imageRecoveryView}=await import('../src/visual-workbench/creator.mjs');const {service,session}=await confirmedService();
- await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{throw new Error('preflight failed');}}}),/preflight failed/);
- const frozen=structuredClone(service.pending()),observations=[],requests=[];
- const provider={fetchImageMediaDelta:async()=>[],generateImages:async request=>{requests.push(request);return {status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'}};}};
- await assert.rejects(()=>runImageGeneration({service,session,provider,discoveryOnly:true,onState:value=>observations.push(value)}),/IMAGE_LEDGER_RUN_MISSING/);
- const view=imageRecoveryView(service.pending(),observations.at(-1));assert.equal(view.canContinue,true);assert.equal(view.autoCheck,false);assert.deepEqual(requests.map(x=>x.mode),['DISCOVER']);assert.deepEqual(service.pending(),frozen);
- const expired={...frozen,operation_snapshot:{...frozen.operation_snapshot,mutation_epoch:Date.now()-8*86400000}};
- assert.equal(imageRecoveryView(expired,observations.at(-1)).canContinue,false);service.dispose();
+ await assert.rejects(()=>runImageGeneration({service,session,provider:{fetchImageMediaDelta:async()=>[],generateImages:async()=>{throw new Error('network after dispatch');}}}),/network after dispatch/);
+ const observations=[],requests=[];
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async request=>{requests.push(request);return {status:'ERROR',error:{code:'IMAGE_LEDGER_RUN_MISSING'},progress:{},upstream_calls:0};}};
+ const result=await runImageGeneration({service,session,provider,discoveryOnly:true,onState:value=>observations.push(value)});
+ assert.equal(result.status,'UNSTARTED_RELEASED');assert.deepEqual(requests.map(x=>x.mode),['DISCOVER']);assert.equal(service.pending(),null);
+ const view=imageRecoveryView(service.pending(),observations.at(-1));assert.equal(view.status,'NONE');assert.equal(view.canContinue,true);assert.equal(view.autoCheck,false);service.dispose();
+});
+
+test('pending recovery check is not hidden behind the create tab after refresh',async()=>{
+ const {readFile}=await import('node:fs/promises');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ const effect=main.slice(main.indexOf("useEffect(()=>{\n  const nonce=pendingImage?.operation_nonce"),main.indexOf("async function startImageVariants"));
+ assert.doesNotMatch(effect,/tab!=='create'/,'a refreshed pending draft must self-check even while the user is on pages/assets/layouts');
+ assert.match(effect,/runImages\(\{discoveryOnly:true,expectedOperationNonce:nonce\}\)/);
 });
 
 

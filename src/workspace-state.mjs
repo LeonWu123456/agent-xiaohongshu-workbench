@@ -3256,22 +3256,38 @@ export async function commitDraftImageProgressV3({
   };
 }
 
-export async function commitDraftImagePlannerFailureV3({
+function imagePendingIsUnstartedBootstrap(pending) {
+  return Boolean(
+    pending
+    && pending.protocol_state === "BOOTSTRAP"
+    && pending.run_id == null
+    && pending.checkpoint_preimage_hash == null
+    && pending.checkpoint_hash == null
+    && pending.logical_step_id == null
+    && pending.attempt_nonce == null
+    && Number(pending.completed_image_steps ?? 0) === 0
+  );
+}
+
+async function releasePendingImageOperationV3({
   coordinator: coordinatorValue,
   draftId,
   expectedDraftToken,
   operationSnapshot,
+  reasonPrefix,
+  readbackCode,
+  requireUnstarted = false,
   updatedAt = new Date().toISOString(),
 } = {}) {
   const coordinator = imageTransactionCoordinator(coordinatorValue);
   const targetId = requiredString(draftId, "draftId");
   if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
   const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
+  if (requireUnstarted && !imagePendingIsUnstartedBootstrap(snapshotRecord.pending_image_operation)) {
+    return imageTransactionStopped({ code: "IMAGE_UNSTARTED_RELEASE_PRECONDITION_FAILED", operationSnapshot: snapshotRecord });
+  }
   const timestamp = requiredString(updatedAt, "updatedAt");
-  const finalSession = {
-    ...snapshotRecord.generation_session,
-    image_resume: null,
-  };
+  const finalSession = { ...snapshotRecord.generation_session, image_resume: null };
   const buildRecord = (target) => createDraftRecordV3({
     draftId: target.draft_id,
     displayName: target.display_name,
@@ -3287,18 +3303,31 @@ export async function commitDraftImagePlannerFailureV3({
     expectedDraftToken,
     buildDraft: (target) => buildRecord(target),
     isAlreadyApplied: ({ target_draft: target }) => sameImageTransactionResult(target, desiredTarget),
-    reason: `IMAGE_PLANNER_FAILED_V3:${snapshotRecord.pending_image_operation.operation_nonce}`,
+    reason: `${reasonPrefix}:${snapshotRecord.pending_image_operation.operation_nonce}`,
   });
   if (!receipt.ok) return imageTransactionStopped({ code: receipt.code, receipt, operationSnapshot: snapshotRecord });
   const committed = receipt.target_draft;
   if (!committed || committed.pending_image_operation != null || committed.generation_session?.image_resume != null) {
-    return imageTransactionStopped({ code: "IMAGE_PLANNER_FAILURE_READBACK_MISMATCH", receipt, operationSnapshot: snapshotRecord });
+    return imageTransactionStopped({ code: readbackCode, receipt, operationSnapshot: snapshotRecord });
   }
-  return {
-    ...receipt,
-    action: "RELEASED",
-    operation_snapshot: snapshotRecord,
-  };
+  return { ...receipt, action: "RELEASED", operation_snapshot: snapshotRecord };
+}
+
+export async function commitDraftImagePlannerFailureV3(input = {}) {
+  return releasePendingImageOperationV3({
+    ...input,
+    reasonPrefix: "IMAGE_PLANNER_FAILED_V3",
+    readbackCode: "IMAGE_PLANNER_FAILURE_READBACK_MISMATCH",
+  });
+}
+
+export async function releaseUnstartedPendingImageOperationV3(input = {}) {
+  return releasePendingImageOperationV3({
+    ...input,
+    reasonPrefix: "IMAGE_UNSTARTED_RELEASE_V3",
+    readbackCode: "IMAGE_UNSTARTED_RELEASE_READBACK_MISMATCH",
+    requireUnstarted: true,
+  });
 }
 
 function exactStringList(left, right) {
