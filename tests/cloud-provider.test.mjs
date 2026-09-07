@@ -799,6 +799,43 @@ test("Production ledger binding fails closed when deployment and configured cand
   assert.equal(binding.ready, false);
 });
 
+test("Production ledger binding fails closed when immutable deployment commit is missing", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "b".repeat(40));
+  assert.equal(binding.ready, false);
+});
+
+test("Production ledger binding fails closed when immutable deployment commit is malformed", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    VERCEL_GIT_COMMIT_SHA: "not-a-git-sha",
+    XIAOSHIMEI_CANDIDATE_COMMIT: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "b".repeat(40));
+  assert.equal(binding.ready, false);
+});
+
+test("Production ledger binding fails closed when configured candidate commit is missing", () => {
+  const binding = imageLedgerRuntimeBinding({
+    VERCEL_ENV: "production",
+    VERCEL_GIT_COMMIT_SHA: "b".repeat(40),
+    XIAOSHIMEI_LEDGER_ATTESTATION_PUBLIC_KEY: "public-key",
+    XIAOSHIMEI_UPSTASH_DATABASE_ID_SHA256: "1".repeat(64),
+    XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
+  }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
+  assert.equal(binding.expected.candidate_commit, "b".repeat(40));
+  assert.equal(binding.ready, false);
+});
+
 function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const payload = {

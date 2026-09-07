@@ -200,16 +200,16 @@ export function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", re
   const candidateCommit = vercelEnvironment === "preview" && deploymentCommitValid
     ? deploymentCommit
     : configuredCandidateCommit || deploymentCommit;
-  const productionCommitConflict = vercelEnvironment === "production"
-    && deploymentCommitValid
-    && configuredCandidateCommitValid
-    && deploymentCommit !== configuredCandidateCommit;
+  const productionIdentityValid = vercelEnvironment !== "production"
+    || (deploymentCommitValid
+      && configuredCandidateCommitValid
+      && deploymentCommit === configuredCandidateCommit);
   return {
     ready: Boolean(publicKey)
       && /^[0-9a-f]{64}$/.test(databaseIdSha256)
       && Boolean(restOrigin && appScopeId && vercelProjectId && vercelEnvironment)
       && /^[0-9a-f]{40}$/.test(candidateCommit)
-      && !productionCommitConflict,
+      && productionIdentityValid,
     publicKey,
     expected: {
       database_id_sha256: databaseIdSha256,
