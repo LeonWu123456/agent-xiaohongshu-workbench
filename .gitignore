@@ -30,3 +30,5 @@ npm-debug.log*
 packages/share-site/build/
 release/
 build/
+
+.vercel
