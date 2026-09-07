@@ -3039,7 +3039,7 @@ test("the server returns a signed resumable budget error before any seventh upst
   globalThis.fetch = async () => { upstreamCalls += 1; throw new Error("UPSTREAM_MUST_NOT_RUN"); };
   try {
     await assert.rejects(
-      () => generateImages({ draft, production_mode: "smart", image_count: 1, resume_run_id: run.run_id, resume_checkpoint: signed, reference_images: [], reference_note: "" }, { apiKey, textModel: "text", imageModel: "image", credentialMode: "SERVER_MANAGED" }, { imageLedger }),
+      () => generateImages({ draft, production_mode: "smart", image_count: 1, resume_run_id: run.run_id, resume_checkpoint: signed, reference_images: [], reference_note: "" }, { apiKey, textModel: "text", imageModel: "image", credentialMode: "SERVER_MANAGED" }, { imageLedger, nowMs: Date.UTC(2026, 7, 31, 8, 1, 0) }),
       (error) => error.message === "IMAGE_CALL_BUDGET_EXHAUSTED"
         && error.details?.resume_checkpoint?.signature
         && error.details?.remaining_image_calls === 0
