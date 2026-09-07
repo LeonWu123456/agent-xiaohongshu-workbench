@@ -7,6 +7,7 @@ import {normalizeHtmlState,updateObjectEdit,objectEditFor,updateImageEdit,imageE
 import {createEditorHistory,updateEditorHistory,undoEditorHistory,redoEditorHistory} from '../editor-history.mjs';
 import {buildPublishZip,collectPublishMediaRefs,inspectPng} from '../publish-package.mjs';
 import {createVisualStorage,previewVisualImport} from './storage.mjs';
+import {draftRecordToken,parkPendingImageOperationForEditingV3} from '../workspace-state.mjs';
 import {createVisualProvider,readProviderHealth,generateTextDraft,emptyAuthoringSession,sessionWithTextDraft,editTextSession,chooseTextTitle,confirmTextSession,runImageGeneration,updateImageSettings,updateAuthoringInput,updateActionReferences,requiresStudioAccess,readReferenceFiles,createPageVariantSession,applyPageVariant,imageRecoveryMessage,imageRecoveryView} from './creator.mjs';
 import {changePage,replacePageImage,listPageObjects,createDemo,createBlankContent,addContentPage,duplicateContentPage,deleteContentPage,reorderContentPage,clampPageIndex,composeEditableContent,mobileReadability,confirmedCopyCoverage,reconcileConfirmedCopy,materializeGeneratedCopy} from './model.mjs';
 import {CreatorPanel,StudioLogin} from './CreatorPanel.jsx';
@@ -150,6 +151,16 @@ function App(){
  function changeImageCount(value){const next=updateImageSettings(creatorRef.current,{imageCountMode:'CUSTOM',customImageCount:Number(value)});setCreator(next);}
  function useAutoImageCount(){setCreator(updateImageSettings(creatorRef.current,{imageCountMode:'AUTO'}));}
  function changeProductionMode(value){setCreator(updateImageSettings(creatorRef.current,{productionMode:value}));}
+ async function detachPendingForEditing({reason=''}={}){
+  const record=service.activeRecord();
+  if(!record?.pending_image_operation||String(record.draft_id||'').startsWith('image-recovery-'))return false;
+  const receipt=await parkPendingImageOperationForEditingV3({coordinator:service.coordinator,draftId:record.draft_id,expectedDraftToken:draftRecordToken(record),operationSnapshot:record});
+  if(!receipt.ok||!receipt.workspace)throw new Error(`IMAGE_PENDING_EDITING_DETACH_FAILED:${receipt.code||'UNKNOWN'}`);
+  const synced=await service.sync({allowPending:false});
+  setHistory(createEditorHistory(synced.content));setCreatorSession(service.session());setTopic(service.session()?.topic||'');setPendingImage(null);setRecoveries(service.recoveryDrafts());setDrafts(service.drafts());setImageFlow(null);setDirty(false);setIsExample(false);
+  setNote(reason?`配图任务状态${reason}，已保留到恢复稿；当前作品可以继续编辑。`:'配图任务已保留到恢复稿；当前作品可以继续编辑。');
+  return true;
+ }
  async function runImages({discoveryOnly=false,expectedOperationNonce=null}={}){await guard(discoveryOnly?'检查配图任务':'生成配图中',async()=>{
    if(expectedOperationNonce&&service.pending()?.operation_nonce!==expectedOperationNonce)return;
    if(!creatorRef.current?.text_confirmed)throw new Error('请先确认文字，再进入配图。');
@@ -163,8 +174,12 @@ function App(){
      setPendingImage(service.pending());setCreatorSession(service.session());
      if(result.content){setHistory(createEditorHistory(result.content));setIndex(0);setSelected('title-block');setImageId(null);setDirty(false);setIsExample(false);setTab('pages');setNarrowPanelOpen(false);setNote(`配图完成 · ${result.content.visible_pages} 页已写回同一稿件`);}
      else if(result.status==='UNSTARTED_RELEASED')setNote('服务器确认旧配图任务未启动；已解除编辑锁。需要生图时请重新点击生成。');
+     else if(discoveryOnly&&service.pending()&&!String(service.activeRecord()?.draft_id||'').startsWith('image-recovery-')){await detachPendingForEditing({reason:result.status||'未确认'});}
      else setNote(result.observation?imageRecoveryView(service.pending(),{...result.observation,operation_nonce:service.pending()?.operation_nonce}).title:discoveryOnly?'已有进度已读回，没有继续图片调用。':'配图恢复点已保存，当前稿件保留。');
      if(result.layout_error)setError(result.layout_error);
+   }catch(error){
+     if(discoveryOnly&&service.pending()&&!String(service.activeRecord()?.draft_id||'').startsWith('image-recovery-')){setError(imageRecoveryMessage(error));await detachPendingForEditing({reason:'暂未确认'});return;}
+     throw error;
    }finally{setPendingImage(service.pending());setRecoveries(service.recoveryDrafts());setDrafts(service.drafts());setCreatorSession(service.session());}
  });}
 

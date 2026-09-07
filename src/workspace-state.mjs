@@ -3374,6 +3374,43 @@ function frozenImageTextDraft(snapshotRecord) {
   };
 }
 
+export async function parkPendingImageOperationForEditingV3({
+  coordinator: coordinatorValue,
+  draftId,
+  expectedDraftToken,
+  operationSnapshot,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  const coordinator = imageTransactionCoordinator(coordinatorValue);
+  const targetId = requiredString(draftId, "draftId");
+  if (typeof expectedDraftToken !== "string" || !expectedDraftToken) throw new TypeError("expectedDraftToken is required");
+  const snapshotRecord = imageTransactionSnapshot(operationSnapshot, targetId, expectedDraftToken);
+  const pending = snapshotRecord.pending_image_operation;
+  const recoveredId = imageRecoveryDraftIdV3(pending.operation_nonce);
+  if (targetId === recoveredId) {
+    return imageTransactionStopped({ code: "IMAGE_RECOVERY_ALREADY_DETACHED", operationSnapshot: snapshotRecord });
+  }
+  const timestamp = requiredString(updatedAt, "updatedAt");
+  return commitImageRecoveryMoveV3({
+    coordinator,
+    targetDraftId: targetId,
+    recoveredDraftId: recoveredId,
+    operationSnapshot: snapshotRecord,
+    buildRecoveredDraft: (existingRecovered) => createDraftRecordV3({
+      draftId: recoveredId,
+      displayName: existingRecovered?.display_name || snapshotRecord.display_name,
+      contentPackage: existingRecovered?.content_package || snapshotRecord.content_package,
+      generationSession: existingRecovered?.generation_session || snapshotRecord.generation_session,
+      pendingImageOperation: existingRecovered?.pending_image_operation || pending,
+      createdAt: existingRecovered?.created_at || timestamp,
+      updatedAt: existingRecovered?.updated_at || timestamp,
+    }),
+    mediaManifest: [],
+    updatedAt: timestamp,
+    reason: `IMAGE_PENDING_EDITING_DETACH_V3:${pending.operation_nonce}`,
+  });
+}
+
 export async function parkStalePendingImageOperationV3({
   coordinator: coordinatorValue,
   draftId,

@@ -58,6 +58,7 @@ import {
   imageOperationAuthorityV3,
   materializePersistentMediaRefsV3,
   parkStalePendingImageOperationV3,
+  parkPendingImageOperationForEditingV3,
   persistWorkspaceEnvelope,
   persistDraftRecordWithReadback,
   putAndReadbackMediaDelta,
@@ -2712,6 +2713,46 @@ test("parking a stale READY operation is zero-provider, atomic, and releases the
   assert.equal(result.recovered_draft.pending_image_operation.operation_nonce, operationNonce);
   assert.equal(result.recovered_draft.pending_image_operation.protocol_state, "READY");
   assert.equal(result.recovered_draft.generation_session.text_draft.draft_id, oldSession.text_draft.draft_id);
+  assert.equal(libraryContentsV3(result.workspace).find((item) => item.draft_record_id === result.recovered_draft_id)?.pending_image_recovery, true);
+  assert.equal(imageOperationAuthorityV3(result.workspace).location, "RECOVERY");
+});
+
+test("pending PARTIAL can detach to a recovery sibling while the unchanged active draft becomes editable", async () => {
+  const session = { ...fullSession("editing-detach-text"), image_resume: {
+    resume_run_id: "images-editing-detach", checkpoint_preimage_hash: "a".repeat(64), logical_step_id: "render-job-02",
+    attempt_nonce: "b".repeat(64), completed_image_steps: 1, total_image_steps: 2, max_image_calls: 6,
+    actual_image_calls: 1, remaining_image_calls: 5, local_media_refs: [], status: "PARTIAL",
+  } };
+  const operationNonce = "c".repeat(64);
+  const pending = createPendingImageOperation({
+    operationNonce,
+    operationSnapshot: imageOperationSnapshot("editing-detach-source", session.text_draft),
+    operationSnapshotHash: "d".repeat(64), inputHash: "e".repeat(64), orderedReferenceManifest: [],
+    protocolState: "PARTIAL", runId: "images-editing-detach", checkpointPreimageHash: "a".repeat(64),
+    logicalStepId: "render-job-02", attemptNonce: "b".repeat(64), completedImageSteps: 1, totalImageSteps: 2,
+  });
+  const source = createDraftRecordV3({
+    draftId: "editing-detach-source", contentPackage: assembledContent(session, "editing-detach-source"),
+    generationSession: session, pendingImageOperation: pending, createdAt: T0,
+  });
+  const workspace = parseWorkspaceEnvelopeV3({
+    schema: WORKSPACE_ENVELOPE_V3_SCHEMA, authority_effect: "LOCAL_EDITING_ONLY", updated_at: T0,
+    profile: createProfileV2(), active_draft_id: source.draft_id, drafts: [source], legacy_v2_source: null,
+  });
+  const coordinator = createWorkspaceV3Coordinator({ storage: memoryStorage(), keys: { envelope: "editing-v2", envelopeV3: "editing-v3" }, lockManager: exclusiveLocks() });
+  assert.equal((await coordinator.fullCas({ expectedWorkspaceToken: WORKSPACE_V3_ABSENT_TOKEN, workspace })).ok, true);
+  const result = await parkPendingImageOperationForEditingV3({
+    coordinator, draftId: source.draft_id, expectedDraftToken: draftRecordToken(source), operationSnapshot: source, updatedAt: T1,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.action, "STOP");
+  assert.equal(result.workspace.active_draft_id, source.draft_id);
+  assert.equal(result.target_draft.pending_image_operation, null);
+  assert.equal(result.target_draft.generation_session.image_resume, null);
+  assert.deepEqual(result.target_draft.content_package, source.content_package);
+  assert.equal(result.recovered_draft.pending_image_operation.protocol_state, "PARTIAL");
+  assert.equal(result.recovered_draft.pending_image_operation.run_id, "images-editing-detach");
+  assert.equal(result.recovered_draft.generation_session.image_resume.completed_image_steps, 1);
   assert.equal(libraryContentsV3(result.workspace).find((item) => item.draft_record_id === result.recovered_draft_id)?.pending_image_recovery, true);
   assert.equal(imageOperationAuthorityV3(result.workspace).location, "RECOVERY");
 });
