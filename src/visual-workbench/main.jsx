@@ -168,7 +168,11 @@ function App(){
    if(expectedOperationNonce&&service.pending()?.operation_nonce!==expectedOperationNonce)return;
    if(!creatorRef.current?.text_confirmed)throw new Error('请先确认文字，再进入配图。');
    if(discoveryOnly&&!service.pending())throw new Error('当前没有需要恢复的配图任务。');
-   if(!discoveryOnly&&(providerHealth?.server_managed===true||providerHealth?.credential_mode==='SERVER_MANAGED')&&providerHealth?.image_ledger_attested!==true)throw new Error('配图账本尚未就绪，本次没有发起图片调用。');
+   if(!discoveryOnly){
+    const freshHealth=await refreshProvider();
+    if(requiresStudioAccess(freshHealth))throw new Error('登录已过期，请重新登录。');
+    if((freshHealth?.server_managed===true||freshHealth?.credential_mode==='SERVER_MANAGED')&&freshHealth?.image_ledger_attested!==true)throw new Error('配图账本尚未就绪，本次没有发起图片调用。');
+   }
    if(!service.pending())await saveCurrent();
    await document.fonts?.ready;
    const session=creatorRef.current;const count=session.image_count_mode==='AUTO'?session.text_draft.recommended_image_count:session.custom_image_count;
@@ -202,8 +206,9 @@ function App(){
   let started=false;
   await guard('建立配图方案',async()=>{
    if(service.pending()||variantTarget)throw new Error('请先完成当前配图任务或返回原作品。');
-   if(requiresStudioAccess(providerHealth)){setTab('create');setNarrowPanelOpen(true);throw new Error('请先在创作面板连接生成服务。');}
-   if(providerHealth?.image_ledger_attested!==true)throw new Error('配图账本尚未就绪，本次未调用图片模型。');
+   const freshHealth=await refreshProvider();
+   if(requiresStudioAccess(freshHealth)){setTab('create');setNarrowPanelOpen(true);throw new Error('请先在创作面板连接生成服务。');}
+   if(freshHealth?.image_ledger_attested!==true)throw new Error('配图账本尚未就绪，本次未调用图片模型。');
    const pageIndex=activeIndex,objectId=selected;await saveCurrent();
    const source=service.activeRecord(),session=await createPageVariantSession(source,{pageIndex,objectId});
    const result=await service.save(current.current,{asNew:true,generationSession:session,displayName:(source.display_name||source.content_package.selectedTitle).slice(0,90)+` · 第${pageIndex+1}页配图方案`});

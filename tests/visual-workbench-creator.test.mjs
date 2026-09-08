@@ -385,6 +385,18 @@ test('fresh missing-run discovery unlocks editing instead of exposing a paid ret
  const view=imageRecoveryView(service.pending(),observations.at(-1));assert.equal(view.status,'NONE');assert.equal(view.canContinue,true);assert.equal(view.autoCheck,false);service.dispose();
 });
 
+test('paid image lanes refresh live provider health before any client-side ledger gate',async()=>{
+ const {readFile}=await import('node:fs/promises');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+ const runStart=main.indexOf('async function runImages(');const runEnd=main.indexOf("useEffect(()=>{\n  const nonce=pendingImage?.operation_nonce",runStart);const run=main.slice(runStart,runEnd);
+ const refreshAt=run.indexOf('const freshHealth=await refreshProvider()'),gateAt=run.indexOf('freshHealth?.image_ledger_attested!==true'),saveAt=run.indexOf('if(!service.pending())await saveCurrent()');
+ assert.ok(refreshAt>=0&&gateAt>refreshAt&&saveAt>gateAt,'paid image START must fresh-read health and gate before saving/claiming the paid operation');
+ assert.doesNotMatch(run,/providerHealth\?\.image_ledger_attested!==true/,'paid START cannot trust the stale render-time health snapshot');
+
+ const variantStart=main.indexOf('async function startImageVariants()'),variantEnd=main.indexOf('async function chooseImageVariant',variantStart),variant=main.slice(variantStart,variantEnd);
+ const variantRefresh=variant.indexOf('const freshHealth=await refreshProvider()'),variantGate=variant.indexOf('freshHealth?.image_ledger_attested!==true'),variantSave=variant.indexOf('await saveCurrent()');
+ assert.ok(variantRefresh>=0&&variantGate>variantRefresh&&variantSave>variantGate,'single-image variant authority must fresh-read ledger readiness before it creates a transient draft');
+});
+
 test('pending recovery check is not hidden behind the create tab after refresh',async()=>{
  const {readFile}=await import('node:fs/promises');const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
  const effect=main.slice(main.indexOf("useEffect(()=>{\n  const nonce=pendingImage?.operation_nonce"),main.indexOf("async function startImageVariants"));
