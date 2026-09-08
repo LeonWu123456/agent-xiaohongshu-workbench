@@ -18,7 +18,7 @@
     "goal": "每天产出可编辑、可保存、可恢复、可下载的可发布小红书图文包"
   },
   "runtime": {
-    "base_commit": "fbd3c0d797b4eeb5724c1799933153713f6d3984",
+    "base_commit": "2154639f4472dbea528ffb70e1939fa6e9e868a4",
     "source_roots": [
       "src",
       "api",
@@ -32,7 +32,7 @@
       "vercel.json",
       "vite.config.mjs"
     ],
-    "source_tree_sha256": "42b27e2c8077e5f7b94ddb5af2a76bf62a82fe953e84bfb5bb8641409411e4bd",
+    "source_tree_sha256": "8bff4816d89cde97d4b7d7cc125ac683007e472a1d1d28d8e6744049dbe3abee",
     "entrypoints": [
       "src/visual-workbench/main.jsx",
       "legacy.html"
@@ -40,7 +40,7 @@
     "environment": "candidate"
   },
   "environment_bindings": {
-    "compiled_from_base_commit": "fbd3c0d797b4eeb5724c1799933153713f6d3984",
+    "compiled_from_base_commit": "2154639f4472dbea528ffb70e1939fa6e9e868a4",
     "source_tree_binding": "runtime.source_tree_sha256",
     "production_commit": "ee29744f9dd789bdd4c94112e8d4853b9c539147",
     "production_alias": "xiaoshimei-full-workbench.vercel.app",

@@ -84,6 +84,16 @@ test('final visual gate rejects three-page shell cloning but allows a two-page s
   assert.deepEqual(inspectFinalVisualQuality(good), []);
 });
 
+
+test('final visual gate rejects transcript-style continuation placeholders', async () => {
+  const { inspectFinalVisualQuality } = await import('../src/xhs-publish-quality.mjs');
+  const issues = inspectFinalVisualQuality([
+    { page_role: 'hook', eyebrow: '晴天日常', title: '放晴后去图书馆坐一下午', visual_action: '窗边放晴', image_style: { src: 'xiaoshimei-media://sha256/' + '1'.repeat(64) } },
+    { page_role: 'method', eyebrow: '原文补充', title: '连着好几日的阴雨天', visual_action: '窗边看雨停', image_style: { src: 'xiaoshimei-media://sha256/' + '2'.repeat(64) } },
+  ]);
+  assert.ok(issues.some(issue => issue.code === 'XHS_FINAL_PLACEHOLDER_CONTINUATION' && issue.page === 2));
+});
+
 test('final visual gate rejects cross-role reuse of an unchanged title hero and action', async () => {
   const { inspectFinalVisualQuality } = await import('../src/xhs-publish-quality.mjs');
   const hero = 'xiaoshimei-media://sha256/' + 'e'.repeat(64);

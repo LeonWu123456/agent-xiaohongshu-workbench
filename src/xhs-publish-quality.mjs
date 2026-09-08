@@ -108,6 +108,9 @@ export function inspectFinalVisualQuality(pages) {
   if (!Array.isArray(pages) || !pages.length) return [{ code: "XHS_FINAL_PAGES_MISSING", page: 0 }];
   const issues=[];
   const signatures=pages.map(finalVisualSignature);
+  pages.forEach((page,index)=>{
+    if(normalized(page?.eyebrow)==='原文补充'||normalized(page?.title)==='原文补充')issues.push({code:'XHS_FINAL_PLACEHOLDER_CONTINUATION',page:index+1});
+  });
   for(let index=1;index<signatures.length;index+=1){
     const current=signatures[index],previous=signatures[index-1];
     const legacyConclusionContinuation=previous.role==='conclusion'&&current.role==='method';
@@ -138,6 +141,7 @@ export function inspectFinalXhsPublishQuality(content) {
 }
 
 const FINAL_QUALITY_MESSAGES=Object.freeze({
+  XHS_FINAL_PLACEHOLDER_CONTINUATION: issue=>`第${issue.page}页：仍带有“原文补充”占位眉题，成品呈现为机械续页`,
   XHS_FINAL_VISUAL_STUTTER: issue=>`第${issue.page}页：连续页面重复同一标题、配图和动作`,
   XHS_FINAL_CROSS_ROLE_VISUAL_REUSE: issue=>`第${issue.page}页：内容职责已经变化，却仍沿用上一页同一标题、配图和动作`,
   XHS_FINAL_PILLAR_TOPIC_CONFLICT: issue=>`内容方向应为${issue.expected_pillar}，当前稿却按${issue.observed_pillar}生成`,

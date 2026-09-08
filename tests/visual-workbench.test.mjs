@@ -373,7 +373,7 @@ test('confirmed-copy tail can fit a newly composed scene but never repacks an ex
  const {composeEditableContent,reconcileConfirmedCopy,confirmedCopyCoverage}=await import('../src/visual-workbench/model.mjs');
  const c=createBlankContent();c.pages[0].title='保留阅读顺序';c.pages[0].eyebrow='短说明';c.pages[0].body='第一段已经显示在画面里。';c.pages[0].visual='character';c.pages[0].image_style={...c.pages[0].image_style,src:'/assets/xiaoshimei-character-full.png',hidden:false};c.body=c.pages[0].body+'\n下一段需要作为独立文字保留下来。';
  const before=structuredClone(c),fresh=reconcileConfirmedCopy(c);assert.equal(fresh.pages.length,1);assert.equal(fresh.pages[0].body,c.pages[0].body);assert.equal(fresh.body,c.body);assert.deepEqual(c,before);assert.deepEqual(confirmedCopyCoverage(fresh).missing,[]);assert.deepEqual(reconcileConfirmedCopy(fresh),fresh);
- const manual=composeEditableContent(c);manual.pages[0].html_state.free_objects.find(o=>o.kind==='image').x=8;const original=structuredClone(manual);const repaired=reconcileConfirmedCopy(manual);assert.equal(repaired.pages.length,2);assert.deepEqual(repaired.pages[0],original.pages[0]);assert.deepEqual(manual,original);assert.deepEqual(confirmedCopyCoverage(repaired).missing,[]);
+ const manual=composeEditableContent(c);manual.pages[0].html_state.free_objects.find(o=>o.kind==='image').x=8;const original=structuredClone(manual);const repaired=reconcileConfirmedCopy(manual);assert.equal(repaired.pages.length,2);assert.deepEqual(repaired.pages[0],original.pages[0]);assert.notEqual(repaired.pages[1].eyebrow,'原文补充');assert.ok(['开场','展开','过程','提醒','收束'].includes(repaired.pages[1].eyebrow));assert.deepEqual(manual,original);assert.deepEqual(confirmedCopyCoverage(repaired).missing,[]);
 });
 
 

@@ -329,8 +329,14 @@ export function reconcileConfirmedCopy(content,{measureText}={}){
   // Keep the neighbouring illustration, including its source/scene identity.
   // The continuation is a normal page, not a hidden transcript or second draft.
   const image=state.free_objects.find(o=>o.kind==='image'&&o.opacity!==0),imageStyle=image?freeObjectImage(page,image):null;
-  const heading=gap.text.split(/[，,；;：:]/u)[0].replace(/^(?:先|接着|然后|最后)\s*/u,'').slice(0,24)||'原文补充';
-  const continuation={...page,title:heading,eyebrow:'原文补充',body:gap.text,info_panels:[],highlight_phrases:[],layout_ir:null,layout_recipe:null,editor_state:undefined,editor_mode:'html',html_state:undefined,page_role:'method',visual:imageStyle?.src?'character':'none',image_style:{...(imageStyle||page.image_style),hidden:!imageStyle?.src}};
+  const heading=gap.text.split(/[，,；;：:]/u)[0].replace(/^(?:先|接着|然后|最后)\s*/u,'').slice(0,24)||'继续读下去';
+  // A repaired page is part of the article, not a transcript patch. Give it a
+  // stable narrative role marker derived from source position instead of the
+  // old repeated placeholder "原文补充", which made adjacent pages read like
+  // mechanical PPT continuation cards.
+  const sourceCount=Math.max(1,audit.segments.length),ratio=sourceCount>1?gap.index/(sourceCount-1):0.5;
+  const eyebrow=ratio<0.2?'开场':ratio<0.45?'展开':ratio<0.7?'过程':ratio<0.9?'提醒':'收束';
+  const continuation={...page,title:heading,eyebrow,body:gap.text,info_panels:[],highlight_phrases:[],layout_ir:null,layout_recipe:null,editor_state:undefined,editor_mode:'html',html_state:undefined,page_role:'method',visual:imageStyle?.src?'character':'none',image_style:{...(imageStyle||page.image_style),hidden:!imageStyle?.src}};
   const position=insertBefore?anchor:anchor+1;const added=arrangeEditablePage(continuation,position,{measureText}),pages=[...result.pages];pages.splice(position,0,added);repairPages.add(added);
   result={...result,pages,visible_pages:result.visible_pages+1,stage:'LOCAL_DRAFT'};
  }
