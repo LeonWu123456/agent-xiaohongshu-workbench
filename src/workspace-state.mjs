@@ -1801,6 +1801,50 @@ export function activateDraftRecordV3(value, draftId, { activatedAt = new Date()
   };
 }
 
+export function deleteDraftRecordV3(value, { draftId, updatedAt = new Date().toISOString() } = {}) {
+  const workspace = parseWorkspaceEnvelopeV3(value);
+  const targetId = requiredString(draftId, "draftId");
+  if (workspace.drafts.length <= 1) throw new TypeError("workspace must retain at least one draft");
+  const target = workspace.drafts.find((draft) => draft.draft_id === targetId);
+  if (!target) throw new TypeError("draftId does not exist");
+  if (target.pending_image_operation) throw new TypeError("draft has pending image operation");
+  if (normalizePageImageVariantTarget(target.generation_session?.image_variant_target)) throw new TypeError("image variant must use transient discard");
+  const drafts = workspace.drafts.filter((draft) => draft.draft_id !== targetId);
+  let activeDraftId = workspace.active_draft_id;
+  if (activeDraftId === targetId) {
+    const preferred = workspace.previous_draft_id && workspace.previous_draft_id !== targetId
+      ? drafts.find((draft) => draft.draft_id === workspace.previous_draft_id)
+      : null;
+    activeDraftId = (preferred || drafts[0]).draft_id;
+  }
+  const remainingIds = new Set(drafts.map((draft) => draft.draft_id));
+  const previousDraftId = workspace.previous_draft_id && workspace.previous_draft_id !== targetId
+    && workspace.previous_draft_id !== activeDraftId && remainingIds.has(workspace.previous_draft_id)
+    ? workspace.previous_draft_id
+    : null;
+  return v3WorkspaceFromNormalized({ workspace, activeDraftId, previousDraftId, drafts, updatedAt });
+}
+
+export function discardImageVariantDraftV3(value, { draftId, updatedAt = new Date().toISOString() } = {}) {
+  const workspace = parseWorkspaceEnvelopeV3(value);
+  const variantId = requiredString(draftId || workspace.active_draft_id, "draftId");
+  const variant = workspace.drafts.find((draft) => draft.draft_id === variantId);
+  if (!variant) throw new TypeError("draftId does not exist");
+  if (variant.pending_image_operation) throw new TypeError("variant draft has pending image operation");
+  const target = normalizePageImageVariantTarget(variant.generation_session?.image_variant_target);
+  if (!target) throw new TypeError("draft is not an image variant");
+  const source = workspace.drafts.find((draft) => draft.draft_id === target.source_draft_id);
+  if (!source) throw new TypeError("variant source draft does not exist");
+  const drafts = workspace.drafts.filter((draft) => draft.draft_id !== variantId);
+  const activeDraftId = workspace.active_draft_id === variantId ? source.draft_id : workspace.active_draft_id;
+  const remainingIds = new Set(drafts.map((draft) => draft.draft_id));
+  const candidatePrevious = workspace.previous_draft_id === variantId ? null : workspace.previous_draft_id;
+  const previousDraftId = candidatePrevious && candidatePrevious !== activeDraftId && remainingIds.has(candidatePrevious)
+    ? candidatePrevious
+    : null;
+  return v3WorkspaceFromNormalized({ workspace, activeDraftId, previousDraftId, drafts, updatedAt });
+}
+
 export function saveWorkspaceProfileV3(value, profile, { updatedAt = new Date().toISOString() } = {}) {
   const workspace = parseWorkspaceEnvelopeV3(value);
   return v3WorkspaceFromNormalized({ workspace, profile: normalizeProfileV2(profile), updatedAt });
@@ -1935,7 +1979,7 @@ export async function putAndReadbackMediaDelta(mediaStoreValue, mediaDelta = [])
   return manifests;
 }
 
-function collectMediaRefs(value) {
+export function collectMediaRefs(value) {
   const refs = new Set();
   const visit = (node) => {
     if (typeof node === "string") {

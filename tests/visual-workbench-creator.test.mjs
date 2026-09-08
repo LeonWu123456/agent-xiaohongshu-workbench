@@ -245,17 +245,55 @@ test('single-image alternatives preserve source and restore one selected image w
  const seed=createDemo();seed.body=textDraft().body;seed.pages[1].visual="character";seed.pages[1].image_style.hidden=false;await service.save(composeEditableContent(seed));const original=structuredClone(service.activeRecord());
  const session=await createPageVariantSession(original,{pageIndex:1,objectId:'hero-image'});
  await service.save(original.content_package,{asNew:true,generationSession:session,displayName:'配图方案'});
+ assert.equal(service.workspace().drafts.some(d=>d.generation_session?.image_variant_target),true);
+ assert.equal(service.drafts().some(d=>d.title.includes('配图方案')),false,'transient variants stay out of the human works library');
  const candidate=structuredClone(service.activeRecord().content_package);candidate.generation={...candidate.generation,mode:'PROVIDER',provider:'volcengine-ark',source_draft_id:session.text_draft.draft_id};
- const bytes=new Uint8Array([255,216,255,217]);const {putVerifiedMedia}=await import('../src/media-asset-store.mjs');const asset=await putVerifiedMedia(service.mediaStore,{bytes,mime:'image/jpeg',name:'test-variant'});
- candidate.pages=candidate.pages.slice(0,3).map(p=>({...p,image_style:{...p.image_style,src:asset.media_ref}}));candidate.visible_pages=3;
+ const {putVerifiedMedia}=await import('../src/media-asset-store.mjs');
+ const assets=[];for(const marker of [1,2,3])assets.push(await putVerifiedMedia(service.mediaStore,{bytes:new Uint8Array([255,216,255,marker,255,217]),mime:'image/jpeg',name:'test-variant-'+marker}));
+ candidate.pages=candidate.pages.slice(0,3).map((p,i)=>({...p,image_style:{...p.image_style,src:assets[i].media_ref}}));candidate.visible_pages=3;
  await service.save(candidate,{generationSession:{...session,assembled_draft_id:session.text_draft.draft_id}});
  assert.deepEqual(service.workspace().drafts.find(d=>d.draft_id===original.draft_id),original);
  const output=await applyPageVariant({service,candidateIndex:1});assert.equal(service.activeRecord().draft_id,original.draft_id);
  const after=service.activeRecord().content_package;assert.deepEqual(after.pages[0],original.content_package.pages[0]);assert.deepEqual(after.pages[2],original.content_package.pages[2]);
- assert.deepEqual(after.pages[1].html_state,original.content_package.pages[1].html_state);assert.equal(after.pages[1].body,original.content_package.pages[1].body);assert.equal(after.pages[1].image_style.src,asset.media_ref);
+ assert.deepEqual(after.pages[1].html_state,original.content_package.pages[1].html_state);assert.equal(after.pages[1].body,original.content_package.pages[1].body);assert.equal(after.pages[1].image_style.src,assets[1].media_ref);
  assert.equal(output.target.source_page_index,1);
- const variants=service.workspace().drafts.find(d=>d.generation_session?.image_variant_target);await service.activateDraft(variants.draft_id);
- await assert.rejects(()=>applyPageVariant({service,candidateIndex:0}),/原页.*变化/);
+ assert.equal(service.workspace().drafts.some(d=>d.generation_session?.image_variant_target),false);
+ assert.equal(service.drafts().some(d=>d.title.includes('配图方案')),false);
+ assert.equal((await service.mediaStore.readVerifiedMedia(assets[1].media_ref)).media_ref,assets[1].media_ref);
+ await assert.rejects(()=>service.mediaStore.readVerifiedMedia(assets[0].media_ref),/MEDIA_READBACK_MISSING/);
+ await assert.rejects(()=>service.mediaStore.readVerifiedMedia(assets[2].media_ref),/MEDIA_READBACK_MISSING/);
+});
+
+test('single-image stale source is rejected while the transient variant remains recoverable',async()=>{
+ const {createPageVariantSession,applyPageVariant}=await import('../src/visual-workbench/creator.mjs');
+ const {composeEditableContent}=await import('../src/visual-workbench/model.mjs');
+ const storage=memoryStorage(),service=storageAdapter(storage);await service.load();
+ const seed=createDemo();seed.body=textDraft().body;seed.pages[1].visual='character';seed.pages[1].image_style.hidden=false;await service.save(composeEditableContent(seed));const original=structuredClone(service.activeRecord());
+ const session=await createPageVariantSession(original,{pageIndex:1,objectId:'hero-image'});
+ await service.save(original.content_package,{asNew:true,generationSession:session,displayName:'配图方案'});
+ const variantId=service.activeRecord().draft_id,candidate=structuredClone(service.activeRecord().content_package);
+ const bytes=new Uint8Array([255,216,255,217]);const {putVerifiedMedia}=await import('../src/media-asset-store.mjs');const asset=await putVerifiedMedia(service.mediaStore,{bytes,mime:'image/jpeg',name:'test-variant-stale'});
+ candidate.pages=candidate.pages.slice(0,3).map(p=>({...p,image_style:{...p.image_style,src:asset.media_ref}}));candidate.visible_pages=3;
+ await service.save(candidate,{generationSession:{...session,assembled_draft_id:session.text_draft.draft_id}});
+ await service.activateDraft(original.draft_id);const changed=structuredClone(service.activeRecord().content_package);changed.pages[1].title+=' · 新编辑';await service.save(changed);
+ await service.activateDraft(variantId);await assert.rejects(()=>applyPageVariant({service,candidateIndex:0}),/原页.*变化/);
+ assert.equal(service.activeRecord().draft_id,variantId);assert.ok(service.activeRecord().generation_session?.image_variant_target);
+ assert.equal((await service.mediaStore.readVerifiedMedia(asset.media_ref)).media_ref,asset.media_ref,'stale conflict preserves paid candidate media');
+});
+
+test('deleting a saved work frees only media no longer reachable from the remaining library',async()=>{
+ const storage=memoryStorage(),database=createMemoryMediaDatabase(),mediaStore=createMediaAssetStore({database});
+ const service=createVisualStorage({storage,mediaStore,lockManager:{request:async(_name,_options,callback)=>callback()}});await service.load();
+ const {putVerifiedMedia}=await import('../src/media-asset-store.mjs');
+ const a=await putVerifiedMedia(mediaStore,{bytes:new Uint8Array([255,216,255,31,255,217]),mime:'image/jpeg'});
+ const b=await putVerifiedMedia(mediaStore,{bytes:new Uint8Array([255,216,255,32,255,217]),mime:'image/jpeg'});
+ const first=createDemo();first.pages[0].image_style={...first.pages[0].image_style,hidden:false,src:a.media_ref};await service.save(first,{displayName:'作品 A'});const firstId=service.activeRecord().draft_id;
+ const second=createDemo();second.pages[0].image_style={...second.pages[0].image_style,hidden:false,src:b.media_ref};await service.save(second,{asNew:true,displayName:'作品 B'});const secondId=service.activeRecord().draft_id;
+ assert.equal(service.drafts().length,2);await service.deleteDraft(firstId);
+ assert.deepEqual(service.drafts().map(d=>d.draft_id),[secondId]);
+ await assert.rejects(()=>mediaStore.readVerifiedMedia(a.media_ref),/MEDIA_READBACK_MISSING/);
+ assert.equal((await mediaStore.readVerifiedMedia(b.media_ref)).media_ref,b.media_ref);
+ await assert.rejects(()=>service.deleteDraft(secondId),/至少|retain at least one draft/);
 });
 
 

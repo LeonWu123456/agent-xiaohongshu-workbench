@@ -176,3 +176,16 @@ test("persistent workspace structures accept refs but reject data/blob URLs at a
   assert.throws(() => assertRefOnlyPersistentValue({ src: "data:image/png;base64,AAAA" }), /PERSISTENT_MEDIA_EMBEDDED_URL_FORBIDDEN/);
   assert.throws(() => assertRefOnlyPersistentValue({ nested: [{ src: "blob:abc" }] }), /PERSISTENT_MEDIA_EMBEDDED_URL_FORBIDDEN/);
 });
+
+test("media GC removes only unreachable content-addressed assets", async () => {
+  const database = createMemoryMediaDatabase();
+  const store = createMediaAssetStore({ database });
+  const keep = await store.putVerifiedMedia({ bytes: jpegBytes(21), mime_type: "image/jpeg" });
+  const orphan = await store.putVerifiedMedia({ bytes: jpegBytes(22), mime_type: "image/jpeg" });
+  const result = await store.garbageCollectMedia([keep.media_ref]);
+  assert.deepEqual(result.deleted, [orphan.media_ref]);
+  assert.equal(result.preserved, 1);
+  assert.equal(result.skipped, false);
+  assert.equal((await store.readVerifiedMedia(keep.media_ref)).media_ref, keep.media_ref);
+  await assert.rejects(() => store.readVerifiedMedia(orphan.media_ref), /MEDIA_READBACK_MISSING/);
+});

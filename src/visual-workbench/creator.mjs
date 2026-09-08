@@ -339,9 +339,7 @@ export async function applyPageVariant({service,candidateIndex}={}) {
  if(object?.kind!=='image'||object.binding!==target.image_id)throw new Error('原图片对象已变化，未替换。');
  const previousImage=target.image_id==='hero'?page.image_style?.src:page.info_panels?.[Number(target.image_id.slice(6))]?.image_style?.src;
  const nextPage=replacePageImage(page,target.image_id,sourceImage),content={...source.content_package,pages:source.content_package.pages.map((p,i)=>i===target.source_page_index?nextPage:p)};
- const receipt=await service.coordinator.mergeDraftCas({draftId:source.draft_id,expectedDraftToken:draftRecordToken(source),buildDraft:()=>createDraftRecordV3({draftId:source.draft_id,displayName:source.display_name,contentPackage:content,generationSession:source.generation_session,pendingImageOperation:null,createdAt:source.created_at,updatedAt:new Date().toISOString()}),reason:'VISUAL_APPLY_SINGLE_IMAGE_VARIANT'});
- if(!receipt.ok)throw new Error('原稿刚被其他标签页更新，未覆盖：'+receipt.code);
- await service.sync();const result=await service.activateDraft(source.draft_id);
+ const result=await service.commitVariantSelection({variantDraftId:candidate.draft_id,sourceDraftId:source.draft_id,expectedSourceDraftToken:draftRecordToken(source),content});
  return {...result,target,previousImage};
 }
 

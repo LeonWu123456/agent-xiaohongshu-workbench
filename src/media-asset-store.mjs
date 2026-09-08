@@ -123,7 +123,7 @@ function requireDatabase(database) {
 
 export function createMemoryMediaDatabase(initialRecords = []) {
   const records = new Map();
-  const stats = { gets: 0, puts: 0 };
+  const stats = { gets: 0, puts: 0, deletes: 0 };
   for (const record of initialRecords) records.set(record.sha256, cloneRecord(record));
   return {
     stats,
@@ -134,6 +134,13 @@ export function createMemoryMediaDatabase(initialRecords = []) {
     async put(record) {
       stats.puts += 1;
       records.set(record.sha256, cloneRecord(record));
+    },
+    async delete(sha256) {
+      stats.deletes += 1;
+      return records.delete(sha256);
+    },
+    async keys() {
+      return [...records.keys()].sort();
     },
   };
 }
@@ -183,6 +190,18 @@ export function createIndexedDbMediaDatabase({
       const database = await open();
       const transaction = database.transaction(storeName, "readwrite");
       await indexedDbRequest(transaction.objectStore(storeName).put(cloneRecord(record)), transaction);
+    },
+    async delete(sha256) {
+      const database = await open();
+      const transaction = database.transaction(storeName, "readwrite");
+      await indexedDbRequest(transaction.objectStore(storeName).delete(canonicalSha256(sha256)), transaction);
+      return true;
+    },
+    async keys() {
+      const database = await open();
+      const transaction = database.transaction(storeName, "readonly");
+      const keys = await indexedDbRequest(transaction.objectStore(storeName).getAllKeys(), transaction);
+      return (keys || []).map((value) => canonicalSha256(String(value))).sort();
     },
   };
 }
@@ -279,6 +298,26 @@ export function createMediaAssetStore({
     return true;
   };
 
+  const deleteMedia = async (refOrSha) => {
+    const sha256 = shaFromRefOrHash(refOrSha);
+    if (typeof mediaDatabase.delete !== 'function') throw mediaError('MEDIA_DATABASE_DELETE_UNAVAILABLE');
+    await mediaDatabase.delete(sha256);
+    return { media_ref: mediaRefForSha256(sha256), sha256 };
+  };
+
+  const garbageCollectMedia = async (reachableRefs = []) => {
+    if (!Array.isArray(reachableRefs)) throw mediaError('MEDIA_GC_REFS_INVALID');
+    if (typeof mediaDatabase.keys !== 'function' || typeof mediaDatabase.delete !== 'function') return { deleted: [], preserved: 0, skipped: true };
+    const reachable = new Set(reachableRefs.map((ref) => shaFromRefOrHash(ref)));
+    const deleted = [];
+    for (const sha256 of await mediaDatabase.keys()) {
+      if (reachable.has(sha256)) continue;
+      await mediaDatabase.delete(sha256);
+      deleted.push(mediaRefForSha256(sha256));
+    }
+    return { deleted, preserved: reachable.size, skipped: false };
+  };
+
   const exportMediaAssets = async (refs) => {
     if (!Array.isArray(refs)) throw mediaError("MEDIA_BACKUP_REFS_INVALID");
     const hashes = [...new Set(refs.map((ref) => shaFromRefOrHash(ref)))].sort();
@@ -335,6 +374,8 @@ export function createMediaAssetStore({
     readVerifiedMedia,
     hydrateMedia,
     releaseHydratedMedia,
+    deleteMedia,
+    garbageCollectMedia,
     exportMediaAssets,
     importMediaAssets,
   };
@@ -348,6 +389,16 @@ export async function putVerifiedMedia(store, input) {
 export async function readVerifiedMedia(store, refOrSha) {
   if (!store?.readVerifiedMedia) throw mediaError("MEDIA_STORE_INVALID");
   return store.readVerifiedMedia(refOrSha);
+}
+
+export async function deleteMedia(store, refOrSha) {
+  if (!store?.deleteMedia) throw mediaError('MEDIA_STORE_INVALID');
+  return store.deleteMedia(refOrSha);
+}
+
+export async function garbageCollectMedia(store, refs) {
+  if (!store?.garbageCollectMedia) throw mediaError('MEDIA_STORE_INVALID');
+  return store.garbageCollectMedia(refs);
 }
 
 export async function exportMediaAssets(store, refs) {

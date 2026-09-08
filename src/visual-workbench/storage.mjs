@@ -1,6 +1,6 @@
 import {createProfileV2} from '../profile-v2.mjs';
 import {createMediaAssetStore} from '../media-asset-store.mjs';
-import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,restoreWorkspaceBackupV3,forkDraftForReferenceEditV3,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
+import {createWorkspaceV3Coordinator,activeDraftRecordV3,activateDraftRecordV3,createDraftRecordV3,buildWorkspaceEnvelopeV3,saveDraftRecordV3,materializePersistentMediaRefsV3,hydrateWorkspaceV3View,buildWorkspaceBackupV3,parseWorkspaceBackupV3,restoreWorkspaceBackupV3,forkDraftForReferenceEditV3,discardImageVariantDraftV3,deleteDraftRecordV3,draftRecordToken,collectMediaRefs,WORKSPACE_ENVELOPE_V3_STORAGE_KEY} from '../workspace-state.mjs';
 import {importEditableContent} from './model.mjs';
 export const STORAGE_KEYS={envelope:'xiaoshimei-studio.workspace.v2',envelopeV3:WORKSPACE_ENVELOPE_V3_STORAGE_KEY};
 
@@ -48,6 +48,7 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
       base=coordinator.snapshot();
     }
     if(!base.workspace)return null;
+    await mediaStore.garbageCollectMedia?.(collectMediaRefs(base.workspace));
     const draft=activeDraftRecordV3(base.workspace);
     // Pending generation is part of the same DraftRecord. The new workbench
     // must restore it visibly; only ordinary edits/saves remain locked until
@@ -104,7 +105,7 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
     // A backup enters as a new editable draft, never as a replacement authority.
     return {...await save(parsed,{asNew:true,profile:importedProfile,generationSession:importedSession,displayName:importedDisplayName}),importSummary};
   }
-  const drafts=()=>base?.workspace?.drafts.map(record=>({
+  const drafts=()=>base?.workspace?.drafts.filter(record=>!record.generation_session?.image_variant_target).map(record=>({
     draft_id:record.draft_id,
     title:record.display_name||record.content_package?.selectedTitle||record.content_package?.pages?.[0]?.title||'未命名作品',
     updated_at:record.updated_at,
@@ -143,6 +144,52 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
   }
   const activeRecord=()=>base?.workspace?activeDraftRecordV3(base.workspace):null;
   const recoveryDrafts=()=>base?.workspace?.drafts?.filter(d=>d.draft_id!==base.workspace.active_draft_id&&d.pending_image_operation).map(d=>({draft_id:d.draft_id,title:d.content_package?.selectedTitle||d.content_package?.pages?.[0]?.title||'恢复稿',protocol_state:d.pending_image_operation.protocol_state,updated_at:d.updated_at}))||[];
+  async function cleanupMediaRefs(removedRefs,workspace){
+    const live=new Set(collectMediaRefs(workspace));
+    const deleted=[];const failed=[];
+    for(const ref of removedRefs){
+      if(live.has(ref))continue;
+      try{await mediaStore.deleteMedia(ref);deleted.push(ref);}catch(error){failed.push({ref,error:String(error?.message||error)});}
+    }
+    return {deleted,failed};
+  }
+  async function commitVariantSelection({variantDraftId,sourceDraftId,expectedSourceDraftToken,content}){
+    if(!base)await load();
+    const latest=coordinator.snapshot();
+    if(!latest.ok||!latest.workspace)throw new Error('本机作品库无法读取；本次未替换。');
+    const variant=latest.workspace.drafts.find(d=>d.draft_id===variantDraftId),source=latest.workspace.drafts.find(d=>d.draft_id===sourceDraftId);
+    if(!variant||!source)throw new Error('原稿或配图方案已不存在，未替换。');
+    if(variant.pending_image_operation)throw new Error('配图方案仍在生成，未替换。');
+    if(draftRecordToken(source)!==expectedSourceDraftToken)throw new Error('原稿刚被其他标签页更新，未覆盖。');
+    const removedRefs=collectMediaRefs(variant);
+    let workspace=saveDraftRecordV3(latest.workspace,{draftId:sourceDraftId,contentPackage:content,pendingImageOperation:null});
+    workspace=discardImageVariantDraftV3(workspace,{draftId:variantDraftId});
+    const receipt=await coordinator.fullCas({expectedWorkspaceToken:latest.workspace_token,workspace,reason:'VISUAL_APPLY_AND_DISCARD_IMAGE_VARIANT'});
+    if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新作品库；本次未覆盖。':'配图替换失败：'+receipt.code);
+    base=coordinator.snapshot();
+    const mediaCleanup=await cleanupMediaRefs(removedRefs,base.workspace);
+    return {content:await viewOf(base.workspace),workspace:base.workspace,receipt,mediaCleanup};
+  }
+  async function deleteDraft(draftId){
+    if(!base)await load();
+    if(!base?.workspace)throw new Error('本机没有可删除的作品。');
+    const target=base.workspace.drafts.find(d=>d.draft_id===draftId);if(!target)throw new Error('作品已不存在。');
+    const removedRefs=collectMediaRefs(target),workspace=deleteDraftRecordV3(base.workspace,{draftId});
+    const receipt=await coordinator.fullCas({expectedWorkspaceToken:base.workspace_token,workspace,reason:'VISUAL_DELETE_DRAFT'});
+    if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新作品库；作品未删除。':'删除作品失败：'+receipt.code);
+    base=coordinator.snapshot();const mediaCleanup=await cleanupMediaRefs(removedRefs,base.workspace);
+    return {content:await viewOf(base.workspace),workspace:base.workspace,receipt,mediaCleanup};
+  }
+  async function discardVariantDraft(draftId){
+    if(!base)await load();
+    if(!base?.workspace)throw new Error('本机没有可清理的配图方案。');
+    const variant=base.workspace.drafts.find(d=>d.draft_id===draftId);if(!variant)throw new Error('配图方案已不存在。');
+    const removedRefs=collectMediaRefs(variant),workspace=discardImageVariantDraftV3(base.workspace,{draftId});
+    const receipt=await coordinator.fullCas({expectedWorkspaceToken:base.workspace_token,workspace,reason:'VISUAL_DISCARD_IMAGE_VARIANT'});
+    if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新作品库；配图方案未清理。':'配图方案清理失败：'+receipt.code);
+    base=coordinator.snapshot();const mediaCleanup=await cleanupMediaRefs(removedRefs,base.workspace);
+    return {content:await viewOf(base.workspace),workspace:base.workspace,receipt,mediaCleanup};
+  }
   async function activateDraft(draftId){
     if(!base?.workspace)throw new Error('本机没有可切换的草稿。');
     const activated=activateDraftRecordV3(base.workspace,draftId);
@@ -150,7 +197,7 @@ export function createVisualStorage({storage=globalThis.localStorage,mediaStore=
     if(!receipt.ok)throw new Error(receipt.code==='WORKSPACE_V3_CAS_CONFLICT'?'另一个标签页已更新草稿；未切换。':'恢复稿切换失败：'+receipt.code);
     return sync({allowPending:true});
   }
-  return {load,save,importFile,sync,activateDraft,recoveryDrafts,drafts,createDraft,duplicateActiveDraft,renameActiveDraft,mediaStore,coordinator,workspace:()=>base?.workspace,activeRecord,
+  return {load,save,importFile,sync,activateDraft,deleteDraft,discardVariantDraft,commitVariantSelection,recoveryDrafts,drafts,createDraft,duplicateActiveDraft,renameActiveDraft,mediaStore,coordinator,workspace:()=>base?.workspace,activeRecord,
     session:()=>activeRecord()?.generation_session||null,
     pending:()=>activeRecord()?.pending_image_operation||null,
     profile:()=>base?.workspace?.profile||createProfileV2(),
