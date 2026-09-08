@@ -797,6 +797,7 @@ test("Production ledger binding fails closed when deployment and configured cand
   }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
   assert.equal(binding.expected.candidate_commit, "b".repeat(40));
   assert.equal(binding.ready, false);
+  assert.equal(binding.readiness_error, "IMAGE_LEDGER_DEPLOYMENT_CANDIDATE_MISMATCH");
 });
 
 test("Production ledger binding fails closed when deployment commit is missing or malformed", () => {
@@ -810,6 +811,7 @@ test("Production ledger binding fails closed when deployment commit is missing o
       XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
     }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
     assert.equal(binding.ready, false);
+    assert.equal(binding.readiness_error, "IMAGE_LEDGER_DEPLOYMENT_COMMIT_REQUIRED");
   }
 });
 
@@ -822,6 +824,7 @@ test("Production ledger binding fails closed when configured candidate commit is
     XIAOSHIMEI_VERCEL_PROJECT_ID: "prj_production",
   }, "xiaoshimei-studio:" + "2".repeat(32), "https://redis.example");
   assert.equal(binding.ready, false);
+  assert.equal(binding.readiness_error, "IMAGE_LEDGER_CANDIDATE_REQUIRED");
 });
 
 function signedRuntimeAttestation({ nowMs = 1_788_192_000_000, appScope = D36_APP_SCOPE, restOrigin = "https://fake.upstash.io", overrides = {} } = {}) {
@@ -1072,6 +1075,20 @@ test("D55 health proves the exact signed attestation with read-only PING TIME GE
   assert.equal(config.statusCode, 200);
   assert.equal(config.body.image_ledger_attested, undefined);
   assert.equal(fixture.commands.length, beforeConfig, "GET config must not touch Redis");
+});
+
+test("D55 health exposes a precise non-secret runtime-binding failure before a paid click", async () => {
+  const nowMs = 1_788_192_000_000;
+  const fixture = runtimeLedgerFixture({ nowMs, mode: "STEP" });
+  const env = { ...fixture.env, ARK_API_KEY: "server-secret-test-key", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_SHA: "" };
+  const ledger = createUpstashImageLedgerFromEnv(env, { fetchImpl: fixture.fetchImpl });
+  const healthHandler = createProviderHandler({ env, imageLedger: ledger, nowMs });
+  const health = responseProbe();
+  await healthHandler({ method: "GET", query: { route: "health" }, headers: {} }, health);
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.body.image_ledger_attested, false);
+  assert.equal(health.body.image_ledger_attestation_status, "IMAGE_LEDGER_DEPLOYMENT_COMMIT_REQUIRED");
+  assert.deepEqual(fixture.commands.map((body) => body[0]), ["PING"]);
 });
 
 test("D55 health exposes missing expired and deployment-mismatched attestations before a paid click", async () => {

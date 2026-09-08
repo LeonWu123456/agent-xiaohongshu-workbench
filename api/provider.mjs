@@ -211,16 +211,20 @@ export function imageLedgerRuntimeBinding(env = process.env, appScopeId = "", re
   const candidateCommit = vercelEnvironment === "preview" && deploymentCommitValid
     ? deploymentCommit
     : configuredCandidateCommit || deploymentCommit;
-  const productionIdentityValid = vercelEnvironment !== "production"
-    || (deploymentCommitValid
-      && configuredCandidateCommitValid
-      && deploymentCommit === configuredCandidateCommit);
+  let readinessError = "";
+  if (!publicKey) readinessError = "IMAGE_LEDGER_ATTESTATION_PUBLIC_KEY_REQUIRED";
+  else if (!/^[0-9a-f]{64}$/.test(databaseIdSha256)) readinessError = "IMAGE_LEDGER_DATABASE_BINDING_INVALID";
+  else if (!restOrigin) readinessError = "IMAGE_LEDGER_REST_ORIGIN_REQUIRED";
+  else if (!appScopeId) readinessError = "IMAGE_LEDGER_APP_SCOPE_REQUIRED";
+  else if (!vercelProjectId) readinessError = "IMAGE_LEDGER_VERCEL_PROJECT_ID_REQUIRED";
+  else if (!vercelEnvironment) readinessError = "IMAGE_LEDGER_VERCEL_ENV_REQUIRED";
+  else if (!/^[0-9a-f]{40}$/.test(candidateCommit)) readinessError = "IMAGE_LEDGER_CANDIDATE_REQUIRED";
+  else if (vercelEnvironment === "production" && !deploymentCommitValid) readinessError = "IMAGE_LEDGER_DEPLOYMENT_COMMIT_REQUIRED";
+  else if (vercelEnvironment === "production" && !configuredCandidateCommitValid) readinessError = "IMAGE_LEDGER_CANDIDATE_REQUIRED";
+  else if (vercelEnvironment === "production" && deploymentCommit !== configuredCandidateCommit) readinessError = "IMAGE_LEDGER_DEPLOYMENT_CANDIDATE_MISMATCH";
   return {
-    ready: Boolean(publicKey)
-      && /^[0-9a-f]{64}$/.test(databaseIdSha256)
-      && Boolean(restOrigin && appScopeId && vercelProjectId && vercelEnvironment)
-      && /^[0-9a-f]{40}$/.test(candidateCommit)
-      && productionIdentityValid,
+    ready: readinessError === "",
+    readiness_error: readinessError || null,
     publicKey,
     expected: {
       database_id_sha256: databaseIdSha256,
@@ -1805,7 +1809,7 @@ export function createUpstashImageLedger({ url, token, fetchImpl = globalThis.fe
     return Number(value[0]) * 1000 + Math.floor(Number(value[1]) / 1000);
   };
   const verifyRuntimeSentinel = async (context) => {
-    if (!runtimeBinding?.ready) throw new Error("IMAGE_LEDGER_READINESS_UNKNOWN");
+    if (!runtimeBinding?.ready) throw new Error(runtimeBinding?.readiness_error || "IMAGE_LEDGER_READINESS_UNKNOWN");
     const appScopeId = String(context?.appScopeId || "");
     if (appScopeId !== runtimeBinding.expected?.app_scope) throw new Error("IMAGE_LEDGER_ATTESTATION_BINDING_MISMATCH:app_scope");
     const nowMs = await redisTimeMs();
