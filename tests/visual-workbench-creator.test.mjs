@@ -421,3 +421,12 @@ test('workbench runs final quality before rendering a whole-work ZIP and keeps s
   assert.ok(qualityAt>=0&&renderAt>qualityAt,'final quality must execute before all-page rendering');
   assert.match(main,/if\(all\).*assertFinalXhsPublishQuality/s);
 });
+
+
+test('all visual workbench legacy and error-recovery links target the real legacy route', async () => {
+  const {readFile}=await import('node:fs/promises');
+  const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+  assert.doesNotMatch(main,/href=\"\/\">回到旧版工作台/);
+  assert.match(main,/href=\"\/legacy\.html\">回到旧版工作台/);
+  assert.match(main,/href=\"\/legacy\.html\" className=\"vw-old-link\"/);
+});
