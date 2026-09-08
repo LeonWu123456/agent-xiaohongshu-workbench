@@ -75,7 +75,7 @@ jobs:
       XIAOSHIMEI_WORST_CASE_RUN_BYTES: ${{ vars.XIAOSHIMEI_WORST_CASE_RUN_BYTES }}
       VERCEL_ENV: ${{ github.event_name == 'schedule' && 'production' || inputs.vercel_environment }}
       XIAOSHIMEI_CANDIDATE_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_COMMIT || inputs.candidate_commit }}
-      XIAOSHIMEI_PRODUCTION_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_COMMIT || '' }}
+      XIAOSHIMEI_PRODUCTION_COMMIT: ${{ vars.XIAOSHIMEI_PRODUCTION_COMMIT }}
       XIAOSHIMEI_ROLLBACK_COMMIT: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_ROLLBACK_COMMIT || '' }}
       XIAOSHIMEI_APP_SCOPE: ${{ github.event_name == 'schedule' && vars.XIAOSHIMEI_PRODUCTION_APP_SCOPE || inputs.app_scope }}
       XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
@@ -114,7 +114,14 @@ jobs:
           test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true" || test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "false"
           test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "true" || test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "false"
           test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "true" || test "$XIAOSHIMEI_ZERO_PROVIDER_RECOVERY_MODE" = "false"
-          if test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi
+          if test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+            if test "$VERCEL_ENV" = "production"; then
+              test "${#XIAOSHIMEI_PRODUCTION_COMMIT}" -eq 40
+              case "$XIAOSHIMEI_PRODUCTION_COMMIT" in (*[!0-9a-fA-F]*) exit 1;; esac
+              test "$XIAOSHIMEI_PRODUCTION_COMMIT" != "$XIAOSHIMEI_CANDIDATE_COMMIT"
+            fi
+          fi
           if test "$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "true"; then
             test "$GITHUB_EVENT_NAME" = "schedule"
             test "$VERCEL_ENV" = "production"

@@ -447,6 +447,80 @@ export async function buildAndInstallAttestation({ env = process.env, fetchImpl 
     { databaseId, redisUrl, appScope, projectId, environment, candidateCommit },
   );
 
+  if (allowCandidateRotation && !prior && environment === "production") {
+    const sourceCandidateCommit = String(env?.XIAOSHIMEI_PRODUCTION_COMMIT || "").trim().toLowerCase();
+    if (String(env?.GITHUB_EVENT_NAME || "") !== "workflow_dispatch"
+      || !/^[0-9a-f]{40}$/.test(sourceCandidateCommit)
+      || sourceCandidateCommit === candidateCommit) {
+      throw new Error("ATTESTATION_CANDIDATE_PROJECTION_SCOPE_INVALID");
+    }
+    const sourceReadinessKey = readinessKey(appScope, sourceCandidateCommit);
+    const sourceRaw = await redis.command(["GET", sourceReadinessKey]);
+    if (typeof sourceRaw !== "string") throw new Error("ATTESTATION_CANDIDATE_PROJECTION_SOURCE_MISSING");
+    let sourceEnvelope;
+    try { sourceEnvelope = JSON.parse(sourceRaw); } catch { throw new Error("ATTESTATION_CANDIDATE_PROJECTION_SOURCE_INVALID"); }
+    const source = verifyPriorEnvelope(sourceEnvelope, publicKey);
+    assertPriorBinding(
+      source,
+      { databaseId, redisUrl, appScope, projectId, environment, candidateCommit: sourceCandidateCommit },
+    );
+    if (signedAtMs >= Number(source.hard_expiry_ms)) throw new Error("ATTESTATION_CANDIDATE_PROJECTION_SOURCE_EXPIRED");
+    const installedCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
+    if (installedCapacity.schema !== CAPACITY_SCHEMA
+      || installedCapacity.capacity_generation !== source.capacity_generation) {
+      throw new Error("ATTESTATION_CANDIDATE_PROJECTION_CAPACITY_DRIFT");
+    }
+    const attestationGeneration = sha256(Buffer.from(canonicalJson({
+      projection_of: source.attestation_generation,
+      source_candidate_commit: sourceCandidateCommit,
+      candidate_commit: candidateCommit,
+      capacity_generation: source.capacity_generation,
+      hard_expiry_ms: source.hard_expiry_ms,
+    })));
+    const payload = {
+      ...source,
+      candidate_commit: candidateCommit,
+      attestation_generation: attestationGeneration,
+    };
+    const envelope = {
+      schema: ATTESTATION_ENVELOPE_SCHEMA,
+      payload,
+      signature: sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64"),
+    };
+    const serialized = canonicalJson(envelope);
+    const installed = await redis.command(["EVAL", INSTALL_ATTESTATION_LUA, "2", capacityKey, candidateReadinessKey,
+      CAPACITY_SCHEMA,
+      source.capacity_generation,
+      attestationGeneration,
+      source.capacity_limit_bytes,
+      source.headroom_bytes,
+      source.worst_case_run_bytes,
+      serialized,
+    ]);
+    if (!Array.isArray(installed) || installed[0] !== "INSTALLED") throw new Error("ATTESTATION_CANDIDATE_PROJECTION_WRITE_FAILED");
+    if (await redis.command(["GET", candidateReadinessKey]) !== serialized) throw new Error("ATTESTATION_CANDIDATE_PROJECTION_READBACK_FAILED");
+    const postCapacity = hashObject(await redis.command(["HGETALL", capacityKey]));
+    if (postCapacity.capacity_generation !== source.capacity_generation
+      || postCapacity.attestation_generation !== attestationGeneration) {
+      throw new Error("ATTESTATION_CANDIDATE_PROJECTION_CAPACITY_READBACK_FAILED");
+    }
+    return {
+      status: "ATTESTATION_PROJECTED",
+      envelope,
+      public_key_spki_base64: publicKeyDerBase64(privateKey),
+      readiness_key: candidateReadinessKey,
+      legacy_readiness_key: null,
+      capacity_key: capacityKey,
+      control_config_hash: source.control_config_hash,
+      relevant_audit_set_hash: source.relevant_audit_set_hash,
+      audit_entry_count: null,
+      capacity_snapshot: {
+        ...Object.fromEntries(["capacity_limit_bytes", "headroom_bytes", "worst_case_run_bytes", "reserved_bytes", "live_reservations", "unfinalized_inventory"].map(key => [key, Number(postCapacity[key])])),
+      },
+      projection_source_candidate_commit: sourceCandidateCommit,
+    };
+  }
+
   if (onlyIfDue && prior) {
     const renewLeadMs = integerEnv(env, "XIAOSHIMEI_ATTESTATION_RENEW_LEAD_MS");
     if (renewLeadMs > RENEW_MAX_MS) throw new Error("ATTESTATION_RENEW_LEAD_INVALID");
@@ -634,7 +708,7 @@ async function main() {
   }
   const capacityMetadata = process.env.VERCEL_ENV === "preview" ? await inspectCapacityMetadata() : null;
   process.stdout.write(`${JSON.stringify({
-    status: "ATTESTATION_INSTALLED",
+    status: result.status || "ATTESTATION_INSTALLED",
     public_key_spki_base64: result.public_key_spki_base64,
     readiness_key: result.readiness_key,
     capacity_key: result.capacity_key,
@@ -642,6 +716,7 @@ async function main() {
     relevant_audit_set_hash: result.relevant_audit_set_hash,
     audit_entry_count: result.audit_entry_count,
     capacity_snapshot: result.capacity_snapshot,
+    ...(result.projection_source_candidate_commit ? {projection_source_candidate_commit: result.projection_source_candidate_commit} : {}),
     ...(capacityMetadata ? {capacity_metadata: capacityMetadata} : {}),
     attestation_generation: result.envelope.payload.attestation_generation,
     capacity_generation: result.envelope.payload.capacity_generation,

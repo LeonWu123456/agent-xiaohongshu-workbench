@@ -1406,6 +1406,69 @@ test("D36 scheduled attestor renews inside the lead window but rejects signature
   assert.deepEqual(badSignature.state.commands.map((body) => body[0]), ["TIME", "GET"]);
 });
 
+test("D56 manual Production candidate rotation projects the still-valid signed receipt without the undocumented audit API", async () => {
+  const fixture = attestorFixture();
+  fixture.env.VERCEL_ENV = "production";
+  fixture.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+  const sourceCommit = fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT;
+  const first = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  fixture.state.nowMs += 60_000;
+  fixture.env.XIAOSHIMEI_PRODUCTION_COMMIT = sourceCommit;
+  fixture.env.XIAOSHIMEI_CANDIDATE_COMMIT = "3".repeat(40);
+  fixture.env.XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION = "true";
+  fixture.state.audits = [];
+  fixture.state.commands.length = 0;
+  fixture.state.developerRequests.length = 0;
+
+  const projected = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });
+  assert.equal(projected.status, "ATTESTATION_PROJECTED");
+  assert.equal(projected.projection_source_candidate_commit, sourceCommit);
+  assert.equal(projected.envelope.payload.candidate_commit, "3".repeat(40));
+  assert.equal(projected.envelope.payload.signed_at_ms, first.envelope.payload.signed_at_ms);
+  assert.equal(projected.envelope.payload.hard_expiry_ms, first.envelope.payload.hard_expiry_ms);
+  assert.equal(projected.envelope.payload.relevant_audit_set_hash, first.envelope.payload.relevant_audit_set_hash);
+  assert.equal(projected.envelope.payload.capacity_generation, first.envelope.payload.capacity_generation);
+  assert.notEqual(projected.envelope.payload.attestation_generation, first.envelope.payload.attestation_generation);
+  assert.deepEqual(fixture.state.developerRequests, [], "projection must not depend on the undocumented audit endpoint");
+  assert.deepEqual(fixture.state.commands.map((body) => body[0]), ["TIME", "GET", "GET", "HGETALL", "EVAL", "GET", "HGETALL"]);
+});
+
+test("D56 Production projection refuses an expired source or shared-capacity drift", async () => {
+  const expired = attestorFixture();
+  expired.env.VERCEL_ENV = "production";
+  expired.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+  const sourceCommit = expired.env.XIAOSHIMEI_CANDIDATE_COMMIT;
+  const installed = await buildAndInstallAttestation({ env: expired.env, fetchImpl: expired.fetchImpl });
+  expired.env.XIAOSHIMEI_PRODUCTION_COMMIT = sourceCommit;
+  expired.env.XIAOSHIMEI_CANDIDATE_COMMIT = "3".repeat(40);
+  expired.env.XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION = "true";
+  expired.state.nowMs = installed.envelope.payload.hard_expiry_ms;
+  expired.state.commands.length = 0;
+  expired.state.developerRequests.length = 0;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: expired.env, fetchImpl: expired.fetchImpl }),
+    /ATTESTATION_CANDIDATE_PROJECTION_SOURCE_EXPIRED/,
+  );
+  assert.equal(expired.state.developerRequests.length, 0);
+
+  const drift = attestorFixture();
+  drift.env.VERCEL_ENV = "production";
+  drift.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+  const driftSource = drift.env.XIAOSHIMEI_CANDIDATE_COMMIT;
+  await buildAndInstallAttestation({ env: drift.env, fetchImpl: drift.fetchImpl });
+  drift.env.XIAOSHIMEI_PRODUCTION_COMMIT = driftSource;
+  drift.env.XIAOSHIMEI_CANDIDATE_COMMIT = "4".repeat(40);
+  drift.env.XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION = "true";
+  drift.state.capacity.capacity_generation = "f".repeat(64);
+  drift.state.commands.length = 0;
+  drift.state.developerRequests.length = 0;
+  await assert.rejects(
+    () => buildAndInstallAttestation({ env: drift.env, fetchImpl: drift.fetchImpl }),
+    /ATTESTATION_CANDIDATE_PROJECTION_CAPACITY_DRIFT/,
+  );
+  assert.equal(drift.state.developerRequests.length, 0);
+});
+
 test("D56 different candidate attestations coexist while preserving one shared capacity identity", async () => {
   const fixture = attestorFixture();
   const first = await buildAndInstallAttestation({ env: fixture.env, fetchImpl: fixture.fetchImpl });

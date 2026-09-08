@@ -23,13 +23,16 @@ test("D36 scheduled production uses explicit repository variables and never gith
   const source = await readFile(workflowPath, "utf8");
   assert.match(source, /github\.event_name == 'schedule' && 'production'/);
   assert.match(source, /vars\.XIAOSHIMEI_PRODUCTION_COMMIT \|\| inputs\.candidate_commit/);
-  assert.match(source, /XIAOSHIMEI_PRODUCTION_COMMIT: \$\{\{ github\.event_name == 'schedule' && vars\.XIAOSHIMEI_PRODUCTION_COMMIT \|\| '' \}\}/);
+  assert.ok(source.includes("XIAOSHIMEI_PRODUCTION_COMMIT: ${{ vars.XIAOSHIMEI_PRODUCTION_COMMIT }}"));
   assert.match(source, /XIAOSHIMEI_ROLLBACK_COMMIT: \$\{\{ github\.event_name == 'schedule' && vars\.XIAOSHIMEI_ROLLBACK_COMMIT \|\| '' \}\}/);
   assert.match(source, /vars\.XIAOSHIMEI_PRODUCTION_APP_SCOPE \|\| inputs\.app_scope/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_ONLY_IF_DUE: \$\{\{ github\.event_name == 'schedule' && 'true' \|\| 'false' \}\}/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.allow_candidate_rotation && 'true' \|\| 'false' \}\}/);
   assert.match(source, /XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT: "false"/);
-  assert.match(source, /if test "\$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then test "\$GITHUB_EVENT_NAME" = "workflow_dispatch"; fi/);
+  assert.ok(source.includes('if test "$XIAOSHIMEI_ATTESTATION_ALLOW_CANDIDATE_ROTATION" = "true"; then'));
+  assert.ok(source.includes('test "$GITHUB_EVENT_NAME" = "workflow_dispatch"'));
+  assert.ok(source.includes('test "${#XIAOSHIMEI_PRODUCTION_COMMIT}" -eq 40'));
+  assert.ok(source.includes('test "$XIAOSHIMEI_PRODUCTION_COMMIT" != "$XIAOSHIMEI_CANDIDATE_COMMIT"'));
   assert.match(source, /if test "\$GITHUB_EVENT_NAME" = "schedule"; then[\s\S]*test "\$\{#XIAOSHIMEI_ROLLBACK_COMMIT\}" -eq 40[\s\S]*test "\$XIAOSHIMEI_ROLLBACK_COMMIT" != "\$XIAOSHIMEI_CANDIDATE_COMMIT"/);
   assert.match(source, /if test "\$XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT" = "true"; then[\s\S]*test "\$GITHUB_EVENT_NAME" = "schedule"[\s\S]*test "\$XIAOSHIMEI_CANDIDATE_COMMIT" = "\$XIAOSHIMEI_ROLLBACK_COMMIT"[\s\S]*test "\$XIAOSHIMEI_CANDIDATE_COMMIT" != "\$XIAOSHIMEI_PRODUCTION_COMMIT"/);
   assert.match(source, /node scripts\/attest-upstash-image-ledger\.mjs[\s\S]*if test "\$GITHUB_EVENT_NAME" = "schedule"; then[\s\S]*XIAOSHIMEI_CANDIDATE_COMMIT="\$XIAOSHIMEI_ROLLBACK_COMMIT" XIAOSHIMEI_ATTESTATION_LEGACY_RUNTIME_COMPAT=true node scripts\/attest-upstash-image-ledger\.mjs/);
