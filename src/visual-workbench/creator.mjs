@@ -149,6 +149,8 @@ function isFreshUnstartedOperation(pending){
 function imageResponseError(response) {
   const code=response?.error?.code || `IMAGE_RESPONSE_${response?.status || 'INVALID'}`;
   const error=new Error(code); error.providerCode=code; error.providerStage='image'; error.providerDetails=response?.progress||null;
+  error.providerErrorDetails=response?.error?.details&&typeof response.error.details==='object'?structuredClone(response.error.details):null;
+  error.providerUpstreamCalls=Number.isFinite(Number(response?.upstream_calls))?Number(response.upstream_calls):null;
   return error;
 }
 
@@ -346,6 +348,10 @@ export async function applyPageVariant({service,candidateIndex}={}) {
 
 export function imageRecoveryMessage(error){
  const code=String(error?.providerCode||error?.message||'');
+ if(code==='IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS'){
+  const feedback=generationFailureFeedback({providerCode:code,providerStage:'image'}),cause=String(error?.providerErrorDetails?.cause||'').trim().slice(0,180);
+  return `${feedback.title}。图片模型调用数 = 0。${cause?`规划原因：${cause}。`:''}${feedback.detail}`;
+ }
  if(['IMAGE_RESPONSE_UNKNOWN','IMAGE_STEP_UNKNOWN','IMAGE_RESPONSE_IN_FLIGHT','IMAGE_STEP_IN_FLIGHT'].includes(code)){const feedback=generationFailureFeedback({providerCode:code.includes('IN_FLIGHT')?'IN_FLIGHT':'UNKNOWN',providerStage:'image'});return feedback.title+'。'+feedback.detail;}
  if(/^IMAGE_MEDIA_(?:FETCH|BODY_READ)/.test(code))return '图片素材暂未读回，任务和已生成结果仍保留。先恢复工作台访问，再点“检查任务（不生成图片）”取回结果；不要重新生图。';
  return String(error?.message||error||'操作失败');

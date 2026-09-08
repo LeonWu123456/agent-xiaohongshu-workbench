@@ -327,6 +327,25 @@ test('unknown or expired BOOTSTRAP cannot be treated as a safe new START',async(
 });
 
 
+test('planner-only failure releases the local lock, preserves its cause, and never claims saved progress',async()=>{
+ const {imageRecoveryMessage}=await import('../src/visual-workbench/creator.mjs');
+ const {service,session}=await confirmedService();
+ const provider={fetchImageMediaDelta:async()=>[],generateImages:async()=>({
+  status:'ERROR',error:{code:'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS',details:{cause:'XHS_COVER_TITLE_BUDGET',image_upstream_calls:0,retry_scope:'EDIT_VISUAL_INPUTS_THEN_RESTART'}},progress:{state:'PLANNER_FAILED',image_upstream_calls:0},upstream_calls:1
+ })};
+ let failure=null;try{await runImageGeneration({provider,service,session});}catch(error){failure=error;}
+ assert.ok(failure);assert.equal(failure.providerCode,'IMAGE_PLANNER_FAILED_ZERO_IMAGE_CALLS');
+ assert.equal(failure.providerErrorDetails.cause,'XHS_COVER_TITLE_BUDGET');assert.equal(service.pending(),null);
+ const message=imageRecoveryMessage(failure);assert.match(message,/图片模型调用数 = 0/);assert.match(message,/XHS_COVER_TITLE_BUDGET/);assert.match(message,/重新/);
+ service.dispose();
+});
+
+test('CreatorPanel never labels a released planner failure as saved progress',async()=>{
+ const {readFile}=await import('node:fs/promises');const panel=await readFile(new URL('../src/visual-workbench/CreatorPanel.jsx',import.meta.url),'utf8');
+ assert.match(panel,/imageFlow && \(pending\|\|imageFlow\.phase==='COMPLETE'\)/);
+ assert.doesNotMatch(panel,/:imageFlow\.phase==='COMPLETE'\?'配图已完成':'进度已保留'/);
+});
+
 test('paid media readback failure points to the non-generating recovery action, preserving other errors',async()=>{
  const {imageRecoveryMessage}=await import('../src/visual-workbench/creator.mjs');
  for(const code of ['IMAGE_MEDIA_FETCH_FAILED','IMAGE_MEDIA_FETCH_HTTP_401','IMAGE_MEDIA_BODY_READ_FAILED']){
