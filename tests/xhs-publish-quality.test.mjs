@@ -62,3 +62,52 @@ test("publish gate rejects a claimed step count that disagrees with the visible 
   ]);
   assert.ok(!corrected.some((issue) => issue.code === "XHS_STEP_COUNT_MISMATCH"));
 });
+
+
+test('final visual gate rejects three-page shell cloning but allows a two-page same-role continuation', async () => {
+  const { inspectFinalVisualQuality } = await import('../src/xhs-publish-quality.mjs');
+  const same = { title: '把小习惯融进日常迎深秋', page_role: 'method', visual_action: '小师妹用木勺慢慢搅动砂锅里的小米粥', image_style: { src: 'xiaoshimei-media://sha256/' + 'a'.repeat(64) } };
+  const bad = [
+    { page_role: 'hook', title: '入秋后提不起精神怎么调', visual_action: '小师妹放下温水', image_style: { src: 'xiaoshimei-media://sha256/' + 'b'.repeat(64) } },
+    { ...same, body: '先煮粥。' },
+    { ...same, body: '这是医疗边界。' },
+    { ...same, body: '不舒服就停下。' },
+  ];
+  const badIssues = inspectFinalVisualQuality(bad);
+  assert.ok(badIssues.some(issue => issue.code === 'XHS_FINAL_VISUAL_STUTTER' && issue.page === 4));
+
+  const good = [
+    { page_role: 'hook', title: '区分中日茶艺实用方法', visual_action: '小师妹铺茶席', image_style: { src: 'xiaoshimei-media://sha256/' + 'c'.repeat(64) } },
+    { page_role: 'method', title: '观察空间与动线的排布逻辑', visual_action: '小师妹指向茶席留白', image_style: { src: 'xiaoshimei-media://sha256/' + 'd'.repeat(64) } },
+    { page_role: 'method', title: '观察空间与动线的排布逻辑', visual_action: '小师妹指向茶席留白', image_style: { src: 'xiaoshimei-media://sha256/' + 'd'.repeat(64) } },
+  ];
+  assert.deepEqual(inspectFinalVisualQuality(good), []);
+});
+
+test('final visual gate rejects cross-role reuse of an unchanged title hero and action', async () => {
+  const { inspectFinalVisualQuality } = await import('../src/xhs-publish-quality.mjs');
+  const hero = 'xiaoshimei-media://sha256/' + 'e'.repeat(64);
+  const issues = inspectFinalVisualQuality([
+    { page_role: 'judgment', title: '入秋犯困发燥的核心原因', visual_action: '小师妹调整木窗缝隙', image_style: { src: hero } },
+    { page_role: 'method', title: '入秋犯困发燥的核心原因', visual_action: '小师妹调整木窗缝隙', image_style: { src: hero } },
+  ]);
+  assert.ok(issues.some(issue => issue.code === 'XHS_FINAL_CROSS_ROLE_VISUAL_REUSE' && issue.page === 2));
+});
+
+test('final route gate reports the tea-as-wellness contamination independently of visual structure', async () => {
+  const { inspectFinalRouteQuality } = await import('../src/xhs-publish-quality.mjs');
+  const tea = { source_input: '新手区分中日茶艺实用方法', selectedTitle: '区分中日茶艺实用方法', pillar: 'wellness' };
+  const issues = inspectFinalRouteQuality(tea);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].code, 'XHS_FINAL_PILLAR_TOPIC_CONFLICT');
+  assert.equal(issues[0].expected_pillar, 'culture');
+  assert.equal(issues[0].observed_pillar, 'wellness');
+});
+
+test('legacy conclusion continuation is tolerated narrowly; closing or judgment role flips are not', async () => {
+  const { inspectFinalVisualQuality } = await import('../src/xhs-publish-quality.mjs');
+  const hero='xiaoshimei-media://sha256/'+'f'.repeat(64),base={title:'同一结论续页',visual_action:'小师妹低头闻茶香',image_style:{src:hero}};
+  assert.deepEqual(inspectFinalVisualQuality([{...base,page_role:'conclusion'},{...base,page_role:'method'}]),[]);
+  assert.ok(inspectFinalVisualQuality([{...base,page_role:'closing'},{...base,page_role:'method'}]).some(x=>x.code==='XHS_FINAL_CROSS_ROLE_VISUAL_REUSE'));
+  assert.ok(inspectFinalVisualQuality([{...base,page_role:'judgment'},{...base,page_role:'method'}]).some(x=>x.code==='XHS_FINAL_CROSS_ROLE_VISUAL_REUSE'));
+});

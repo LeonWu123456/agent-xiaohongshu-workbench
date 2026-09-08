@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { buildManifest, publishCopy } from "./content-engine.mjs";
 import { MEDIA_ASSET_BACKUP_SCHEMA, MEDIA_REF_PREFIX } from "./media-asset-store.mjs";
+import { assertFinalXhsPublishQuality } from "./xhs-publish-quality.mjs";
 
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -49,6 +50,7 @@ export function inspectPng(bytes) {
 }
 
 export async function buildPublishZip(content, pngPages, options = {}) {
+  assertFinalXhsPublishQuality(content);
   if (!Array.isArray(pngPages) || pngPages.length !== content.visible_pages) throw new TypeError("all visible pages must be rendered before ZIP creation");
   const zip = new JSZip();
   const createdAt = options.createdAt || new Date().toISOString();

@@ -389,7 +389,17 @@ export function materializeGeneratedCopy(content,{measureText}={}){
  }
  const chosen=dp[m][n];if(!chosen)fail('GENERATED_COPY_ALIGNMENT_UNCONFIRMED','正文与分镜缺少可确认的对应关系，已保留图片和原文，未猜测或重复补页。');
  const pages=[];
- const compose=(page,body,index,continuation=false)=>arrangeEditablePage({...page,body,highlight_phrases:(page.highlight_phrases||[]).filter(x=>(page.title+'\n'+body).includes(x)),...(continuation?{page_role:'method'}:{})},index,{measureText});
+ const continuationHeading=body=>{
+  const first=String(body||'').replace(/\s+/gu,' ').trim().split(/[。！？；;，,：:]/u)[0].replace(/^(?:第[一二三四五六七八九十\d]+步[，,:：]?|先|接着|然后|最后)\s*/u,'').trim();
+  return (first||'继续往下看').slice(0,18);
+ };
+ const compose=(page,body,index,continuation=false)=>{
+  const next=continuation?{
+   ...page,body,title:continuationHeading(body),eyebrow:'继续往下看',visual_action:'',image_prompt:'',visual:'none',
+   image_style:{...(page.image_style||{}),src:'',hidden:true},highlight_phrases:[],html_state:undefined,layout_ir:null,layout_recipe:null,editor_mode:'html',
+  }:{...page,body,highlight_phrases:(page.highlight_phrases||[]).filter(x=>(page.title+'\n'+body).includes(x))};
+  return arrangeEditablePage(next,index,{measureText});
+ };
  if(cover)pages.push(compose(original[0],coverCopy,0));
  for(let i=0;i<m;i++){
   const {from,to}=chosen.cuts[i];let cursor=from,part=0;

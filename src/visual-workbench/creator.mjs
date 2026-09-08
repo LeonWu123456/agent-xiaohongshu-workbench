@@ -28,7 +28,7 @@ export function createVisualProvider(options = {}) {
 export function emptyAuthoringSession(input = {}) {
   return normalizeAuthoringSession({
     schema: AUTHORING_SESSION_SCHEMA,
-    topic: String(input.topic || ''), pillar: String(input.pillar || 'wellness'), goal: String(input.goal || 'save'),
+    topic: String(input.topic || ''), pillar: String(input.pillar || 'culture'), goal: String(input.goal || 'save'),
     text_requirements: String(input.text_requirements || ''), text_draft: null, text_confirmed: false,
     assembled_draft_id: null, image_count_mode: 'AUTO', custom_image_count: 3,
     production_mode: 'smart', image_resume: null, action_reference_manifest: [], action_reference_note: '',
@@ -80,7 +80,7 @@ export function confirmTextSession(sessionValue) {
   return normalizeAuthoringSession({ ...session, text_confirmed: true, image_resume: null });
 }
 
-export async function generateTextDraft({ provider, profile, topic, pillar = 'wellness', goal = 'save', textRequirements = '', promptValues = null } = {}) {
+export async function generateTextDraft({ provider, profile, topic, pillar = 'culture', goal = 'save', textRequirements = '', promptValues = null } = {}) {
   if (!provider?.generateTextDraft) throw new TypeError('TEXT_PROVIDER_UNAVAILABLE');
   if (String(topic || '').trim().length < 2) throw new TypeError('INPUT_TOO_SHORT');
   const values = { ...defaultPromptValues(), ...(promptValues || {}) };
@@ -282,11 +282,11 @@ export function updateImageSettings(sessionValue, { imageCountMode, customImageC
 }
 
 
-export function updateAuthoringInput(sessionValue,{topic,textRequirements}={}) {
+export function updateAuthoringInput(sessionValue,{topic,textRequirements,pillar}={}) {
  const session=normalizeAuthoringSession(sessionValue||emptyAuthoringSession());
- const changed=(topic!==undefined&&String(topic)!==session.topic)||(textRequirements!==undefined&&String(textRequirements)!==session.text_requirements);
+ const changed=(topic!==undefined&&String(topic)!==session.topic)||(textRequirements!==undefined&&String(textRequirements)!==session.text_requirements)||(pillar!==undefined&&String(pillar)!==session.pillar);
  if(!changed)return session;
- return normalizeAuthoringSession({...session,topic:topic===undefined?session.topic:String(topic),text_requirements:textRequirements===undefined?session.text_requirements:String(textRequirements),text_confirmed:false,assembled_draft_id:null,image_resume:null});
+ return normalizeAuthoringSession({...session,topic:topic===undefined?session.topic:String(topic),text_requirements:textRequirements===undefined?session.text_requirements:String(textRequirements),pillar:pillar===undefined?session.pillar:String(pillar),text_confirmed:false,assembled_draft_id:null,image_resume:null});
 }
 export function updateActionReferences(sessionValue,{manifest,note}={}) {
  if(note!==undefined&&(typeof note!=='string'||note.length>1000))throw new TypeError('ACTION_REFERENCE_NOTE_MAX_1000');

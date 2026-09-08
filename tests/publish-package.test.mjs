@@ -124,3 +124,17 @@ test("local draft id and save timestamp do not make the portable ZIP hash drift"
   assert.equal(portable.id, undefined);
   assert.equal(portable.saved_at, undefined);
 });
+
+
+test('whole-work ZIP refuses a final three-page cloned visual shell before packaging', async () => {
+  const content=generateContentPackage({topic:'最终成品重复壳'});
+  const hero='/assets/xiaoshimei-character-production.svg';
+  const repeated={...content.pages[1],page_role:'method',title:'同一壳子不准连续三页',visual:'character',visual_action:'小师妹反复做同一个动作',image_style:{...content.pages[1].image_style,src:hero,hidden:false},info_panels:[]};
+  content.pages=[content.pages[0],structuredClone(repeated),structuredClone(repeated),structuredClone(repeated)];content.visible_pages=4;
+  await assert.rejects(()=>buildPublishZip(content,Array.from({length:4},()=>pngHeader(1080,1440))),error=>error?.code==='XHS_FINAL_PUBLISH_GATE_FAILED'&&error.issues?.some(issue=>issue.code==='XHS_FINAL_VISUAL_STUTTER'));
+});
+
+test('whole-work ZIP refuses a high-confidence topic route conflict', async () => {
+  const content=generateContentPackage({topic:'新手区分中日茶艺实用方法',pillar:'wellness'});
+  await assert.rejects(()=>buildPublishZip(content,[pngHeader(1080,1440),pngHeader(1080,1440)]),error=>error?.code==='XHS_FINAL_PUBLISH_GATE_FAILED'&&error.issues?.some(issue=>issue.code==='XHS_FINAL_PILLAR_TOPIC_CONFLICT'));
+});

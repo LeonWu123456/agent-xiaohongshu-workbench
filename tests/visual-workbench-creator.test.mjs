@@ -400,3 +400,24 @@ test('polling cap fifth-request mutant is invisible at 22 seconds but rejected b
   assert.throws(()=>assert.equal(clock.calls.length,4),{code:'ERR_ASSERTION'},'the same four-call oracle must reject the fifth-call mutant');
  }finally{clock.dispose();}
 });
+
+
+test('new authoring defaults to broad culture and accepts an explicit routed pillar', async () => {
+  const api=await import('../src/visual-workbench/creator.mjs');
+  const initial=api.emptyAuthoringSession({topic:'今天想写一点最近的感受'});
+  assert.equal(initial.pillar,'culture');
+  const routed=api.updateAuthoringInput(initial,{topic:'新手区分中日茶艺实用方法',pillar:'culture'});
+  assert.equal(routed.pillar,'culture');
+  const health=api.updateAuthoringInput(routed,{topic:'入秋后犯困口干怎么调养',pillar:'wellness'});
+  assert.equal(health.pillar,'wellness');
+});
+
+test('workbench runs final quality before rendering a whole-work ZIP and keeps single-page repair export available', async () => {
+  const {readFile}=await import('node:fs/promises');
+  const main=await readFile(new URL('../src/visual-workbench/main.jsx',import.meta.url),'utf8');
+  assert.match(main,/assertFinalXhsPublishQuality\(canonical\)/);
+  const qualityAt=main.indexOf('assertFinalXhsPublishQuality(canonical)');
+  const renderAt=main.indexOf('renderHtmlPageToPng(draft.pages[i]',qualityAt);
+  assert.ok(qualityAt>=0&&renderAt>qualityAt,'final quality must execute before all-page rendering');
+  assert.match(main,/if\(all\).*assertFinalXhsPublishQuality/s);
+});

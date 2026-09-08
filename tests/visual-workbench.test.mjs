@@ -531,3 +531,27 @@ test('same import-cancellation oracle rejects save-before-confirm and omitted-co
   const result=await cancelledImportFromCurrentHandler({existing,mutant});assert.ok(result.saved>0);assert.notDeepEqual(result.after,result.before);assert.throws(()=>assertCancelledImportIsUnchanged(result),{code:'ERR_ASSERTION'});
  }
 });
+
+
+test('narrative phone continuations do not clone the parent visual shell', async () => {
+  const { materializeGeneratedCopy } = await import('../src/visual-workbench/model.mjs');
+  const base=createBlankContent();
+  const cover={...structuredClone(base.pages[0]),page_role:'hook',title:'秋日调养小方法',body:'',visual:'character',image_style:{...base.pages[0].image_style,src:'/assets/cover.png'},html_state:undefined,info_panels:[]};
+  const scene={...structuredClone(base.pages[0]),page_role:'method',title:'秋日调养的三个日常动作',body:'调养',visual_action:'小师妹在木桌旁整理秋日调养用品',image_prompt:'小师妹在木桌旁整理秋日调养用品并预留文字区域',visual:'character',image_style:{...base.pages[0].image_style,src:'/assets/scene.png',hidden:false},html_state:undefined,info_panels:[]};
+  const sentences=Array.from({length:8},(_,i)=>`秋日调养第${i+1}个动作要慢慢完成，这一句保留足够多的文字来触发手机字号下的分段排版，并且原文顺序不能改变。`);
+  const source=sentences.join('');
+  const input={...base,source_input:'秋日调养',body:source,pages:[cover,scene],visible_pages:2,generation:{...base.generation,mode:'PROVIDER',production_mode:'narrative'}};
+  const output=materializeGeneratedCopy(input);
+  assert.ok(output.visible_pages>=3,`expected a continuation, got ${output.visible_pages} pages`);
+  assert.equal(output.pages.map(page=>page.body).join(''),source);
+  const firstScene=output.pages[1];
+  assert.equal(firstScene.image_style.src,'/assets/scene.png');
+  for(const continuation of output.pages.slice(2)){
+    assert.notEqual(continuation.title,firstScene.title);
+    assert.equal(continuation.visual_action,'');
+    assert.equal(continuation.image_prompt,'');
+    assert.equal(continuation.visual,'none');
+    assert.ok(!continuation.image_style?.src||continuation.image_style.hidden===true);
+    assert.equal(continuation.page_role,firstScene.page_role);
+  }
+});

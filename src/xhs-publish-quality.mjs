@@ -1,4 +1,5 @@
 import { recommendHtmlLayout } from "./html-layout.mjs";
+import { inferContentPillar } from "./content-routing.mjs";
 
 function compact(value) { return String(value || "").replace(/\s/g, "").length; }
 function normalized(value) { return String(value || "").replace(/[\s：:，,。.!！?？、·\-—_]/g, ""); }
@@ -80,4 +81,75 @@ export function assertXhsPublishQuality(pages, context = {}) {
   const issues = inspectXhsPublishQuality(pages, context);
   if (issues.length) throw new TypeError(`XHS_PUBLISH_GATE_FAILED:${issues.map((issue) => `${issue.page}:${issue.code}`).join(",")}`);
   return pages;
+}
+
+
+function finalHeroSource(page) {
+  if (page?.visual === "none" || page?.image_style?.hidden === true) return "";
+  return String(page?.image_style?.src || "").trim();
+}
+
+function finalVisualSignature(page) {
+  return {
+    title: normalized(page?.title),
+    hero: finalHeroSource(page),
+    action: normalized(page?.visual_action),
+    role: String(page?.page_role || ""),
+  };
+}
+
+function sameVisualSignature(left, right) {
+  return Boolean(left?.title && left?.hero && left?.action
+    && left.title === right?.title && left.hero === right?.hero && left.action === right?.action);
+}
+
+/** Final-page structural checks. These run after mobile materialization, not on the upstream plan. */
+export function inspectFinalVisualQuality(pages) {
+  if (!Array.isArray(pages) || !pages.length) return [{ code: "XHS_FINAL_PAGES_MISSING", page: 0 }];
+  const issues=[];
+  const signatures=pages.map(finalVisualSignature);
+  for(let index=1;index<signatures.length;index+=1){
+    const current=signatures[index],previous=signatures[index-1];
+    const legacyConclusionContinuation=previous.role==='conclusion'&&current.role==='method';
+    if(sameVisualSignature(previous,current) && previous.role && current.role && previous.role!==current.role&&!legacyConclusionContinuation){
+      issues.push({code:"XHS_FINAL_CROSS_ROLE_VISUAL_REUSE",page:index+1,previous_page:index,previous_role:previous.role,current_role:current.role});
+    }
+  }
+  for(let index=2;index<signatures.length;index+=1){
+    if(sameVisualSignature(signatures[index-2],signatures[index-1])&&sameVisualSignature(signatures[index-1],signatures[index])){
+      issues.push({code:"XHS_FINAL_VISUAL_STUTTER",page:index+1,start_page:index-1});
+    }
+  }
+  return issues;
+}
+
+export function inspectFinalRouteQuality(content) {
+  const observed=String(content?.pillar||"").trim();
+  if(!observed)return[];
+  const topic=[content?.source_input,content?.selectedTitle].filter(Boolean).join("\n");
+  const route=inferContentPillar(topic,{fallback:observed});
+  if(!route.confident||route.pillar===observed)return[];
+  return [{code:"XHS_FINAL_PILLAR_TOPIC_CONFLICT",page:1,expected_pillar:route.pillar,observed_pillar:observed,route_score:route.score,route_margin:route.margin}];
+}
+
+export function inspectFinalXhsPublishQuality(content) {
+  const pages=(content?.pages||[]).slice(0,Number(content?.visible_pages||0));
+  return [...inspectFinalVisualQuality(pages),...inspectFinalRouteQuality(content)];
+}
+
+const FINAL_QUALITY_MESSAGES=Object.freeze({
+  XHS_FINAL_VISUAL_STUTTER: issue=>`第${issue.page}页：连续页面重复同一标题、配图和动作`,
+  XHS_FINAL_CROSS_ROLE_VISUAL_REUSE: issue=>`第${issue.page}页：内容职责已经变化，却仍沿用上一页同一标题、配图和动作`,
+  XHS_FINAL_PILLAR_TOPIC_CONFLICT: issue=>`内容方向应为${issue.expected_pillar}，当前稿却按${issue.observed_pillar}生成`,
+  XHS_FINAL_PAGES_MISSING: ()=>"没有可发布页面",
+});
+
+export function assertFinalXhsPublishQuality(content) {
+  const issues=inspectFinalXhsPublishQuality(content);
+  if(!issues.length)return content;
+  const detail=issues.slice(0,3).map(issue=>(FINAL_QUALITY_MESSAGES[issue.code]||(()=>issue.code))(issue)).join("；");
+  const error=new TypeError(`最终成品质量检查未通过：${detail}。请先修正后再导出整篇。`);
+  error.code="XHS_FINAL_PUBLISH_GATE_FAILED";
+  error.issues=issues;
+  throw error;
 }
