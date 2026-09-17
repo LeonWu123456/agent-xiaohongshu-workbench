@@ -112,14 +112,14 @@ GitHub main
 Vercel xiaoshimei-full-workbench
   = 正式在线运行入口；Preview 验收后提升同一制品
 
-Projects/Workstreams/Xiaoshimei-Studio-v2
+Products/Xiaoshimei-Studio-v2
   = Workspace V2 稳定原件
 
-Projects/Views/ByStatus/ACTIVE/Xiaoshimei-Studio-v2
-  -> ../../../Workstreams/Xiaoshimei-Studio-v2
+Codex、Local Web、Provider 与人类维护者
+  -> 直接消费 Products/Xiaoshimei-Studio-v2 canonical path
 
 4184
-  -> 直接服务 Xiaoshimei-Studio-v2 的 dist 与 API
+  -> 直接服务 Products/Xiaoshimei-Studio-v2 的 dist 与 API
 
 4175
   -> 本地火山方舟生成 Provider

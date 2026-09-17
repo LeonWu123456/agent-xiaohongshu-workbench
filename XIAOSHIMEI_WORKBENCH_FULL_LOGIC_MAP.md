@@ -1,620 +1,236 @@
-# 小师妹工作台：全量逻辑地图、问题挂点与修复备料
+# 小师妹工作台｜图文交付主链逻辑地图（郭东超原版绘法）
 
-## 权威与发布传力链（2026-08-30）
+> 只描述产品功能逻辑：用户看到什么、做什么、进入什么流程、调用什么、保存什么、哪些规则不能破、怎样验证。
+>
+> 本文件是唯一产品逻辑权威与人类入口；`logic/logic-model.json` 是同节点 ID 的机器投影，`logic/nodes/` 只负责逐节点追溯。三者必须由测试校验一致，任何 `RESOLVED` 都不能代替真实页面结果。
+>
+> 范围只含当前最短交付旅程“原文 → 文字 → 配图 → 排版 → 编辑 → 保存/重载 → 下载”及其恢复、反馈边界；研究选题和账号档案是上游辅助能力，不冒充这条交付旅程已经走通。
+
+## 九个问题
+
+### 参考图恢复的目的地合同（FLOW-006，本地修复待发布验收）
+
+`参考图失败 → 保留原任务 → 原子落盘编辑副本 → 可修改参考图 → 保存重载 → 原任务仍可返回`。
+这里的成功不是“滚动到了设置”，而是输入实际可改、改动可保存、原冻结快照和恢复点不变。副本不继承 pending/image_resume；此动作不调用生成服务。只读、媒体缺失、并发冲突或陈旧回调不得提前声称解锁；文字未确认时先回确认步骤。验证落在 FLOW-006 的实现、行为测试和浏览器旅程，不能用图的结构完整代替用户结果。
+
+| 类型 | 问题 | 小师妹答案 |
+|---|---|---|
+| CAP | 用户最终能完成什么？ | 完成一套可编辑、可保存、可发布的小红书图文 |
+| PAGE | 在哪里完成？ | 创作工作台、稿件与反馈、生成服务设置 |
+| UI | 用户看到或点击什么？ | 原文、确认文字、生成图片、检查状态、编辑、保存、下载 |
+| ACT | 点击后实际做什么？ | 生成、确认、检查恢复、明确付费继续、编辑、保存、导出 |
+| FLOW | 动作怎样流动？ | 创作、图文生成、任务恢复、编辑、发布包、反馈 |
+| API | 调用什么？ | 生成服务、本机存取、下载 |
+| STORE | 保存什么？ | 文稿、任务恢复点、画布媒体、发布包、反馈 |
+| RULE | 什么绝不能被破坏？ | 同稿身份、检查零图片调用、明确付费、发布同稿、排版有效 |
+| TEST | 怎样证明正常？ | 真实故障用例、生成恢复、保存重载、编辑导出、反馈回流 |
+
+## 产品全景图
+
+```mermaid
+flowchart TD
+  CAP["CAP-001<br/>完成一套可编辑、可发布的小红书图文"]
+
+  P1["PAGE-001<br/>创作与编辑工作台"]
+  P2["PAGE-002<br/>资产库与现实反馈"]
+  P3["PAGE-003<br/>生成服务设置"]
+  CAP --> P1
+  CAP --> P2
+  CAP --> P3
+
+  U1["UI-001<br/>原文与选题输入"]
+  U2["UI-002<br/>确认文字进入配图"]
+  U3["UI-003<br/>当前文字的配图设置与生成"]
+  U4["UI-004<br/>页面编辑器"]
+  U5["UI-005<br/>保存草稿"]
+  U6["UI-006<br/>下载发布包"]
+  U9["UI-009<br/>旧配图任务恢复卡"]
+  U10["UI-010<br/>检查当前图片任务状态"]
+  U11["UI-011<br/>明确付费继续图片步骤"]
+  U7["UI-007<br/>现实反馈"]
+  U8["UI-008<br/>生成服务设置按钮"]
+  P1 --> U1 & U2 & U3 & U4 & U5 & U6 & U9 & U10 & U11
+  P2 --> U7
+  P3 --> U8
+
+  A1["ACT-001<br/>生成文字草稿"]
+  A2["ACT-002<br/>确认文字"]
+  A3["ACT-003<br/>为当前文字生成图片"]
+  A4["ACT-004<br/>编辑页面"]
+  A5["ACT-005<br/>保存并重载"]
+  A6["ACT-006<br/>生成并保存发布包"]
+  A9["ACT-009<br/>保留旧任务并解锁当前配图"]
+  A10["ACT-010<br/>检查现有图片操作"]
+  A11["ACT-011<br/>明确继续下一个付费图片步骤"]
+  A7["ACT-007<br/>保存现实反馈"]
+  A8["ACT-008<br/>配置并验证 Provider"]
+  U1 --> A1
+  U2 --> A2
+  U3 --> A3
+  U4 --> A4
+  U5 --> A5
+  U6 --> A6
+  U9 --> A9
+  U10 --> A10
+  U11 --> A11
+  U7 --> A7
+  U8 --> A8
+
+  F1["FLOW-001<br/>原文到发布包的创作旅程"]
+  F2["FLOW-002<br/>当前文字 Provider 生成链路"]
+  F3["FLOW-003<br/>页面排版与编辑"]
+  F4["FLOW-004<br/>发布包生成与落盘"]
+  F5["FLOW-005<br/>Reality Feedback → 下一轮建议"]
+  F6["FLOW-006<br/>当前任务状态与旧恢复稿血缘分流"]
+  A1 --> F2
+  A2 --> F1
+  A3 --> F2
+  A4 --> F3
+  A5 --> F1
+  A6 --> F4
+  A7 --> F5
+  A8 --> F2
+  A9 --> F6
+  A10 --> F6
+  A11 --> F2
+  F1 --> F2 & F3 & F4
+  F5 --> F1
+
+  AP1["API-001<br/>同源或本机 Provider"]
+  AP2["API-002<br/>浏览器本机持久化"]
+  AP3["API-003<br/>下载 transport"]
+  F2 --> AP1 & AP2
+  F3 --> AP2
+  F4 --> AP2 & AP3
+  F5 --> AP2
+  F6 --> AP1 & AP2
+
+  S1["STORE-001<br/>生成会话与恢复点"]
+  S2["STORE-002<br/>当前稿资产库与编辑历史"]
+  S3["STORE-003<br/>生成资产与发布包"]
+  S4["STORE-004<br/>发布后 Reality feedback"]
+  S5["STORE-005<br/>跨实例图片调用幂等账本"]
+  F2 --> S1 & S2 & S5
+  F3 --> S2
+  F4 --> S3
+  F5 --> S4
+  F6 --> S1 & S5
+
+  R1["RULE-001<br/>付费图片与 confirmed draft 精确绑定<br/>状态检查 0 次图片调用，付费续步独立确认"]
+  R2["RULE-002<br/>同一页面几何与导出真相"]
+  R3["RULE-003<br/>交付层级与 Reality 证据不可偷换<br/>文字与画布非同稿时禁止发布"]
+  R4["RULE-004<br/>Secret 与外部发布边界"]
+  R5["RULE-005<br/>不同 confirmed draft 不得互锁或串写"]
+  F2 -.遵守.-> R1
+  F6 -.遵守.-> R1 & R5
+  F1 -.遵守.-> R3
+  F4 -.遵守.-> R2 & R3
+  F3 -.遵守.-> R2
+  F2 -.遵守.-> R4
+  R1 -.约束.-> U3 & U10 & U11
+  R3 -.约束.-> U6
+  R3 -.约束.-> U7
+  R5 -.约束.-> U9
+
+  T1["TEST-001<br/>当前文字 Provider 与付费边界<br/>覆盖 T=P 且 C≠T"]
+  T2["TEST-002<br/>母图排版与编辑回归"]
+  T3["TEST-003<br/>保存重载与发布包实物"]
+  T4["TEST-004<br/>反馈目标环境与消费者"]
+  T5["TEST-005<br/>旧任务分流与九类逻辑地图回归"]
+  F1 -.验证.-> T1 & T3
+  F2 -.验证.-> T1 & T2
+  F6 -.验证.-> T1 & T5
+  F3 -.验证.-> T2 & T3 & T4
+  F4 -.验证.-> T3 & T4
+  F5 -.验证.-> T4
+  T1 -.覆盖.-> P1
+  T3 -.覆盖.-> P1
+  T5 -.覆盖.-> P1
+  T4 -.覆盖.-> P2
+
+  FB["现实反馈<br/>检查状态后显示重试图片<br/>发布区同时判定不是同一稿"]
+  FB -.定位.-> U10
+  FB -.定位.-> F6
+  FB -.反证.-> R1
+  FB -.要求补测.-> T1
+```
+
+## 当前故障切片
 
 ```mermaid
 flowchart LR
-  L[本地功能分支\n可逆工作副本] --> G[GitHub PR\n源码唯一权威]
-  G --> Q[quality workflow\n全测 + production build]
-  Q --> V[Vercel Preview\n同一待发布制品]
-  V --> D[桌面 / 360px / 编辑保存 / 导出\n现实验收]
-  D --> M[合并 main]
-  M --> P[Promote to Production\nxiaoshimei-full-workbench]
-  P --> R[稳定域名回读\n资源版本 + 核心路径]
-  R -.失败.-> B[上一份已验证 deployment\n即时回滚]
+  T["当前文字 T"] --> R{"身份与动作规则"}
+  P["待恢复图片任务 P"] --> R
+  C["当前画布 C"] --> R
+
+  R -->|T=P 且 C=T| OK["当前稿继续生成或发布"]
+  R -->|T=P 且 C≠T| SPLIT["图片任务属于当前文字<br/>但画布仍是另一稿"]
+  R -->|T≠P| OLD["旧图片任务进入独立恢复"]
+
+  SPLIT --> CHECK["检查任务：0 次图片调用<br/>缺记录时可能重建文字分镜"]
+  SPLIT --> REPAIR["恢复画布对应文案：0 次图片调用"]
+  SPLIT -.用户再次明确.-> PAID["继续图片步骤：可能付费"]
 ```
 
-本地 `~/.mesy/runtime/packages/xiaoshimei-studio-v2/` 只承载工作状态、生成图片与 Provider 回执；它不授予源码或生产权威。详细操作、发布 ID 与回滚点只记录在 `deployment/PRODUCTION_RUNBOOK.md`，避免在逻辑地图里形成第二份发布台账。
+截图对应 `T=P、C≠T`。因此“图片任务属于当前文字”和“当前画布不能按当前文字发布”可以同时成立，但界面必须解释这两个事实，不能把零图片调用的检查显示为“重试图片”。检查缺记录时可能调用文字模型，不可统称只读。
 
-## 2026-08-30 根治审计：旧 PASS 被现实重新打开
+## 本轮逻辑审计
 
-当前正式域名虽然命中已记录部署，但用户在真实生成中再次给出封面串入 A/B/C、内页人物截头、重复标题层级、错字、图文比例失真、内容溢出和“已配置·未验证”状态反复等现场证据。因此 R30 只保留“部署与资源一致”的事实，不再证明作品可交付；CT03–CT05 重新进入待验证。以下根因矩阵是现有 U/D 问题的上层收敛，不建立第二份 Issue Registry。
+### 复核后的修复合同（本地验证，尚未上线）
 
-| 根因 | 累计症状与原编号 | 根治机制 | 机器止损 | 当前证据 |
-|---|---|---|---|---|
-| RC1 模型被误当几何权威 | U02/U05/U10/U18，D02/D07/D08/D19/D23/D27/D29；封面带出底行、A/B/C 被截头 | 首张母版先识别真实 KV/插画分界，再按角色切片；不再固定从 2/3 下刀 | 分界证据不足即 `MOTHER_SHEET_KV_BOUNDARY_NOT_FOUND`，整组记 missing 并进入有界补绘，坏图不得进入排版 | `detectKvTemplateRegions` + 变形分界回归夹具 |
-| RC2 内容容量没有成为生成约束 | U03/U04/U06/U11-U13/U16/U19/U20，D04/D05/D12/D15/D17/D21/D26；重复“第一养”、`养养法`、长文靠缩字硬塞 | 页眉/标题/panel 按格数设确定预算；重复层级、异常叠字和过密正文退回 Page Plan 重写 | `assertXhsPublishQuality` 在任何图片付费调用前执行；DOM 文本盒溢出继续阻断导出 | 新增质量门与重试提示回归 |
-| RC3 多代 CSS 同时拥有几何 | U01/U08/U21/U22，D03/D06/D11/D14/D15/D18/D22/D28；3:4 口头成立但实际盒子被宽高竞争拉伸 | 从正式样式删除全部旧页面几何；`xhs-page-contract.css` 成为唯一可执行页面几何，HTML state 升至 v12；插图只给宽度，高度由 3:4 单轴推导 | 3:4/9:8、页边、对齐、无页码均由一个合同决定；DOM 比例与越界检查复核 | `styles.css` 零 `.html-page` 规则；271/271；本地五页实机零 overflow/零 warning，待 Preview |
-| RC4 配置存在被冒充连接成功 | 顶部状态保存后短暂“在线”，轮询又变“未验证” | Provider 配置态与成功调用态分离；只在同一 provider/base/model 的真实成功调用后登记验证 | 换 Key 或模型立即清验证；health 无成功回执只能是 `CONFIGURED_UNVERIFIED` | session-scoped verified-call 回归通过 |
-| RC5 测试和部署被误当作品验收 | U14/U15/U17，D12/D13/D20/D24；代码全绿仍可把肉眼可见坏版发上网 | 发布前必须在同一候选制品完成桌面、窄屏、逐页截图、编辑保存、真实 ZIP 与稳定域名回读 | 任一视觉/下载/核心旅程未现场通过，不允许从 Preview promote | 本地候选已逐页量测、编辑/撤销并真实下载 ZIP；Preview/Production 仍为 NOT RUN |
+范围：UI-009/010/011、ACT-009/010/011、FLOW-006、RULE-001/003/005、TEST-001/005，以及共用故障按钮、发布恢复入口。
+当前反证：错稿禁止发布时仍提示可导出；无稿件 ID 的旧故障被任意 pending 稿接纳；按钮动作未按恢复类型分流；页数写死。
 
-方法来源：约束式布局采用“模型提案 + 确定性约束/后处理”，参考 [LayoutFormer++](https://openaccess.thecvf.com/content/CVPR2023/papers/Jiang_LayoutFormer_Conditional_Graphic_Layout_Generation_via_Constraint_Serialization_and_Decoding_CVPR_2023_paper.pdf)、[LayoutRectifier](https://onlinelibrary.wiley.com/doi/10.1111/cgf.70273) 与 [Constrained Graphic Layout Generation](https://arxiv.org/abs/2108.00871)；浏览器视觉回归采用 [Playwright screenshot baselines](https://playwright.dev/docs/next/test-snapshots) 的稳定环境原则；图片取景遵循 [MDN object-fit](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/object-fit) 的裁切语义与 [Apple saliency crop](https://developer.apple.com/documentation/vision/cropping-images-using-saliency) 的主体保留原则；中文可读性与不裁字参考 [W3C 中文排版需求](https://www.w3.org/International/clreq/) 和 [WCAG Text Spacing](https://www.w3.org/WAI/WCAG21/Understanding/text-spacing)。未能从可访问的小红书官方公开文档确认统一的 3:4 尺寸条款；本项目的 1080×1440、KV 9:8、封面 1/3+2/3 是用户确认的产品合同，不冒充平台官方规范。
+| 输入状态 | 点击后的行为 | 必须保留的不变量 |
+|---|---|---|
+| 有 pending 的未知/处理中/部分结果 | 发现原操作 | 不新建图片付费操作 |
+| 零图片恢复故障但 pending 缺失 | 打开资产库找回原任务 | 不以新生成代替恢复 |
+| 登录过期 | 打开现有访问验证入口 | 不调用图片模型 |
+| 缺少本机媒体 | 打开现有资产库备份恢复入口 | 不调用图片模型 |
+| 参考图过大 | 定位现有参考图设置 | 不调用图片模型 |
+| 发布规则不允许，或画布为空 | 明确显示不可复制/导出 | 不宣称成品可用 |
+| 故障缺稿件 ID 或 ID 不匹配 | 不恢复为当前稿故障 | 不能从 pending 存在推断故障归属 |
+| 当前画布 N 页 | 恢复按钮使用实际 N 页 | 不固定写两页 |
 
-```mermaid
-flowchart TB
-  %% =====================================================================
-  %% 图例与总目标
-  %% =====================================================================
-  classDef surface fill:#FFF7ED,stroke:#C2410C,color:#431407,stroke-width:1px;
-  classDef current fill:#F8FAFC,stroke:#64748B,color:#0F172A,stroke-width:1px;
-  classDef issue fill:#FFF1F2,stroke:#E11D48,color:#4C0519,stroke-width:1px;
-  classDef debt fill:#FEF2F2,stroke:#B91C1C,color:#450A0A,stroke-width:1px,stroke-dasharray:5 3;
-  classDef target fill:#ECFDF5,stroke:#059669,color:#022C22,stroke-width:1.5px;
-  classDef phase fill:#EFF6FF,stroke:#2563EB,color:#172554,stroke-width:1.5px;
-  classDef evidence fill:#F5F3FF,stroke:#7C3AED,color:#2E1065,stroke-width:1px;
-  classDef gate fill:#FFFBEB,stroke:#D97706,color:#451A03,stroke-width:1.5px;
-  classDef stop fill:#F1F5F9,stroke:#475569,color:#0F172A,stroke-width:1px,stroke-dasharray:5 3;
+验收：动作分流调用记录、真实发布判定组合、刷新归属反例、浏览器点击与保存/重载。测试数量与标签一致不能替代这些行为证据。
 
-  GOAL["总目标：让小师妹从选题到发布包形成一条可编辑、可解释、可验收的 3:4 小红书图文生产链<br/>手机上字够大、图文有呼吸、主体不被乱裁、导出与编辑所见一致"]:::surface
-  RULE["总原则：语义与版式先决定插图角色和槽位比例，裁剪最后执行；<br/>一个页面真相、一个导出真相、每次交付必须打开真实发布包验收"]:::gate
-  GOAL --> RULE
+| 不合逻辑处 | 根因 | 修复后的唯一规则 |
+|---|---|---|
+| `IMAGE_STEP_UNKNOWN` 被当成未知故障 | Provider 码没有进入产品语义层 | 归一为 `UNKNOWN`，进入任务发现，不直接重试图片 |
+| “检查状态”与“继续生成”共用重试按钮 | 把检查恢复与图片生成混成同一个动作 | 状态检查固定 0 次图片调用；付费续步必须是独立、明确动作 |
+| `T=P、C≠T` 时两段提示互相打架 | 图片任务身份与画布发布身份只各说一半 | 同一提示同时说明“任务属当前文字、画布属另一稿、禁止发布” |
+| 未确认、正文漂移等邻接状态被说成“可导出” | 恢复卡将“不是血缘冲突”等同于“发布已获准” | 由真实发布门返回值判断；保留 UNKNOWN/IN_FLIGHT/记录缺失原始原因，所有未通过发布门的状态明确保持锁定 |
+| 恢复卡无证据地声称“还在恢复窗”或“只读” | 文案覆盖掉了已知失败原因，也未覆盖缺记录重建分镜分支 | 不推断恢复窗仍有效；明确检查零图片调用，但可能调用文字模型 |
+| 画布错稿但没有 pending operation 时无出口 | 修复按钮错误依赖图片任务存在 | 只要发布门判定 `CONTENT_LINEAGE_MISMATCH`，就提供零图片调用的文案恢复 |
+| 故障已持久化，刷新后界面却恢复成正常 | 启动流程应用 DraftRecord 时清空了同稿故障 | 只恢复与当前 `draft_record_id` 匹配的故障；跨稿故障拒绝串写 |
+| 未分类图片故障仍显示“重试图片” | 默认文案掩盖动作成本 | 未证明零调用时必须显示“可能产生图片调用” |
+| 人类 Mermaid 与机器地图节点含义漂移 | 两份地图只有形式关联，没有可执行一致性约束 | 稳定 ID、标签与含义由测试逐项对齐 |
+| `task / impact / reality` 各自发布状态结论 | 多个权威面互相覆盖 | 全部退为指向本文件的只读入口；机器状态只在 JSON 投影 |
+| 付费图片规则曾错误约束原文输入 `UI-001` | 关系边连错了对象 | `RULE-001` 只约束图片生成、状态检查和付费续步 `UI-003/010/011` |
 
-  %% =====================================================================
-  %% A. 当前完整逻辑
-  %% =====================================================================
-    subgraph NOW["A｜当前工作台完整逻辑：Reality readback 2026-08-28"]
-    direction TB
+本表覆盖当前交付主链及截图可达的一阶相邻节点；它不声称软件从此不存在任何未知缺陷。
 
-    subgraph SURF["A1｜用户表面"]
-      direction LR
-      N01["新创作"]:::surface
-      N02["研究选题"]:::surface
-      N03["资产库"]:::surface
-      N04["账号档案"]:::surface
-    end
+## 当前现实
 
-    subgraph CREATE["A2｜新创作五步旅程"]
-      direction LR
-      C01["1 原文<br/>主题、素材、历史、要求"]:::current
-      C02["2 文字<br/>生成草稿、人工确认"]:::current
-      C03["3 配图<br/>页面规划、母版生成"]:::current
-      C04["4 排版<br/>智能版式或精细画布"]:::current
-      C05["5 发布包<br/>PNG、文案、JSON、manifest"]:::current
-      C01 -->|text brief| C02 -->|confirmed draft| C03 -->|content package| C04 -->|page render| C05
-    end
+| 层级 | 回读 |
+|---|---|
+| 产品意图 | 以上九问图 |
+| 本地机制 | 2026-09-05：新工作台主链 599/599 全回归 + build PASS；默认入口补丁另有 scoped 19/19 + 599/599 + build PASS。文字确认前图片调用 0、checkpoint 前置、同稿恢复、旧 pending 零 Provider 打开和导出 identity guard 均有机械与浏览器证据 |
+| 本地页面 | 新工作台采用左页 / 中画布 / 右属性结构，复用同一 DraftRecord v3、Provider、media store 与导出链；默认 `index.html` 与 `studio.html` 进入新工作台，旧 UI 仅保留在 `legacy.html`。本地与 Preview/Production 均验证 1440px/360px、保存刷新、PNG 导出与恢复协议 |
+| 已发布源码 | 默认入口功能候选 `d069c63a3dd2700e6806cd5a233e3d9fee06fde8`；PR #8 的运行时合并提交为 `aa7eccbb4c264b1fd4d4138f2b6dcf51a53aa8be`；promote 时它是 GitHub main，后续仅文档提交不改变运行制品；候选与运行提交 tree 同为 `caa584841c65e65107118ee0303863e10030b8e2` |
+| Preview 现实 | `dpl_6wuFvwKzP964uJic9xEKGnc8XkxR` READY：根 `/` 与 `/studio.html` 为同一新工作台，`/legacy.html` 保留旧 UI；Provider API 路由仍通。更早新工作台 Preview 的文字、配图 mock、恢复三条 Journey、1440/360 与资产 Hash 已通过，真实付费图片调用 0 |
+| 线上运行证明 | 正式域名已 promote 到同一 Production-staging `dpl_E3SiFox5dtUpYk4mJdT1uFSRcD1E`，gitCommitSha=`aa7eccbb...`；根 `/` 与 `/studio.html` 同一新工作台，`/legacy.html` 保留旧 UI；主 JS/CSS 与本地 build SHA-256 逐字节一致；health 返回 SERVER_MANAGED、STUDIO_ACCESS_SESSION、图片账本 READY，attestation candidate 精确绑定 `aa7eccbb...` |
+| 消费者现实 | Production 与默认入口切换已经完成；稳定根路径三条自动浏览器 Journey 与 1440/360 Reality 均 PASS，真实付费图片调用 0。health 当前仍 `authenticated=false`，尚未取得小师妹本人独立设备直接反馈或已认证 Studio 会话的真实 server-managed fresh-user 旅程，因此 `HANDOFF_READY` / `CONSUMER_VALIDATED` 仍未证明 |
 
-    subgraph TEXTGEN["A3｜文字与页面计划"]
-      direction LR
-      T01["本地 HTTP Provider<br/>/text-draft"]:::current
-      T02["结构化草稿<br/>标题、正文、页面角色"]:::current
-      T03{"人工确认文字？"}:::gate
-      T04["Page Plan<br/>cover / content pages<br/>hero / support / detail"]:::current
-      T01 --> T02 --> T03
-      T03 -->|是，才允许调图| T04
-      T03 -->|否| C02
-    end
+发布、续签及已核验回退点见 [正式发布记录](deployment/PRODUCTION_RUNBOOK.md#2026-09-05-新可编辑工作台默认入口正式发布)。部署完成和用户生产可用是两个不同事实；源头 Skills 的可信消费与正式激活也不由这次产品部署代签。
 
-    subgraph IMAGEGEN["A4｜当前插图生产链"]
-      direction LR
-      I01["buildIllustrationUnits<br/>scene / action / detail / comparison"]:::current
-      I02["母版1：上两行合并 9:8 KV + 底行 A/B/C<br/>母版2起：3×3 D–L，按需续页"]:::current
-      I03["图像模型生成母版"]:::current
-      I04["Sharp 先识别真实 KV/A-B-C 分界再按角色切片<br/>分界不可信则 fail closed；KV 1080×960；插图 1080×1440"]:::current
-      I05["面板资产<br/>保留 role / aspect / presence / edge metadata"]:::current
-      I01 --> I02 --> I03 --> I04 --> I05
-    end
+## 使用方式
 
-    subgraph PACKAGE["A5｜内容包与当前版式决策"]
-      direction LR
-      PAK01["Content Package<br/>pages + panels + image assets"]:::current
-      PAK02["Page Plan + Design Program v1<br/>整组构思：composition / focal order / rhythm<br/>image edge/scale / title measure / whitespace"]:::current
-      PAK03["design-program.mjs<br/>枚举与范围约束；semantic hero 优先<br/>旧稿确定性回退"]:::current
-      PAK04["html_state v12 + 单一 page contract<br/>设计程序 + 用户版式/取景/对象编辑<br/>同一可回载状态"]:::current
-      PAK05["DOM / 像素几何评分<br/>overflow、重叠、比例、图片存在性"]:::current
-      PAK01 --> PAK02 --> PAK03 --> PAK04 --> PAK05
-    end
+出现问题时只做四件事：
 
-    subgraph DUAL["A6｜两套整页真相"]
-      direction LR
-      H01["HTML 智能版式<br/>cover-poster / editorial-notes<br/>visual-story / spatial-list"]:::current
-      H02["DOM 文字可编辑<br/>Grid/Flex + container units"]:::current
-      H03["HTML 图片取景<br/>focalX / focalY / zoom<br/>粗糙 72×72 边缘色检测"]:::current
-      F01["Fabric 精细画布<br/>绝对坐标对象、拖动缩放"]:::current
-      F02["独立状态与独立导出路径"]:::current
-      PAK05 --> H01 --> H02 --> H03
-      PAK05 --> F01 --> F02
-    end
+1. 把反馈连到最接近的 `UI / ACT / FLOW`。
+2. 沿边检查相关 `API / STORE / RULE`。
+3. 先补能复现现实的 `TEST`，再改代码。
+4. 回到同一真实页面重走旅程；页面没好，就不写 `RESOLVED`。
 
-    subgraph CROPNOW["A7｜当前图片适配"]
-      direction LR
-      CR01["生成源与消费槽共用 3:4；封面共用 9:8"]:::current
-      CR02["默认 zoom=100%；主体焦点只改变取景"]:::current
-      CR03["单一 page contract 决定槽位与页边"]:::current
-      CR04["自由编辑只保存有界 delta<br/>不重写规范几何"]:::current
-      CR01 --> CR02 --> CR03 --> CR04
-    end
-
-    subgraph EXPORTNOW["A8｜导出、保存与反馈"]
-      direction LR
-      E01["HTML：html2canvas<br/>检查画布非空与图片区域"]:::current
-      E02["Fabric：导出 PNG<br/>当前缺非空与图片区域检查"]:::debt
-      E03["publish-package<br/>只验 PNG 签名与尺寸"]:::debt
-      E04["JSZip：5 张 PNG<br/>发布文案、content、manifest"]:::current
-      E05["localStorage 资产库"]:::current
-      E06["24h / 72h / 7d Reality Feedback<br/>尚未反哺版式与裁剪 fitness"]:::debt
-      E01 --> E03
-      E02 --> E03
-      E03 --> E04 --> E05 --> E06
-    end
-
-    subgraph OTHERFLOW["A9｜其他工作流"]
-      direction LR
-      R01["研究选题<br/>/api/jobs/research 轮询"]:::current
-      R02["选中题目回填新创作"]:::current
-      L01["资产库<br/>历史内容、发布包、反馈"]:::current
-      A01["账号档案<br/>人设锁、Provider、Keychain"]:::current
-      B01["Workspace<br/>备份、恢复、生成设置"]:::current
-      R01 --> R02 --> C01
-      E05 --> L01
-      A01 --> C01
-      B01 --> C01
-    end
-
-    N01 --> C01
-    N02 --> R01
-    N03 --> L01
-    N04 --> A01
-    C02 --> T01
-    T04 --> I01
-    I05 --> PAK01
-    C04 --> H01
-    C04 --> F01
-    H03 --> CR01
-    F02 --> CR01
-    H03 --> E01
-    F02 --> E02
-    E04 --> C05
-  end
-
-  RULE --> N01
-
-  %% =====================================================================
-  %% B. 全量问题，逐条保留编号并挂到现状与修复域
-  %% =====================================================================
-  subgraph PROBLEMS["B｜全量问题清单：用户反馈 + 现场代码与发布包发现"]
-    direction TB
-
-    subgraph USERISSUES["B1｜用户明确反馈"]
-      direction TB
-      U01["U01 整体 UI、排版、字体不够精致｜挂点 A6｜修复 P4/P5"]:::issue
-      U02["U02 竖屏插图像被强裁成横屏｜挂点 A4/A7｜修复 P2/P3"]:::issue
-      U03["U03 图文太规矩、PPT 感、少灵动与人味｜挂点 A5/A6｜修复 P4"]:::issue
-      U04["U04 图文太贴边、缺安全区和呼吸｜挂点 A5/A6｜修复 P4/P7"]:::issue
-      U05["U05 图片白边；需要稳健去边，不是盲目放大｜挂点 A4/A7｜修复 P2/P3"]:::issue
-      U06["U06 默认版式没有吃透 Desktop/ref｜挂点 A5/A6｜修复 P0/P4/P7"]:::issue
-      U07["U07 改动看不出；不清楚旧稿是否需重新生成｜挂点 A6/状态持久化｜修复 P1/P5"]:::issue
-      U08["U08 插图和文字偏小，不适合手机｜挂点 A6｜修复 P4/P7"]:::issue
-      U09["U09 图应可移动可裁剪，文字可编辑｜挂点 A6/A7｜修复 P3/P5"]:::issue
-      U10["U10 主体构图不协调，人物、手、动作、道具被切｜挂点 A4/A7｜修复 P2/P3"]:::issue
-      U11["U11 HTML 智能排版会乱｜挂点 A5/A6｜修复 P4/P5"]:::issue
-      U12["U12 页面底部多次溢出、截断或留大空洞｜挂点 A5/A6｜修复 P4/P7"]:::issue
-      U13["U13 换个节奏每种都跑调｜挂点 A5/A6｜修复 P4/P5"]:::issue
-      U14["U14 下载发布包曾出现整张空白｜挂点 A8｜修复 P6/P7"]:::issue
-      U15["U15 交付前没有完整自检和 dogfood｜挂点 A8/全旅程｜修复 P0/P7"]:::issue
-      U16["U16 总差点意思：缺主角、重点、节奏、图文语义配对｜挂点 A3/A5/A6｜修复 P1/P4"]:::issue
-      U17["U17 常规修复仍反复索要审批，流程摩擦大｜挂点执行流程｜修复 P8"]:::issue
-      U18["U18 图片裁剪与图文比例仍差｜挂点 A4/A5/A7｜修复 P2/P3/P4"]:::issue
-      U19["U19 小红书模块未映射成 HTML 能力｜挂点 A6｜修复 P1/P4"]:::issue
-      U20["U20 成品仍出现手机无意义小字｜挂点 A5/A6｜修复 P4/P7"]:::issue
-      U21["U21 圆角矩形四角不对称且插图有灰边｜挂点 A6/A7/A8｜修复 P3/P4/P6"]:::issue
-      U22["U22 内页圆角过重、交错图文未顺边对齐、裁剪入口不显眼｜挂点 A5-A7｜修复 P3/P4/P5"]:::issue
-    end
-
-    subgraph DISCOVERED["B2｜现场进一步发现"]
-      direction TB
-      D01["D01 HTML 与 Fabric 各自拥有整页状态和导出真相｜挂点 A6/A8｜修复 P1/P5/P6"]:::debt
-      D02["D02 同图被母版切片、面板归一化、编辑器三次重构｜挂点 A4/A7｜修复 P1/P2/P3"]:::debt
-      D03["D03 RESOLVED_LOCAL v13｜设计程序已加入整组视线顺序、节奏、图像份量、方向与留白｜挂点 A5｜待真实视觉签字"]:::gate
-      D04["D04 固定百分比 frame + 字符数估高，不测真实 DOM｜挂点 A5｜修复 P4"]:::debt
-      D05["D05 QA 不看视觉重量、主体完整、安全边距、留白节奏｜挂点 A5/A8｜修复 P4/P7"]:::debt
-      D06["D06 全局 cover/overscan 混淆 hero、贴纸、细节、背景｜挂点 A7｜修复 P1/P3"]:::debt
-      D07["D07 固定 3×3 且全格 3:4，无法服务多种目标槽位｜挂点 A4｜修复 P2"]:::debt
-      D08["D08 固定 2% 内缩不识别真实网格线和背景｜挂点 A4｜修复 P2"]:::debt
-      D09["D09 主体检测仅低分辨率颜色差，无脸、手、动作、道具｜挂点 A6/A7｜修复 P3"]:::debt
-      D10["D10 缺统一 Asset IR：角色、alpha/subject/face/action/prop bbox、比例、fit、crop｜挂点 A4-A7｜修复 P1"]:::debt
-      D11["D11 PARTIAL v13｜已有受约束 Design Program；Asset bbox 与现实反馈 fitness 仍缺｜挂点 A5/A6/A8｜继续 P3/P8"]:::gate
-      D12["D12 测试重代码与几何，缺视觉金图、手机缩略、解压打开与按钮全旅程｜挂点 A8｜修复 P7"]:::debt
-      D13["D13 Fabric 导出缺 blank/flat/image-region QA｜挂点 A8｜修复 P6"]:::debt
-      D14["D14 旧 html/editor state 可保留旧版式，代码改了旧稿未迁移｜挂点 A6｜修复 P1/P5"]:::debt
-      D15["D15 CSS 多层覆写、重复选择器、固定行高导致漂移｜挂点 A6｜修复 P4"]:::debt
-      D16["D16 contentEditable 曾观察 React 崩溃风险，当前需回归复验｜挂点 A6｜修复 P5/P7"]:::debt
-      D17["D17 REOPENED_PRODUCTION / PASS_LOCAL_CANDIDATE｜旧正式版被用户现场坏版推翻；新单一页面合同已本地逐页通过，待新 Preview｜挂点 A5/A6"]:::gate
-      D18["D18 没有明确先定槽位再裁剪，裁剪被用来补救坏比例｜挂点 A5/A7｜修复 P1/P3"]:::debt
-      D19["D19 生成提示词没有输出可裁剪余量与结构化 bbox｜挂点 A3/A4｜修复 P2/P3"]:::debt
-      D20["D20 Reality feedback 已有但未进入 layout/crop fitness｜挂点 A8｜修复 P8"]:::debt
-      D21["D21 字号 Gate 只检查正文，漏掉眉题、提示、品牌与页码｜挂点 A5/A8｜修复 P4/P7"]:::debt
-      D22["D22 旧 figure 样式残留非对称 radius/shadow，覆盖角色化媒体策略｜挂点 A6/A7｜修复 P3/P4"]:::debt
-      D23["D23 母版按前 N 个几何格顺序绑定，空白格会被当成页面插图并使后续图错位｜挂点 A4｜修复 P2/P7"]:::debt
-      D24["D24 PASS_LOCAL_RECONFIRMED｜新候选在手机端真实打开编辑侧栏、生成并保存 ZIP；实物可解且 5×1080×1440｜挂点 A8"]:::gate
-      D25["D25 对象点击事件冒泡会清空选中态，使移动/缩放控件看似存在却不可用｜挂点 A6｜修复 P5/P7"]:::debt
-      D26["D26 编辑视口未暴露封面文字与图片间距问题，真实导出 PNG 才看到贴撞｜挂点 A6/A8｜修复 P4/P7"]:::debt
-      D27["D27 母版固定 3:4 与内页近方形槽位冲突，再叠加全局 116% overscan，白边与主体过大只能二选一｜挂点 A4/A5/A7｜修复 P1-P4"]:::debt
-      D28["D28 取景能力藏在通用编辑手势里且缩放无产品上限，用户无法发现也无法稳定控制｜挂点 A6/A7｜修复 P3/P5/P7"]:::debt
-      D29["D29 REOPENED_PRODUCTION / PASS_MECHANISM_LOCAL｜旧固定 2/3 被现实推翻；新真实 KV 分界检测与失败补绘已回归，待 Preview BYOK｜挂点 A4/A8"]:::gate
-      D30["D30 PASS_LOCAL｜Provider 配置存在不再冒充已验证；仅成功生成调用可进入已验证态｜挂点 A1/A8"]:::gate
-      D31["D31 PASS_LOCAL｜重复层级、异常叠字与超容量文案在付费图片调用前退回重写｜挂点 A3/A5"]:::gate
-      D32["D32 PASS_LOCAL_REALITY｜唯一页面几何合同、3:4 单轴推导、DOM 文本/越界门与真实导出已回读｜挂点 A5/A6/A8"]:::gate
-    end
-
-    ICROP["问题簇 CROP<br/>U02 U05 U10 U18<br/>D02 D06-D10 D18 D19"]:::issue
-    ILAYOUT["问题簇 LAYOUT<br/>U01 U03 U04 U06 U08 U11-U13 U16 U19 U20<br/>D03-D05 D11 D15 D17 D21"]:::issue
-    ISTATE["问题簇 STATE/EDITOR<br/>U07 U09<br/>D01 D14 D16"]:::issue
-    IEXPORT["问题簇 EXPORT/QA<br/>U14 U15<br/>D12 D13"]:::issue
-    ITRANSPORT["问题簇 PUBLIC TRANSPORT<br/>D24 D29"]:::issue
-    IPROCESS["问题簇 PROCESS/LEARNING<br/>U17 D20"]:::issue
-
-    U02 & U05 & U10 & U18 --> ICROP
-    D02 & D06 & D07 & D08 & D09 & D10 & D18 & D19 --> ICROP
-    U01 & U03 & U04 & U06 & U08 & U11 & U12 & U13 & U16 & U19 & U20 --> ILAYOUT
-    D03 & D04 & D05 & D11 & D15 & D17 & D21 --> ILAYOUT
-    U21 --> ICROP
-    U21 --> ILAYOUT
-    U22 --> ICROP
-    U22 --> ILAYOUT
-    U22 --> ISTATE
-    D22 --> ICROP
-    D22 --> ILAYOUT
-    D23 --> ICROP
-    D24 --> IEXPORT
-    D25 --> ISTATE
-    D26 --> ILAYOUT
-    D26 --> IEXPORT
-    D27 --> ICROP
-    D27 --> ILAYOUT
-    D28 --> ICROP
-    D28 --> ISTATE
-    D29 --> ITRANSPORT
-    D24 --> ITRANSPORT
-    D30 --> ITRANSPORT
-    D31 --> ILAYOUT
-    D32 --> ILAYOUT
-    D32 --> IEXPORT
-    U07 & U09 --> ISTATE
-    D01 & D14 & D16 --> ISTATE
-    U14 & U15 --> IEXPORT
-    D12 & D13 --> IEXPORT
-    U17 & D20 --> IPROCESS
-  end
-
-  I01 -.-> ICROP
-  PAK02 -.-> ILAYOUT
-  H01 -.-> ISTATE
-  E03 -.-> IEXPORT
-  E06 -.-> IPROCESS
-
-  %% =====================================================================
-  %% C. 目标架构：唯一推荐，但必须由原型和真实包证据转正
-  %% =====================================================================
-  subgraph TARGET["C｜唯一推荐目标：HTML_CANONICAL_HYBRID（待原型与真实发布包 Gate 转正）"]
-    direction TB
-    DEC0["Decision Evidence 当前结论<br/>BLOCKED · FULL_CONTRACT_REQUIRED<br/>因此这里只是唯一推荐假设，不是正式默认裁决"]:::gate
-
-    subgraph CANON["C1｜一个规范数据真相"]
-      direction LR
-      IR01["Semantic Content IR<br/>Page → Header → Title → Lede → Sections → Highlight → Figure → Footer"]:::target
-      IR02["Asset IR<br/>media_role · src · source_kind<br/>alpha/subject/face/action/prop bbox<br/>preferred_aspects · fit_policy · crop_candidates · manual_crop"]:::target
-      IR03["Page Composition IR<br/>语义 block tree + density budget<br/>不把绝对 x/y 当页面真相"]:::target
-      IR04["Versioned Migration<br/>旧稿显式 reapply/migrate，禁止静默沿用旧布局"]:::target
-      IR01 --> IR03
-      IR02 --> IR03
-      IR03 --> IR04
-    end
-
-    subgraph ROLE["C2｜图片角色决定适配策略"]
-      direction LR
-      MR01["hero_scene<br/>允许 cover，但主体/动作安全"]:::target
-      MR02["inline_sticker<br/>透明去边 + contain<br/>不强塞照片卡"]:::target
-      MR03["evidence_detail<br/>保留手、道具、细节<br/>contain 或 fit-width"]:::target
-      MR04["texture_background<br/>允许 cover"]:::target
-      MR05["mother_tile<br/>先识别网格/背景去边<br/>再进入角色策略"]:::target
-    end
-
-    subgraph XHSHTML["C3｜小红书图文模块 → HTML 语义模块"]
-      direction LR
-      XM01["3:4 页面与安全区<br/>article.xhs-page"]:::target
-      XM02["眉题/色条<br/>header + eyebrow"]:::target
-      XM03["主标题<br/>h1"]:::target
-      XM04["导语<br/>p.lede"]:::target
-      XM05["每个核心观点<br/>section[data-role=step]"]:::target
-      XM06["步骤标题 + 正文<br/>h2 + p"]:::target
-      XM07["强调短语<br/>mark"]:::target
-      XM08["角色化插图<br/>figure[data-media-role]"]:::target
-      XM09["页脚/页码<br/>footer"]:::target
-      XM10["装饰<br/>CSS background / pseudo-element<br/>不做成正文位图"]:::target
-      XM01 --> XM02 --> XM03 --> XM04 --> XM05 --> XM06 --> XM07 --> XM08 --> XM09 --> XM10
-    end
-
-    subgraph ENGINE["C4｜扬长避短的渲染与编辑"]
-      direction LR
-      EN01["HTML 为整页 canonical renderer<br/>CSS Grid/Flex + container queries<br/>真实 DOM 测量与自然回流"]:::target
-      EN02["文字先继续 DOM 编辑<br/>补 error boundary、undo、回归<br/>只有需求证据出现才上 Lexical"]:::target
-      EN03["选中图片打开局部 crop overlay<br/>拖动、缩放、旋转<br/>百分比裁剪写回 Asset IR"]:::target
-      EN04["Sharp 服务<br/>网格边界、alpha/背景 trim<br/>attention/entropy 仅产生候选"]:::target
-      EN05["Fabric/Konva 降级为可选局部精修<br/>不能再拥有第二套整页真相"]:::target
-      EN01 --> EN02
-      EN01 --> EN03
-      EN03 --> EN04
-      EN01 --> EN05
-    end
-
-    subgraph EXPORTTARGET["C5｜一个导出真相"]
-      direction LR
-      EX01["等待 fonts.ready 与全部图片 ready"]:::target
-      EX02["从 canonical DOM 导出<br/>先保留 html2canvas；对比 html-to-image"]:::target
-      EX03["逐页检查非空、非纯色、文字区域、每个 figure 像素区"]:::target
-      EX04["生成 ZIP 后自动解压检查<br/>再用 Finder/Preview 打开真实 PNG"]:::target
-      EX05["编辑器、预览、发布包使用同一 content/layout/crop 状态"]:::target
-      EX01 --> EX02 --> EX03 --> EX04 --> EX05
-    end
-
-    DEC0 --> IR01
-    IR02 --> MR01 & MR02 & MR03 & MR04 & MR05
-    IR03 --> XM01
-    XM10 --> EN01
-    MR01 & MR02 & MR03 & MR04 & MR05 --> EN03
-    EN01 --> EX01
-  end
-
-  %% =====================================================================
-  %% D. 备料后实施的唯一流程
-  %% =====================================================================
-  subgraph REPAIR["D｜从备料到现实闭环的修复流程"]
-    direction LR
-    P0["P0 冻结基线<br/>Desktop/ref 两张参考<br/>当前 5 页发布包与 content JSON<br/>桌面/窄屏截图、问题编号、旧编辑状态"]:::phase
-    P1["P1 统一合同<br/>Content IR + Asset IR + Page Composition IR<br/>schema version + 非破坏迁移"]:::phase
-    P2["P2 修母版切片<br/>吸收 huashu bbox/density/alpha 轮子<br/>Sharp 检测真实格线、背景、白边<br/>输出 tile metadata"]:::phase
-    P3["P3 角色化构图<br/>media_role → slot ratio → crop candidate<br/>react-easy-crop 手动微调<br/>保存百分比 crop 与 undo"]:::phase
-    P4["P4 HTML 语义排版<br/>模块库 + 编辑决策层<br/>真实 DOM 测量、手机字号、安全区、density/overflow solver<br/>内容过载时缩文、换版或拆页"]:::phase
-    P5["P5 编辑器迁移<br/>HTML 成为整页主引擎<br/>Fabric 只留 legacy/局部精修<br/>旧稿显式迁移、文字编辑稳定性"]:::phase
-    P6["P6 导出收口<br/>单一 DOM export<br/>字体/图片 ready、每页内容检查<br/>ZIP 解压与系统预览 readback"]:::phase
-    P7["P7 全旅程验收<br/>单元 + visual golden + 360px 手机缩略<br/>所有按钮 dogfood、5 页发布包逐张打开<br/>与 Desktop/ref 做结构和节奏对照"]:::phase
-    P8["P8 Reality 学习<br/>实际使用者接受后再看 24h/72h/7d<br/>把真实阅读/互动反馈回灌 layout/crop fitness<br/>重复 Episode 足够时才触发 gene-skill"]:::phase
-    P0 --> P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
-  end
-
-  ICROP --> P2
-  ICROP --> P3
-  ILAYOUT --> P4
-  ISTATE --> P1
-  ISTATE --> P5
-  IEXPORT --> P6
-  IEXPORT --> P7
-  IPROCESS --> P8
-  P1 --> IR01
-  P2 --> MR05
-  P3 --> EN03
-  P4 --> EN01
-  P5 --> EN05
-  P6 --> EX01
-
-  subgraph PRACTICE["D2｜2026-08-27 实践回灌：当前证据直接改写下一步"]
-    direction TB
-    EV01["R01 P3 PASS｜inline_sticker 右移 58.4%→62.4%，undo 回到 58.4%；zoom=1 保持 contain"]:::evidence
-    EV02["R02 P4 PARTIAL｜第 3 页两种节奏均 720/720、无页脚碰撞；用户判定方向正确"]:::evidence
-    EV03["R03 A12 FAIL｜第 3 页眉题 11.6px、页脚 10.7px；正文虽 20.3px，但小字 Gate 漏检"]:::stop
-    EV04["R04 A13 FAIL｜第 1/5 页同构；第 2/4 页视觉重量失衡、图小空洞大，页面角色未充分分流"]:::stop
-    EV05["R05 A10 FAIL｜现场 computed style：四角 radius 不等且 hero 残留 shadow；用户观察到灰边"]:::stop
-    EV06["R06 A15 BLOCKED｜首次真实下载等待超时；不得声称发布包修复，须修后重跑 ZIP/PNG 实物验收"]:::stop
-    EV07["R07 P4 PASS（本地）｜5 页按内容角色分流：hook 封面、judgment 主次、method 纵向三段、pitfall 双区、closing 图像叙事；均 720/720 且无告警"]:::evidence
-    EV08["R08 A12 PASS（结构/运行时）｜导出字号下限约 48px，手机等效约 16px；删除微型品牌字，compact 不再突破正文下限"]:::evidence
-    EV09["R09 A10 PARTIAL｜现场 computed style 四角统一 2.8cqw、shadow=none、背景透明；自适应去边测试 PASS；新 ZIP 实物边缘仍待验"]:::gate
-    EV10["R10 A14 PASS（本地）｜图片焦点 58.4%→62.4%→undo 58.4%；文字编辑提交与 undo 回读，最终恢复原文"]:::evidence
-    EV11["R11 P6 PASS（应用内）｜导出先后暴露第 2/3/4 页脚碰撞；逐项修正安全预算后，5 页像素 Gate 与 ZIP 组装进入 COMPLETE"]:::evidence
-    EV12["R12 A15 PARTIAL｜浏览器未暴露 blob download 事件，文件系统未发现新 ZIP；旧 2026-08-25 发布包不能充当新证据"]:::gate
-    EV13["R13 A17 PARTIAL｜已走版式切换、换构图、翻页、图像移动、文字编辑、undo、导出；破坏性删除未执行，窄屏与发布包实物闭环未全 PASS"]:::gate
-    EV14["R14 P2/A15 PASS｜扫描母版全部 9 格并过滤背景格；真实有效槽位为 1,2,4,5,6,7,8，修复第 2 页空图与后续错位"]:::evidence
-    EV15["R15 P6/A15 PASS｜下载改为本地 HTTP attachment + 服务端原子落盘；按钮现场生成新 ZIP，Desktop 实物可读"]:::evidence
-    EV16["R16 P5/A14 PASS｜对象选择不再被冒泡清空；模块位移状态 0→2cqw，undo 回 0；文字与图片焦点编辑均可撤销"]:::evidence
-    EV17["R17 P4/A13 PASS｜导出 PNG 暴露封面贴撞后修正 portrait 专用尺寸；实测文字到图片间距约 23.6px，无溢出告警"]:::evidence
-    EV18["R18 P7 PASS（本地发布包）｜225/225 tests、build PASS、ZIP 六文件无 CRC 错误；3 张 PNG 均 1080×1440 并逐张目检"]:::evidence
-    EV19["R19 A4/A7 PASS（现实重放）｜公网 API 不再给各页重复整张母版；2 张已付费母版经 Sharp 主体检测与有界去边切为 12 个独立 JPEG，页面回读 12 个不同 Hash，刷新后无存储告警"]:::evidence
-    EV20["R20 production_applied PASS｜Vercel dpl_2Zrubh7bf4nALw4uoUQVjDEJurn3 READY，稳定别名已指向最终 CSS/API；窄屏圆角 computed style 为对称 14px"]:::evidence
-    EV21["R21 A15/P7 PASS（公网渲染实物）｜235/235 tests、build PASS；生产页面回载后导出 5 页 ZIP，8 个文件 CRC 全 PASS，5 张 PNG 均 1080×1440，逐页 contact sheet 目检无九宫格/白边/空图"]:::evidence
-    EV22["R22 D24 REMAINS｜应用内 Blob 按钮会进入“再次下载发布包”，但内置浏览器仍不能给出文件系统路径；本轮用同一生产 UI 的 headless Chromium download/saveAs 取得可回读 ZIP，按钮文案不得单独算落盘"]:::gate
-    EV23["R23 provenance PASS｜最终 content.json 保留完整原始素材、真实生成正文、5 标签、5 页与 12 个独立图片源；ZIP Hash=8f5199b51adb78831e187eb04c81d5efe413e04c0b0b74bd4a5e02e0a460da14"]:::evidence
-    EV24["R24 P7/A10-A17 PASS（本地完整 dogfood）｜先文字确认、后 2 次付费母版调用（¥0.44），10 插画单元组装 5 页；保存/刷新、360px、编辑/undo、复制、下载、ZIP 解包与逐页目检全走通；256/256 tests + build PASS"]:::evidence
-    EV25["R25 当前正式版漂移｜本轮动态分隔线、完整边带清理、语义换行与复制回退仅在本地构建；既有 Vercel 部署未包含最新修复，production_applied 不得沿用旧 PASS"]:::gate
-    EV26["R26 A10-A17 PASS_LOCAL｜新母版=9:8 KV + A/B/C，封面=1/3 标题 + 2/3 KV；参考橙落地；258/258 tests + build；桌面/360px 五页无 overflow/告警，改字/移动/undo/保存刷新回读通过；未付费生图、未部署"]:::evidence
-    EV27["R27 生产事故纠偏 PASS_LOCAL｜线上日志证实 generate-images 函数 200、浏览器 Failed to fetch；切片响应加入自适应字节预算与 4 MB 总闸；公网下载移除 local-only 探测；v11 迁移清掉旧标题/面板位移，v14 绑定左右列与 3:4 明确宽高。264/264 tests + build；五页窄屏无告警；新 ZIP CRC PASS、5×1080×1440 逐页目检，Hash=1dc44be370ccc2db178e85e74a8f61fa659e879708e76c6c6067ba9232f92d31。尚未部署、未重跑公网付费生图。"]:::gate
-    EV28["R28 D29 PASS_PREVIEW｜dpl_EkcAFfJdCmcBxjzQCMkkwJdtF7ZE 用 BYOK 完成真实付费母版；缺失 page-4-hero 在同请求有界补绘，3 页/3 图回到浏览器并可编辑"]:::evidence
-    EV29["R29 D17/D24/A14/A15 PASS_PREVIEW｜最终 dpl_E3eLycjdGTLSRXRKgtTJVYZmrJG4：268/268 + build；长标题无 overflow；undo→redo 恢复原编辑；保存刷新保留；Chrome 下载 ZIP 实物 1,560,041 bytes，CRC PASS，5×1080×1440，sha256=da279675ee39ba78e5f756e0c86dc7b2eb3e6cdb01bed920afda55dbb6ea5438"]:::evidence
-    EV30["R30 production_applied PASS｜Git main=e1e775f；promote 最终候选后 Production=dpl_Cj8uAE9utVX3oyLf6auJHMi824kj Ready；稳定域名 HTML 200、health 200、无 Key 401；线上 CSS/JS 与本地已验收构建 SHA-256 完全一致；rollback=dpl_Afw8Q5Vai578FVs11waZvd24CYBp"]:::evidence
-    EV31["R31 根治候选 PASS_LOCAL_REALITY｜styles.css 不再含任何 html-page 几何，3:4 单轴推导；271/271 + build；476px 实机五页均 3:4、KV 9:8、内图 3:4、零 overflow/告警；改字/移动/undo；手机侧栏真实下载 ZIP，8 文件可解、5×1080×1440 并打开目检"]:::evidence
-    EV01 --> P5
-    EV02 --> P4
-    EV03 --> U20
-    EV03 --> D21
-    EV04 --> D03
-    EV04 --> D05
-    EV05 --> U21
-    EV05 --> D22
-    EV06 --> P6
-    EV07 --> P4
-    EV08 --> A12
-    EV09 --> A10
-    EV10 --> A14
-    EV11 --> P6
-    EV11 --> A15
-    EV12 --> A15
-    EV13 --> A17
-    EV14 --> D23
-    EV14 --> P2
-    EV15 --> D24
-    EV15 --> P6
-    EV16 --> D25
-    EV16 --> P5
-    EV17 --> D26
-    EV17 --> P4
-    EV18 --> P7
-    EV18 --> A15
-    EV19 --> P2
-    EV19 --> A10
-    EV19 --> A11
-    EV20 --> A10
-    EV21 --> A15
-    EV21 --> P7
-    EV22 --> D24
-    EV22 --> P6
-    EV23 --> A15
-    EV24 --> P7
-    EV24 --> A10
-    EV24 --> A11
-    EV26 --> A10
-    EV26 --> A11
-    EV26 --> A13
-    EV26 --> A14
-    EV26 --> A16
-    EV26 --> A17
-    EV27 --> D17
-    EV27 --> D24
-    EV27 --> D29
-    EV27 --> P4
-    EV27 --> P6
-    EV27 --> P7
-    EV28 --> D29
-    EV28 --> P2
-    EV29 --> D17
-    EV29 --> D24
-    EV29 --> A14
-    EV29 --> A15
-    EV29 --> P7
-    EV30 --> CT03
-    EV30 --> CT04
-    EV31 --> D17
-    EV31 --> D24
-    EV31 --> D32
-    EV31 --> CT01
-    EV31 --> CT02
-    EV24 --> A12
-    EV24 --> A13
-    EV24 --> A14
-    EV24 --> A15
-    EV24 --> A16
-    EV24 --> A17
-    EV25 --> CT03
-  end
-
-  %% =====================================================================
-  %% E. Skills、资料与轮子
-  %% =====================================================================
-  subgraph MATERIALS["E｜各环节 Skills、资料与可吸收轮子"]
-    direction TB
-
-    subgraph SKILLS["E1｜Skills 路由"]
-      direction LR
-      S01["architecture-compiler<br/>本图、Unit/Edge/Authority/Rollback"]:::evidence
-      S02["decision-evidence<br/>默认架构候选与 FULL decision gate"]:::evidence
-      S03["research-engineering<br/>官方资料、GitHub 轮子、反证"]:::evidence
-      S04["design-experience + design-taste-frontend<br/>编辑判断、参考对照、桌面/窄屏审美验收"]:::evidence
-      S05["engineering-systems<br/>schema、迁移、渲染、导出实现"]:::evidence
-      S06["product-design:audit<br/>旅程、交互与可用性审计"]:::evidence
-      S07["browser / agent-browser-verify<br/>按钮全旅程与截图"]:::evidence
-      S08["computer-use<br/>Finder/Preview 打开真实 ZIP/PNG"]:::evidence
-      S09["completion-truth<br/>五层完成真相"]:::evidence
-      S10["skill-lifecycle-manager<br/>仅当外部轮子正式沉淀成 MeSy Skill 时交 mia-3<br/>普通代码依赖不冒充 Skill"]:::evidence
-      S11["gene-skill<br/>仅在重复真实 Episode 形成证据后改规则"]:::evidence
-      S12["aigc / imagegen<br/>角色化插图提示词与资产原型<br/>不负责最终文字排版"]:::evidence
-    end
-
-    subgraph LOCALWHEELS["E2｜本地轮子取舍"]
-      direction LR
-      W01["huashu-gpt-image-master<br/>吸收 extract_grid.py 的内容 bbox、密度扫描、透明紧裁<br/>改写为当前 JS/Sharp 合同"]:::evidence
-      W02["img2046-main<br/>吸收 ReactCrop/Konva 的拖拽、对齐线、历史栈交互<br/>不照搬其疑似 percent/pixel 混用的裁剪实现"]:::evidence
-      W03["小红书配图skill<br/>吸收封面/内页分类、一页一观点、手机可读、反 PPT QA<br/>不吸收禁止 HTML/CSS/canvas 与让模型直接画文字的生产方式"]:::evidence
-      W04["Desktop/ref<br/>封面：大标题 + 大场景<br/>内页：纵向三段、重点高亮、插图贴合段落<br/>作为结构参考，不做像素级抄袭"]:::evidence
-    end
-
-    subgraph GITHUB["E3｜优先核验的成熟源代码与官方资料"]
-      direction LR
-      G01["react-easy-crop<br/>移动、缩放、旋转、pixel/percent crop、移动端"]:::evidence
-      G02["Sharp resize/trim<br/>cover/contain、attention/entropy、边缘背景/alpha trim"]:::evidence
-      G03["smartcrop.js<br/>edge/saturation/skin/boost 候选<br/>只做候选，不做唯一裁决"]:::evidence
-      G04["MDN Container Queries<br/>让模块按自身容器回流"]:::evidence
-      G05["html-to-image<br/>DOM → PNG/SVG 的对照导出候选"]:::evidence
-      G06["Playwright screenshots/snapshots<br/>稳定环境中的元素截图与视觉回归"]:::evidence
-      G07["react-konva<br/>局部自由对象精修，不做整页真相"]:::evidence
-      G08["Lexical<br/>仅在文本编辑复杂度有证据时引入"]:::evidence
-      G09["Apple Typography<br/>iOS 默认正文 17pt、最低 11pt<br/>工作台目标：1080 导出正文约 48–54px，手机等效 16–18px"]:::evidence
-    end
-
-    S01 --> P0
-    S02 --> DEC0
-    S03 --> P0
-    S04 --> P4
-    S05 --> P1
-    S06 --> P7
-    S07 --> P7
-    S08 --> P6
-    S09 --> P7
-    S10 --> W01
-    S11 --> P8
-    S12 --> P2
-    W01 --> P2
-    W02 --> P3
-    W03 --> P4
-    W04 --> P0
-    G01 --> P3
-    G02 --> P2
-    G03 --> P3
-    G04 --> P4
-    G05 --> P6
-    G06 --> P7
-    G07 --> P5
-    G08 --> P5
-    G09 --> P4
-  end
-
-  click G01 "https://github.com/ValentinH/react-easy-crop" "react-easy-crop"
-  click G02 "https://sharp.pixelplumbing.com/api-resize/" "Sharp resize"
-  click G03 "https://github.com/jwagner/smartcrop.js/" "smartcrop.js"
-  click G04 "https://developer.mozilla.org/en-US/docs/Web/CSS/Guides/Containment/Container_queries" "MDN Container Queries"
-  click G05 "https://github.com/bubkoo/html-to-image" "html-to-image"
-  click G06 "https://playwright.dev/docs/test-snapshots" "Playwright visual snapshots"
-  click G07 "https://github.com/konvajs/react-konva" "react-konva"
-  click G08 "https://github.com/facebook/lexical" "Lexical"
-  click G09 "https://developer.apple.com/design/human-interface-guidelines/typography" "Apple Typography"
-
-  %% =====================================================================
-  %% F. Acceptance、rollback、五层真相
-  %% =====================================================================
-  subgraph CLOSE["F｜验收、回滚与完成真相"]
-    direction TB
-    subgraph ACCEPT["F1｜必须同时满足的 Acceptance"]
-      direction LR
-      A10["A10 母版：首张=上方连续 9:8 KV + 底行 A/B/C<br/>后续=3×3 连续字母；无透明边、分隔线或邻格残片"]:::gate
-      A11["A11 构图：封面上 1/3 标题、下 2/3 满宽贴底 KV<br/>正文插图 3:4；取景焦点 12–88%、缩放 100–180% 可保存"]:::gate
-      A12["A12 手机：360px 预览正文等效 ≥16–17px<br/>标题、正文、图像层级清楚"]:::gate
-      A13["A13 版式：无文字、图片、页脚溢出<br/>无无意的大块底部空洞<br/>每页只有一个明确视觉重点"]:::gate
-      A14["A14 编辑：点图片立即出现‘裁剪 / 取景’，缩放有边界<br/>文字、模块移动、undo/redo 可用；旧稿迁移结果可解释"]:::gate
-      A15["A15 导出：5 张 PNG 均非空、含预期图片区域<br/>ZIP 可解压，Finder/Preview 实际可打开"]:::gate
-      A16["A16 参考：与 Desktop/ref 对照<br/>达到大字、纵向节奏、插图服务段落、非 PPT"]:::gate
-      A17["A17 全旅程：每个按钮至少走一遍<br/>桌面与窄屏均现场截图验收"]:::gate
-      A10 & A11 & A12 & A13 & A14 & A15 & A16 & A17 --> PASSALL{"全部 PASS？"}:::gate
-    end
-
-    subgraph ROLLBACK["F2｜Rollback"]
-      direction LR
-      RB01["feature flag：HTML_CANONICAL_HYBRID"]:::stop
-      RB02["保留现有 content JSON 与旧 renderer 只读兼容"]:::stop
-      RB03["迁移只新增 schema version，不破坏原稿"]:::stop
-      RB04["任一关键验收 FAIL<br/>关闭 flag，回当前 dual mode<br/>保留失败快照与可复现实例"]:::stop
-      RB01 --> RB02 --> RB03 --> RB04
-    end
-
-    subgraph TRUTH["F3｜Completion Truth 五层"]
-      direction LR
-      CT01["mechanism_ready<br/>PASS_LOCAL：自适应母版分界、预付费内容门、单一页面合同、真实调用验证态与 DOM 文本溢出门已实现；271/271 回归"]:::target
-      CT02["package_verified<br/>PASS_LOCAL_REALITY：build、五页逐页几何、编辑/撤销与 ZIP 实物已一起完成；不等于 Preview/Production"]:::target
-      CT03["production_applied<br/>STALE：现有 dpl_Cj8uAE9utVX3oyLf6auJHMi824kj 部署事实保留，但用户现场已证明其作品质量不可交付；本轮新机制尚未部署"]:::stop
-      CT04["runtime_operational<br/>NOT RUN：本轮新切片、质量门和验证态尚未在 Preview 用真实 BYOK 回读"]:::gate
-      CT05["reality_validated<br/>PASS_LOCAL_CANDIDATE / FAIL_CURRENT_PRODUCTION：本地旧稿已重新 dogfood；正式版仍不可交付，待 Preview 新 BYOK 与稳定域名复验"]:::stop
-      CT01 --> CT02 --> CT03 --> CT04 --> CT05
-    end
-
-    PASSALL -->|是| P8
-    PASSALL -->|否| RB04
-  end
-
-  P7 --> A10
-  DEC0 -.->|必须由 P0-P7 的真实证据解除| PASSALL
-```
+原始方法来源：郭东超分享逐字稿，SHA-256 `da545e4fec3ecac4d89ac88068eb69091d7689761ac588f582145bcb8ff71f09`。
